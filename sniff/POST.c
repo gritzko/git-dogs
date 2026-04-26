@@ -31,6 +31,7 @@
 #include "abc/PRO.h"
 #include "dog/IGNO.h"
 #include "dog/QURY.h"
+#include "dog/WHIFF.h"
 #include "keeper/GIT.h"
 #include "keeper/REFS.h"
 #include "keeper/SHA1.h"
@@ -1192,9 +1193,17 @@ ok64 POSTCommit(u8cs reporoot, u8cs message, u8cs author, sha1 *sha_out) {
             if (SNIFFPath(rel, i) != OK) continue;
             u8csc bpath = {rel[0], rel[1]};
             a_dup(u8c, body, u8bData(r->content));
+            //  Delta base: when this path was in the baseline tree, the
+            //  prior blob sha is the natural OFS/REF_DELTA target —
+            //  small edits then ride the wire / pack as a bsdiff
+            //  rather than a fresh zlib-of-everything.  No baseline
+            //  → no base → KEEPPackFeed stores the full content.
+            u64 base_hl = 0;
+            if (ctx.flag[i] & POST_IN_BASE)
+                base_hl = WHIFFHashlet60(&r->old_sha);
             sha1 bsha = {};
             ok64 bo = KEEPPackFeed(k, &p, DOG_OBJ_BLOB, body,
-                                   bpath, 0, &bsha);
+                                   bpath, base_hl, &bsha);
             if (bo != OK) {
                 KEEPPackClose(k, &p);
                 u8bFree(tree_bodies);
