@@ -50,7 +50,7 @@ head_hex() {
 echo "=== 1. be post (auto-stage) on a fresh worktree ==="
 D1="$TMP/r1"; mkdir -p "$D1"; cd "$D1"
 echo hello > README
-"$BE" post -m "initial" >/dev/null
+"$BE" post initial >/dev/null
 H1=$(head_hex)
 [ -n "$H1" ] || fail "HEAD unset after be post"
 note "HEAD=$H1"
@@ -80,7 +80,7 @@ awk -F'\t' '$2 == "put" && $3 == "b.txt"' .sniff | grep -q . \
     || fail "no \`put b.txt\` row in ULOG"
 note "ULOG records two put rows"
 
-"$BE" post -m "a+b" >/dev/null
+"$BE" post a plus b >/dev/null
 C3=$(head_hex)
 note "HEAD=$C3"
 
@@ -99,7 +99,7 @@ echo "=== 4. modify + bare be post (implicit all-dirty) ==="
 cd "$D3b"
 sleep 1                               # force distinct mtime
 echo alpha-v2 > a.txt
-"$BE" post -m "a-v2" >/dev/null
+"$BE" post a v2 >/dev/null
 C4=$(head_hex)
 [ "$C4" != "$C3" ] || fail "HEAD unchanged after modify + post"
 note "HEAD=$C4"
@@ -117,7 +117,7 @@ note "a.txt updated on disk after be get"
 echo "=== 5. be delete a.txt ==="
 cd "$D4b"
 "$BE" delete a.txt >/dev/null
-"$BE" post -m "drop a" >/dev/null
+"$BE" post drop a >/dev/null
 want_missing a.txt                    # POST must unlink explicit deletes
 C5=$(head_hex)
 
@@ -138,7 +138,7 @@ want_file a.txt "alpha"
 want_file b.txt "bravo"
 rm a.txt                              # vanish one without a `delete` row
 "$BE" delete >/dev/null               # no-op (bare); sweep happens at post
-"$BE" post -m "auto-delete" >/dev/null
+"$BE" post auto delete >/dev/null
 C6=$(head_hex)
 
 D6b="$TMP/r6b"; mkdir -p "$D6b"; cd "$D6b"
@@ -163,7 +163,7 @@ echo bravo    > lib/sub/b.txt
 echo untracked > top.txt                 # not put → should not appear
 
 "$BE" put lib/ >/dev/null
-"$BE" post -m "put lib/" >/dev/null
+"$BE" post put lib >/dev/null
 C7=$(head_hex)
 [ -n "$C7" ] || fail "HEAD unset after be post"
 note "HEAD=$C7"
@@ -192,7 +192,7 @@ echo deep       > mk/sub/inner.txt
 echo deep-gone  > mk/sub/inner.tmp
 
 "$BE" put mk/ >/dev/null
-"$BE" post -m "put mk with igno" >/dev/null
+"$BE" post put mk with igno >/dev/null
 C8=$(head_hex)
 note "HEAD=$C8"
 
@@ -222,7 +222,7 @@ echo v1 > src/foo.c
 echo top > README
 "$BE" put src/foo.c >/dev/null           # baseline: just src/foo.c
 "$BE" put README   >/dev/null
-"$BE" post -m "baseline" >/dev/null
+"$BE" post baseline >/dev/null
 C9a=$(head_hex)
 note "baseline HEAD=$C9a"
 
@@ -230,7 +230,7 @@ sleep 1
 echo v2 > src/foo.c                      # modify tracked
 echo stray > src/bar.c                   # add untracked
 "$BE" put src/ >/dev/null
-"$BE" post -m "tracked-only src/" >/dev/null
+"$BE" post tracked only src >/dev/null
 C9b=$(head_hex)
 [ "$C9b" != "$C9a" ] || fail "HEAD unchanged after modify+put dir"
 note "updated HEAD=$C9b"
@@ -256,12 +256,12 @@ D10="$TMP/r10"; mkdir -p "$D10/dd/inner"; cd "$D10"
 echo a > dd/a.txt
 echo b > dd/inner/b.txt
 echo k > keep.txt
-"$BE" post -m "seed dd" >/dev/null       # implicit: all three land
+"$BE" post seed dd >/dev/null       # implicit: all three land
 C10a=$(head_hex)
 note "baseline HEAD=$C10a"
 
 "$BE" delete dd/ >/dev/null
-"$BE" post -m "drop dd" >/dev/null
+"$BE" post drop dd >/dev/null
 C10b=$(head_hex)
 [ "$C10b" != "$C10a" ] || fail "HEAD unchanged after delete dir"
 want_missing dd/a.txt

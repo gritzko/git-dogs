@@ -35,6 +35,11 @@ b8 DOGIsProjector(u8cs scheme);
 // isn't a projector.  The returned cstr has static lifetime.
 char const *DOGProjectorDog(u8cs scheme);
 
+// YES iff `scheme` names a known transport (`ssh`, `https`, `file`,
+// `be`, …).  Used by the CLI tokenizer to decide whether `<word>:`
+// at the start of an arg is a URI scheme or a prose colon.
+b8 DOGIsTransport(u8cs scheme);
+
 // Parse a URI string with dog-specific normalization:
 //   1. Invoke abc/URILexer for strict RFC 3986 parsing.
 //   2. If the parsed URI has a scheme but no authority and its

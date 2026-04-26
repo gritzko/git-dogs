@@ -158,13 +158,21 @@ default, `-1` for in-place).
 
 POST commits the current base tree or pushes it to a peer.
 
+Free-form trailing words after the verb (and any URI) are joined
+with `' '` and folded into the URI's `#fragment` — that's where the
+commit message lives.  No quoting tricks, no `-m` flag.  A token
+counts as a URI only if it contains one of `/`, `.`, `:`, `?`, `#`,
+or is a 40-hex object id; otherwise it kicks off the message tail.
+Bare names like `README` need a leading `./` to be parsed as paths.
+(Legacy: `-m "msg"` is still accepted.)
+
 | Form | Effect |
 |---|---|
-| `be post -m "msg"`                 | Commit the staged base tree to the current branch; append to `REFS`; promote `stage.sniff` into a new `NNNNN.keeper`. |
-| `be post . -m "msg"`               | Bulk-stage subtree then commit. |
-| `be post file.c -m "msg"`          | Stage the one file then commit. |
-| `be post ?./fix -m "msg"`          | Commit to sub-branch `fix` off the current branch (create the dir if missing). |
-| `be post ?heads/feat/fix1 -m "…"`  | Same, absolute path. |
+| `be post fix the parser`           | Commit the staged base tree; message is the trailing words. |
+| `be post . fix the parser`         | Bulk-stage subtree then commit. |
+| `be post ./file.c fix the parser`  | Stage the one file then commit. |
+| `be post ?./fix add fix1`          | Commit to sub-branch `fix` off the current branch (create the dir if missing). |
+| `be post ?heads/feat/fix1 land it` | Same, absolute path. |
 | `be post //origin`                 | Push current branch's pack-log tail + REFS to origin via git's receive-pack wire (`keeper/WIRE.md`).  Fast-forward only. |
 | `be post //origin?heads/feat`      | Push that branch specifically. |
 
@@ -286,13 +294,13 @@ be get ?./feat              # fork heads/<trunk>/feat; new wt in sibling dir
 cd ../proj-feat             # …which landed here (convention)
 # hack, stage, commit
 echo patch > new.c
-be post . -m "feat: stub"
+be post . feat stub
 be post //origin            # push the branch
 
 # back on trunk wt
 cd ../proj
 be patch ?heads/feat        # pull feat's delta into trunk's wt
-be post -m "merge feat"     # squash-merge onto trunk
+be post merge feat          # squash-merge onto trunk
 ```
 
 ### Example 4 — close a worktree
@@ -315,16 +323,16 @@ drop the branch.
 | `git clone URL`                        | `be get //URL` |
 | `git fetch`                            | `be get //origin?*` |
 | `git pull --ff-only`                   | `be get //origin` |
-| `git pull`                             | `be patch //origin` then `be post -m "…"` |
+| `git pull`                             | `be patch //origin` then `be post merge` |
 | `git checkout -b feat` (from trunk)    | `be get ?./feat` |
 | `git checkout -b feat` (short)         | `be get ?feat` |
 | `git checkout feat`                    | `be get -1 ?heads/feat` |
 | `git worktree add ../feat feat`        | `cd ../feat && be get file:../proj?heads/feat` |
-| `git add file && git commit -m`        | `be put file && be post -m "…"` |
-| `git commit -am "…"`                   | `be post . -m "…"` |
-| `git rm file && commit`                | `be delete file && be post -m "…"` |
+| `git add file && git commit -m`        | `be put ./file && be post msg` |
+| `git commit -am "…"`                   | `be post . msg` |
+| `git rm file && commit`                | `be delete ./file && be post msg` |
 | `git branch -d feat`                   | `be delete ?heads/feat` |
-| `git merge trunk`                      | `be patch ?heads/trunk && be post -m "merge trunk"` |
+| `git merge trunk`                      | `be patch ?heads/trunk && be post merge trunk` |
 | `git cherry-pick <sha>`                | `be patch ?<sha>^..?<sha>` |
 | `git push`                             | `be post //origin` |
 | `git push -d origin feat`              | `be delete //origin?heads/feat` |

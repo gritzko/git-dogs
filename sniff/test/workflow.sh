@@ -61,7 +61,7 @@ echo "=== 1. initial post auto-stages worktree ==="
 D1="$TMP/r1"
 mkdir -p "$D1"; cd "$D1"
 echo "hello" > README.md
-"$SNIFF" post -m "initial" >/dev/null
+"$SNIFF" post initial >/dev/null
 H1=$(head_hex)
 [ -n "$H1" ] || fail "HEAD unset after post"
 note "HEAD=$H1"
@@ -108,7 +108,7 @@ awk -F'\t' '$2 == "put" && $3 == "b.txt"' .sniff | grep -q . \
     || fail "no `put b.txt` row in ULOG"
 note "ULOG records two put rows"
 
-"$SNIFF" post -m "a+b" >/dev/null
+"$SNIFF" post a plus b >/dev/null
 C3=$(head_hex)
 [ -n "$C3" ] || fail "HEAD unset"
 note "HEAD after post=$C3"
@@ -133,7 +133,7 @@ echo alpha-two > a.txt                  # modify
 "$SNIFF" put >/dev/null                 # no-op: no args
 #  No new put/delete rows since the last post → POST falls into
 #  implicit mode: every mtime-dirty file is rewritten.
-"$SNIFF" post -m "modify a" >/dev/null
+"$SNIFF" post modify a >/dev/null
 C4=$(head_hex)
 [ "$C4" != "$C3" ] || fail "HEAD unchanged after modify+post"
 note "new HEAD=$C4"
@@ -154,7 +154,7 @@ cd "$D4b"
 "$SNIFF" delete a.txt >/dev/null
 awk -F'\t' '$2 == "delete" && $3 == "a.txt"' .sniff | grep -q . \
     || fail "no \`delete a.txt\` row in ULOG"
-"$SNIFF" post -m "drop a" >/dev/null
+"$SNIFF" post drop a >/dev/null
 want_missing a.txt                      # POST must unlink
 C5=$(head_hex)
 note "HEAD after delete=$C5"
@@ -178,7 +178,7 @@ want_file a.txt "alpha"
 want_file b.txt "bravo"
 rm a.txt                                # vanish one without a `delete` row
 "$SNIFF" delete >/dev/null              # no-op (bare); sweep happens at post
-"$SNIFF" post -m "auto-delete" >/dev/null
+"$SNIFF" post auto delete >/dev/null
 C6=$(head_hex)
 
 D6b="$TMP/r6b"; mkdir -p "$D6b"; cd "$D6b"
@@ -201,7 +201,7 @@ name = "Test User"
 email = "test@example.com"
 EOF
 echo hello > README.md
-"$SNIFF" post -m "config-author" >/dev/null
+"$SNIFF" post config author >/dev/null
 C7=$(head_hex)
 [ -n "$C7" ] || fail "HEAD unset after post"
 body=$("$KEEPER" get ".#$C7" 2>/dev/null)

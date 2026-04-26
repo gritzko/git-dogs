@@ -72,6 +72,12 @@ target_compile_options(DOGtest PRIVATE ${TEST_CXX_FLAGS})
 target_link_libraries(DOGtest dog abc-core)
 add_test(NAME DOGtest COMMAND DOGtest)
 
+add_executable(CLItest CLI.c)
+target_link_options(CLItest PRIVATE ${TEST_LDD_FLAGS})
+target_compile_options(CLItest PRIVATE ${TEST_CXX_FLAGS})
+target_link_libraries(CLItest dog abc-core)
+add_test(NAME CLItest COMMAND CLItest)
+
 add_executable(HOMEtest HOME.c)
 target_link_options(HOMEtest PRIVATE ${TEST_LDD_FLAGS})
 target_compile_options(HOMEtest PRIVATE ${TEST_CXX_FLAGS})

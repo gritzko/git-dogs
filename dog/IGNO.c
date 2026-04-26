@@ -232,22 +232,38 @@ static b8 igno_is_meta(u8cs rel) {
     return NO;
 }
 
+//  Apply every pattern (last-match-wins) to a single path/is_dir pair.
+//  Caller controls iteration over the path's parent prefixes — see
+//  IGNOMatch.  Splitting this out avoids re-checking already-tested
+//  prefixes when we walk up the tree.
+static b8 igno_match_one(ignocp ig, u8cs path, b8 is_dir) {
+    b8 ignored = NO;
+    for (u64 i = 0; i < ig->count; i++) {
+        igno_pat const *pat = &ig->patterns[i];
+        if (TryMatch(pat, path, is_dir)) ignored = !pat->negated;
+    }
+    return ignored;
+}
+
 b8 IGNOMatch(ignocp ig, u8cs rel_path, b8 is_dir) {
     if ($empty(rel_path)) return NO;
     if (igno_is_meta(rel_path)) return YES;
     if (!ig || ig->count == 0) return NO;
 
-    // Start with not ignored
-    b8 ignored = NO;
+    //  First, the path itself — covers file patterns and dir patterns
+    //  applied to the dir entry.
+    if (igno_match_one(ig, rel_path, is_dir)) return YES;
 
-    // Apply patterns in order (last matching pattern wins)
-    for (u64 i = 0; i < ig->count; i++) {
-        igno_pat const *pat = &ig->patterns[i];
-
-        if (TryMatch(pat, rel_path, is_dir)) {
-            ignored = !pat->negated;
-        }
+    //  Git semantics: a `dir/` pattern that matches any parent of this
+    //  path also ignores everything beneath, including files.  Walk
+    //  every prefix `a`, `a/b`, … with is_dir=YES so directory-only
+    //  patterns can fire.  Stops short of the full path (already
+    //  tested above).  Negations on parents intentionally don't
+    //  un-ignore descendants here — that's the same shortcut git takes.
+    for (u8cp p = rel_path[0]; p < rel_path[1]; p++) {
+        if (*p != '/') continue;
+        u8cs prefix = {rel_path[0], p};
+        if (igno_match_one(ig, prefix, YES)) return YES;
     }
-
-    return ignored;
+    return NO;
 }

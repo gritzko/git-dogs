@@ -444,24 +444,35 @@ static ok64 BEPatch(cli *c, b8 seq) {
 }
 
 //  `be post`:
-//    -m <msg>  → sniff makes a local commit (always).
-//    <uri>     → keeper pushes the current commit to that remote.
-//    bare     → sniff does a dry-run change-set print; no commit, no push.
+//    <free-form tail> → fragment carries the commit message; sniff
+//                       commits locally.  (Legacy `-m <msg>` flag still
+//                       works as a fallback.)
+//    <uri>            → keeper pushes the current commit to that remote.
+//    bare             → sniff prints the dry-run change-set; no commit.
 static ok64 BEPost(cli *c, b8 seq) {
     sane(c);
-    uri *u = (c->nuris > 0) ? &c->uris[0] : NULL;
-    b8 has_remote = (u != NULL && !u8csEmpty(u->authority));
-    a_cstr(mf, "-m");
+    b8 has_remote = NO;
+    for (u32 i = 0; i < c->nuris; i++) {
+        if (!u8csEmpty(c->uris[i].authority)) { has_remote = YES; break; }
+    }
+    //  Commit-message presence: any URI with a non-empty fragment (the
+    //  new convention) or a legacy `-m` flag.
     b8 has_msg = NO;
-    for (u32 fi = 0; fi + 1 < c->nflags; fi += 2) {
-        if ($eq(c->flags[fi], mf)) { has_msg = YES; break; }
+    for (u32 i = 0; i < c->nuris; i++) {
+        if (!u8csEmpty(c->uris[i].fragment)) { has_msg = YES; break; }
+    }
+    if (!has_msg) {
+        a_cstr(mf, "-m");
+        for (u32 fi = 0; fi + 1 < c->nflags; fi += 2) {
+            if ($eq(c->flags[fi], mf)) { has_msg = YES; break; }
+        }
     }
     dog_step steps[2];
     u32 nsteps = 0;
-    //  Sniff runs whenever we have something to commit (-m), something
-    //  to label (a URI with `?ref`), or nothing — bare invocation prints
-    //  the would-be change-set and exits.
-    if (has_msg || u != NULL || !has_remote) {
+    //  Sniff runs whenever we have something to commit, a label URI
+    //  (`?ref`), or nothing — bare invocation prints the would-be
+    //  change-set and exits.
+    if (has_msg || c->nuris > 0 || !has_remote) {
         steps[nsteps++] = (dog_step){u8slit("sniff"),  u8slit("post"), NO};
     }
     if (has_remote) {
@@ -515,8 +526,11 @@ ok64 becli() {
     sane(1);
     call(FILEInit);
 
+    //  -m / --author take a following value (legacy commit-message
+    //  flag — the new convention is to fold trailing words into the
+    //  URI fragment, but `-m` remains accepted).
     cli c = {};
-    call(CLIParse, &c, BE_VERB_NAMES, NULL);
+    call(CLIParse, &c, BE_VERB_NAMES, "-m\0--author\0");
 
     if (CLIHas(&c, "-h") || CLIHas(&c, "--help")) {
         BEUsage();

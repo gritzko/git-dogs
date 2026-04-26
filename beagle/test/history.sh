@@ -4,12 +4,12 @@
 #  verify that files that appear/disappear do so correctly.
 #
 #  Flow:
-#    1. `be post -m v1 ?tags/v0.0.1`  — seed: hello.txt + other.txt
+#    1. `be post ?tags/v0.0.1 v1`  — seed: hello.txt + other.txt
 #    2. `be delete hello.txt`
-#       `be post -m v2 ?tags/v0.0.2`  — drop hello.txt
+#       `be post ?tags/v0.0.2 v2`  — drop hello.txt
 #    3. edit other.txt
-#       `be post -m v3 ?tags/v0.0.3`  — other.txt changed, plus add
-#                                        extra.txt
+#       `be post ?tags/v0.0.3 v3`  — other.txt changed, plus add
+#                                    extra.txt
 #    4. for each tag, `be get ?tags/v<n>` and check the worktree
 #       matches the expected snapshot (files present/absent +
 #       content).
@@ -47,13 +47,13 @@ R="$TMP/r"; mkdir -p "$R"; cd "$R"
 git init --quiet .
 echo "alpha v1" > hello.txt
 echo "stable"   > other.txt
-"$BE" post -m v1 "?tags/v0.0.1" >/dev/null
+"$BE" post "?tags/v0.0.1" v1 >/dev/null
 note "v0.0.1 labeled"
 
 # --- 2. v2 (delete hello.txt) ----------------------------------------
 echo "=== 2. delete hello.txt, tag v0.0.2 ==="
 "$BE" delete hello.txt >/dev/null
-"$BE" post -m v2 "?tags/v0.0.2" >/dev/null
+"$BE" post "?tags/v0.0.2" v2 >/dev/null
 note "v0.0.2 labeled"
 
 # --- 3. v3 (edit other.txt + add extra.txt) --------------------------
@@ -65,7 +65,7 @@ echo "new file" > extra.txt
 #  put/delete, post commits only tracked files").  Modified tracked
 #  files (other.txt) still auto-stage in this selective-mode post.
 "$BE" put extra.txt >/dev/null
-"$BE" post -m v3 "?tags/v0.0.3" >/dev/null
+"$BE" post "?tags/v0.0.3" v3 >/dev/null
 note "v0.0.3 labeled"
 
 # --- 4. verify each version -------------------------------------------

@@ -44,6 +44,24 @@ char const *DOGProjectorDog(u8cs scheme) {
     return r ? r->dog : NULL;
 }
 
+//  Known transport schemes (VERBS.md §"Transport schemes").  Kept as a
+//  table next to DOG_PROJECTORS so adding a transport is a one-row
+//  edit.  CLI.c uses this to disambiguate `word:` — known scheme = URI,
+//  unknown = prose (e.g. a `cli:` conventional-commit prefix).
+static char const *const DOG_TRANSPORTS[] = {
+    "ssh", "https", "http", "git", "file", "be", NULL
+};
+
+b8 DOGIsTransport(u8cs scheme) {
+    if ($empty(scheme)) return NO;
+    size_t n = (size_t)$len(scheme);
+    for (char const *const *t = DOG_TRANSPORTS; *t; t++) {
+        size_t pl = strlen(*t);
+        if (pl == n && memcmp(scheme[0], *t, pl) == 0) return YES;
+    }
+    return NO;
+}
+
 static b8 dog_is_projector(u8cs scheme) {
     return DOGIsProjector(scheme);
 }

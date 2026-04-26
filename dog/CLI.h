@@ -10,9 +10,16 @@
 
 // Parsed CLI state.
 //
-//   dog [verb] [--flags] URI*
+//   dog [verb] [--flags] [URI] [free-form tail...]
 //
-// All slices borrow from argv (no allocation).
+// Most slices borrow from argv (no allocation).  The exception is the
+// fragment-tail buffer — when a non-flag arg has none of `/.:?#` (i.e.
+// is not URI-shaped), that arg and all remaining non-flag args are
+// joined with ' ' into _tail and surfaced as a synthetic URI with just
+// the fragment set.  This is how commit messages, search strings, and
+// other free-form text reach the dogs without needing a flag like -m
+// or quoting tricks.
+//
 // flags[] is interleaved: [flag0, val0, flag1, val1, ...].
 // Boolean flags have an empty val. nuris/nflags count entries,
 // not pairs — nflags is always even (flag + val = 2 entries).
@@ -22,8 +29,10 @@ typedef struct {
     u32    nflags;                   // count of entries (= 2 * npairs)
     uri    uris[CLI_MAX_URIS];       // parsed URI targets
     u32    nuris;
-    char   _repo[1024];               // owned storage for repo root
+    char   _repo[1024];              // owned storage for repo root
     u8cs   repo;                     // repo root (points into _repo)
+    char   _tail[4096];              // owned storage for fragment-tail
+    u32    _tail_len;                // bytes used in _tail
     b8     tty_out;                  // isatty(STDOUT)
 } cli;
 

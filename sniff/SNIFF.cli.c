@@ -75,8 +75,14 @@ ok64 sniffcli() {
     if (is_post_dryrun) {
         for (u32 fi = 0; fi + 1 < c.nflags; fi += 2)
             if ($eq(c.flags[fi], v_mflag)) { is_post_dryrun = NO; break; }
-        for (u32 i = 0; i < c.nuris; i++)
-            if (!$empty(c.uris[i].query)) { is_post_dryrun = NO; break; }
+        //  A URI with a label (`?ref`) commits.  A URI with a fragment
+        //  (free-form commit message per VERBS.md) commits.  Bare
+        //  `sniff post` with no URIs at all → dry run.
+        for (u32 i = 0; i < c.nuris; i++) {
+            if (!$empty(c.uris[i].query) || !$empty(c.uris[i].fragment)) {
+                is_post_dryrun = NO; break;
+            }
+        }
     }
     b8 ro = $eq(c.verb, v_status) || $eq(c.verb, v_list) || is_projector
          || is_post_dryrun;

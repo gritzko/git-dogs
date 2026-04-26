@@ -62,8 +62,8 @@ keeper's object store. HEAD does not move.
 
 ### Post — commit the base tree
 
-    be post -m "fix the parser"      # commit; auto-stage dirty if needed
-    be post -m "release" //origin    # commit and push to the remote
+    be post fix the parser           # commit; trailing words = message
+    be post //origin release          # commit and push to the remote
 
 `be post` wraps the current base tree into a commit with parent =
 HEAD, advances HEAD, and updates refs. With a remote authority in the
@@ -85,11 +85,11 @@ same token-level unified hunk format `graf diff` emits on disk.
 
     mkdir my-repo && cd my-repo
     echo 'int main(){return 0;}' > hello.c
-    be post -m "initial"             # first commit, auto-stages hello.c
+    be post initial commit           # first commit, auto-stages hello.c
 
     echo 'printf("hi\n");' >> hello.c
-    be put hello.c                   # stage the edit
-    be post -m "greet"               # commit
+    be put ./hello.c                 # stage the edit
+    be post greet                    # commit
 
     be get ?$(cat .dogs/sniff/HEAD)  # round-trip: recheck out HEAD
 

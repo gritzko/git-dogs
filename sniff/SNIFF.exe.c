@@ -415,9 +415,11 @@ static void sniff_usage(void) {
             "                              (alias: checkout)\n"
             "  sniff put <path>...         record `put` rows in the ULOG\n"
             "  sniff delete <path>...      record `delete` rows in the ULOG\n"
-            "  sniff post -m <msg>         commit: walk baseline + wt,\n"
-            "                              resolve change-set, feed one pack\n"
-            "                              (alias: commit)\n"
+            "  sniff post <msg words...>   commit: walk baseline + wt,\n"
+            "                              resolve change-set, feed one pack.\n"
+            "                              Trailing free-form words become\n"
+            "                              the commit message via the URI's\n"
+            "                              #fragment.  (alias: commit)\n"
             "  sniff patch ?<ref|sha>      3-way merge the given ref/sha\n"
             "                              into the wt via graf\n"
             "  sniff status                list mtime-dirty files\n"
@@ -437,7 +439,7 @@ static void sniff_usage(void) {
             "    missing files with explicit-delete OR in implicit mode ⇒ drop.\n"
             "\n"
             "  Flags:\n"
-            "    -m <msg>       commit message\n"
+            "    -m <msg>       commit message (legacy; prefer trailing words)\n"
             "    --author <who> author string\n");
 }
 
@@ -513,7 +515,16 @@ ok64 SNIFFExec(cli *c) {
 
     if (is_post) {
         u8cs commit_msg = {};
-        CLIFlag(commit_msg, c, "-m");
+        //  Per VERBS.md: free-form trailing words are folded into a
+        //  URI's #fragment by CLIParse.  Prefer that over the legacy
+        //  `-m <msg>` flag, which still works for backwards compat.
+        for (u32 i = 0; i < c->nuris; i++) {
+            if (!u8csEmpty(c->uris[i].fragment)) {
+                $mv(commit_msg, c->uris[i].fragment);
+                break;
+            }
+        }
+        if (!$ok(commit_msg)) CLIFlag(commit_msg, c, "-m");
         u8cs commit_author = {};
         CLIFlag(commit_author, c, "--author");
         //  Default identity: assemble `<name> <<email>>` from the wt's
