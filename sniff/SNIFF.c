@@ -76,7 +76,7 @@ ok64 SNIFFOpen(home *h, b8 rw) {
     sane(h);
 
     if (sniff_is_open()) {
-        if (rw && !sniff_is_rw) return SNIFFOPENRO;
+        if (rw && !sniff_is_rw) return SNIFFOPRO;
         return SNIFFOPEN;
     }
 

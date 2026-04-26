@@ -38,6 +38,9 @@ typedef struct {
                                 // during prune).
     u32            target_cap;
     ok64           error;
+    b8             dryrun;      // pre-flight: don't write blobs; instead
+                                // count overlap-with-dirty conflicts.
+    u32            conflicts;   // populated in dryrun mode.
 } get_ctx;
 
 static void get_mark_target(get_ctx *g, u32 idx) {
@@ -53,27 +56,16 @@ static b8 get_is_target(get_ctx const *g, u32 idx) {
 }
 
 //  Write one blob to disk, create dirs as needed, chmod if exec,
-//  symlink if link; then stamp it with ctx->tv.  Dirty-protect by
-//  skipping when the on-disk mtime is not a known stamp.
+//  symlink if link; then stamp it with ctx->tv.  Caller is
+//  responsible for the dirty-overlap pre-flight (see get_visit's
+//  dryrun branch and GETCheckout); reaching here means no dirty
+//  collision was detected.
 static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
     sane(g);
     keeper *k = g->k;
 
     a_path(fp);
     call(SNIFFFullpath, fp, g->reporoot, path);
-
-    //  Dirty-protect: if file exists with an unknown mtime, skip.
-    struct stat xb = {};
-    if (lstat((char *)u8bDataHead(fp), &xb) == 0) {
-        struct timespec xt = {.tv_sec = xb.st_mtim.tv_sec,
-                              .tv_nsec = xb.st_mtim.tv_nsec};
-        ron60 xr = SNIFFAtOfTimespec(xt);
-        if (!SNIFFAtKnown(xr)) {
-            fprintf(stderr, "sniff: skip dirty %.*s\n",
-                    (int)$len(path), (char *)path[0]);
-            done;
-        }
-    }
 
     Bu8 bbuf = {};
     call(u8bAllocate, bbuf, 1UL << 24);
@@ -107,6 +99,27 @@ static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
     done;
 }
 
+//  In dryrun mode: lstat the target path; if it exists with an
+//  unknown mtime, count it as an overlap conflict.  No writes.
+static ok64 get_check_overlap_one(get_ctx *g, u8cs path) {
+    sane(g);
+    a_path(fp);
+    call(SNIFFFullpath, fp, g->reporoot, path);
+    struct stat xb = {};
+    if (lstat((char *)u8bDataHead(fp), &xb) != 0) done;
+    struct timespec xt = {.tv_sec = xb.st_mtim.tv_sec,
+                          .tv_nsec = xb.st_mtim.tv_nsec};
+    ron60 xr = SNIFFAtOfTimespec(xt);
+    if (!SNIFFAtKnown(xr)) {
+        if (g->conflicts < 5) {
+            fprintf(stderr, "sniff: dirty overlap %.*s\n",
+                    (int)$len(path), (char *)path[0]);
+        }
+        g->conflicts++;
+    }
+    done;
+}
+
 static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
                       void0p vctx) {
     (void)blob;  // lazy mode
@@ -115,7 +128,8 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     if (kind == WALK_KIND_SUB) return WALKSKIP;
 
     if (kind == WALK_KIND_DIR) {
-        if ($empty(path)) return OK;  // root; walker recurses
+        if (g->dryrun) return OK;       // pre-flight: skip dir creation
+        if ($empty(path)) return OK;    // root; walker recurses
         a_path(dp);
         SNIFFFullpath(dp, g->reporoot, path);
         FILEMakeDirP($path(dp));
@@ -128,6 +142,13 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
         u32 idx = SNIFFIntern(path);
         get_mark_target(g, idx);
     }
+
+    if (g->dryrun) {
+        ok64 o = get_check_overlap_one(g, path);
+        if (o != OK) g->error = o;
+        return o;
+    }
+
     ok64 o = get_write_one(g, path, kind, esha);
     if (o != OK) g->error = o;
     return o;
@@ -178,6 +199,58 @@ static ok64 get_prune(get_ctx *g) {
     if (pctx.pruned > 0)
         fprintf(stderr, "sniff: pruned %u file(s)\n", pctx.pruned);
     done;
+}
+
+// --- Pre-flight: cross-branch wt-dirty scan ---
+//
+//  Walks every non-meta file in the wt; if any has an mtime that
+//  isn't in sniff's stamp-set, the wt is considered dirty and a
+//  cross-branch GET must refuse.  Same membership rule as
+//  `sniff status`.
+
+typedef struct {
+    u8cs reporoot;
+    b8   dirty;
+    u32  count;
+} get_wt_dirty_ctx;
+
+static ok64 get_wt_dirty_cb(void *varg, path8bp path) {
+    sane(varg);
+    get_wt_dirty_ctx *d = (get_wt_dirty_ctx *)varg;
+    a_dup(u8c, full, u8bData(path));
+
+    u8cs rel = {};
+    if (!SNIFFRelFromFull(&rel, d->reporoot, full)) return OK;
+    if (SNIFFSkipMeta(rel))                          return OK;
+
+    struct stat sb = {};
+    if (lstat((char const *)full[0], &sb) != 0) return OK;
+    struct timespec ts = {.tv_sec = sb.st_mtim.tv_sec,
+                          .tv_nsec = sb.st_mtim.tv_nsec};
+    ron60 r = SNIFFAtOfTimespec(ts);
+    if (!SNIFFAtKnown(r)) {
+        if (d->count < 5) {
+            fprintf(stderr, "sniff: dirty %.*s\n",
+                    (int)$len(rel), (char *)rel[0]);
+        }
+        d->count++;
+        d->dirty = YES;
+    }
+    return OK;
+}
+
+static b8 get_wt_dirty(u8cs reporoot) {
+    get_wt_dirty_ctx ctx = {.dirty = NO, .count = 0};
+    ctx.reporoot[0] = reporoot[0];
+    ctx.reporoot[1] = reporoot[1];
+    a_path(wp);
+    u8bFeed(wp, reporoot);
+    if (PATHu8bTerm(wp) != OK) return NO;
+    (void)FILEScan(wp,
+                   (FILE_SCAN)(FILE_SCAN_FILES | FILE_SCAN_LINKS |
+                               FILE_SCAN_DEEP),
+                   get_wt_dirty_cb, &ctx);
+    return ctx.dirty;
 }
 
 // --- Public API ---
@@ -254,6 +327,41 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         fail(SNIFFFAIL);
     }
 
+    //  --- Pre-flight gate: cross-branch wt-dirty refuse ---------
+    //  Compare baseline branch (latest get/post/patch row) to the
+    //  target branch.  When they differ, any unattributed mtime in
+    //  the wt blocks the switch — the caller must commit, stash,
+    //  or reset before `be get` will move them off the current
+    //  branch.  Same-branch GETs (refresh, restore wiped wt, or
+    //  switch tips on the same branch) skip this gate; the per-
+    //  file overlap pre-flight further down is sufficient there.
+    {
+        ron60 bts = 0, bverb = 0;
+        uri bu = {};
+        if (SNIFFAtBaseline(&bts, &bverb, &bu) == OK) {
+            u8cs t_branch = {};
+            if ($ok(source) && !u8csEmpty(source) &&
+                *source[0] == '?' && $len(source) != 41) {
+                t_branch[0] = $atp(source, 1);
+                t_branch[1] = source[1];
+            }
+            u8cs b_branch = {bu.query[0], bu.query[1]};
+            ssize_t bl = $len(b_branch), tl = $len(t_branch);
+            b8 same_branch =
+                (bl == tl) &&
+                (bl == 0 ||
+                 memcmp(b_branch[0], t_branch[0], (size_t)bl) == 0);
+
+            if (!same_branch && get_wt_dirty(reporoot)) {
+                fprintf(stderr,
+                        "sniff: cross-branch GET refused "
+                        "— wt is dirty\n");
+                fail(SNIFFDRTY);
+            }
+        }
+    }
+    //  --- end pre-flight gate ------------------------------------
+
     get_ctx ctx = {.k = k, .error = OK};
     ctx.reporoot[0] = reporoot[0];
     ctx.reporoot[1] = reporoot[1];
@@ -264,6 +372,24 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     ctx.target_cap = SNIFFCount() + (1u << 20);
     call(u8bAllocate, ctx.target, ctx.target_cap);
     memset(u8bDataHead(ctx.target), 0, ctx.target_cap);
+
+    //  Pre-flight overlap pass: walk the target tree without writing
+    //  any blobs; count files that exist on disk with an unknown
+    //  mtime (would clobber user edits).  Bitmap marks are kept and
+    //  reused by the real walk below.
+    ctx.dryrun = YES;
+    o = WALKTreeLazy(k, tree_sha.data, get_visit, &ctx);
+    if (o == OK && ctx.error != OK) o = ctx.error;
+    if (o != OK) { u8bFree(ctx.target); return o; }
+    if (ctx.conflicts > 0) {
+        fprintf(stderr,
+                "sniff: GET refused — %u dirty file(s) in target "
+                "tree; commit, stash, or reset before checkout\n",
+                ctx.conflicts);
+        u8bFree(ctx.target);
+        fail(SNIFFOVRL);
+    }
+    ctx.dryrun = NO;
 
     o = WALKTreeLazy(k, tree_sha.data, get_visit, &ctx);
     if (o == OK && ctx.error != OK) o = ctx.error;

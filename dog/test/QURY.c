@@ -128,6 +128,26 @@ static const QREFMultiCase QREF_MULTI[] = {
 
 #define QREF_NMULTI (sizeof(QREF_MULTI) / sizeof(QREF_MULTI[0]))
 
+// --- Relative-prefix cases (./, ../, bare ..) ---
+
+typedef struct {
+    const char *input;
+    u8 type;
+    const char *body;
+    u8 rel;
+} QREFRelCase;
+
+static const QREFRelCase QREF_REL[] = {
+    {"./fix",           QURY_REF, "fix",     QURY_REL_DOWN},
+    {"./feat/sub",      QURY_REF, "feat/sub", QURY_REL_DOWN},
+    {"../fix",          QURY_REF, "fix",     QURY_REL_UP},
+    {"../sib/leaf",     QURY_REF, "sib/leaf", QURY_REL_UP},
+    {"..",              QURY_REF, NULL,      QURY_REL_UP},
+    {"main",            QURY_REF, "main",    QURY_REL_NONE},
+    {"feat/fix",        QURY_REF, "feat/fix", QURY_REL_NONE},
+};
+#define QREF_NREL (sizeof(QREF_REL) / sizeof(QREF_REL[0]))
+
 // --- Bad inputs ---
 
 static const char *QURY_BAD[] = {
@@ -135,6 +155,9 @@ static const char *QURY_BAD[] = {
     "a/",          // trailing slash
     "/a",          // leading slash
     "a//b",        // double slash
+    "./",          // relative prefix with no body
+    "../",         // relative prefix with no body
+    "...",         // three dots not a recognised form
     NULL,
 };
 
@@ -272,11 +295,120 @@ ok64 QURYTestBad() {
     done;
 }
 
+// --- QURYBuildAbsolute resolver ---
+
+typedef struct {
+    const char *spec_input;
+    const char *current;
+    const char *want;
+} QREFAbsCase;
+
+static const QREFAbsCase QREF_ABS[] = {
+    // Absolute ref: current is irrelevant, body passes through.
+    {"main",        "trunk",     "main"},
+    {"main",        "",          "main"},
+    {"feat/fix",    "trunk",     "feat/fix"},
+
+    // ./body — child of current.
+    {"./fix",       "feat",      "feat/fix"},
+    {"./fix",       "",          "fix"},          // trunk → root-level
+    {"./sub/leaf",  "feat",      "feat/sub/leaf"},
+
+    // ../body — sibling of current.
+    {"../sib",      "feat",      "sib"},          // top-level → trunk
+    {"../sib",      "feat/fix",  "feat/sib"},
+    {"../sib",      "a/b/c",     "a/b/sib"},
+
+    // .. — parent only, empty body.
+    {"..",          "feat/fix",  "feat"},
+    {"..",          "feat",      ""},             // top-level parent = trunk
+    {"..",          "",          ""},             // trunk's parent = trunk
+};
+#define QREF_NABS (sizeof(QREF_ABS) / sizeof(QREF_ABS[0]))
+
+ok64 QURYTestAbs() {
+    sane(1);
+    for (size_t i = 0; i < QREF_NABS; i++) {
+        const QREFAbsCase *tc = &QREF_ABS[i];
+        u8cs spec_in = {(u8cp)tc->spec_input,
+                        (u8cp)tc->spec_input + strlen(tc->spec_input)};
+        qref q = {};
+        ok64 po = QURYu8sDrain(spec_in, &q);
+        if (po != OK) {
+            fprintf(stderr, "FAIL abs[%zu] '%s': parse error %s\n",
+                    i, tc->spec_input, ok64str(po));
+            fail(TESTFAIL);
+        }
+
+        u8cs cur = {(u8cp)tc->current,
+                    (u8cp)tc->current + strlen(tc->current)};
+
+        a_pad(u8, out, 256);
+        ok64 ro = QURYBuildAbsolute(out, &q, cur);
+        if (ro != OK) {
+            fprintf(stderr, "FAIL abs[%zu] '%s' / '%s': resolve %s\n",
+                    i, tc->spec_input, tc->current, ok64str(ro));
+            fail(TESTFAIL);
+        }
+
+        a_dup(u8c, got, u8bData(out));
+        size_t want_len = strlen(tc->want);
+        if ((size_t)$len(got) != want_len ||
+            (want_len > 0 && memcmp(got[0], tc->want, want_len) != 0)) {
+            fprintf(stderr,
+                    "FAIL abs[%zu] '%s' / '%s': got '%.*s' want '%s'\n",
+                    i, tc->spec_input, tc->current,
+                    (int)$len(got),
+                    $empty(got) ? "" : (char *)got[0],
+                    tc->want);
+            fail(TESTFAIL);
+        }
+    }
+    done;
+}
+
+ok64 QURYTestRel() {
+    sane(1);
+    for (size_t i = 0; i < QREF_NREL; i++) {
+        const QREFRelCase *tc = &QREF_REL[i];
+        u8cs input = {(u8cp)tc->input, (u8cp)tc->input + strlen(tc->input)};
+
+        qref q = {};
+        ok64 o = QURYu8sDrain(input, &q);
+        if (o != OK) {
+            fprintf(stderr, "FAIL rel[%zu] '%s': parse error %s\n",
+                    i, tc->input, ok64str(o));
+            fail(TESTFAIL);
+        }
+        if (q.type != tc->type) {
+            fprintf(stderr, "FAIL rel[%zu] '%s': type got %d want %d\n",
+                    i, tc->input, q.type, tc->type);
+            fail(TESTFAIL);
+        }
+        if (!qref_eq(q.body, tc->body)) {
+            fprintf(stderr, "FAIL rel[%zu] '%s': body got '%.*s' want '%s'\n",
+                    i, tc->input,
+                    (int)$len(q.body),
+                    $empty(q.body) ? "" : (char *)q.body[0],
+                    tc->body ? tc->body : "");
+            fail(TESTFAIL);
+        }
+        if (q.rel != tc->rel) {
+            fprintf(stderr, "FAIL rel[%zu] '%s': rel got %d want %d\n",
+                    i, tc->input, q.rel, tc->rel);
+            fail(TESTFAIL);
+        }
+    }
+    done;
+}
+
 ok64 QURYtest() {
     sane(1);
     call(QURYTestSingle);
     call(QURYTestMulti);
     call(QURYTestBad);
+    call(QURYTestRel);
+    call(QURYTestAbs);
     done;
 }
 

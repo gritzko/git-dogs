@@ -18,6 +18,7 @@
 #include "PUT.h"
 #include "dog/AT.h"
 #include "dog/CLI.h"
+#include "dog/QURY.h"
 #include "dog/DOG.h"
 #include "dog/HOME.h"
 #include "dog/IGNO.h"
@@ -280,6 +281,53 @@ static ok64 sniff_checkout(u8cs reporoot, u8cs hex) {
     return GETCheckout(reporoot, hex, source);
 }
 
+//  Pre-resolve a relative `?./X`, `?../X`, or `?..` URI in place.
+//  No-op when the query has no relative prefix.  Reads the wt's
+//  current branch from `.sniff` baseline and writes the absolute
+//  branch path into `qbuf`; rebuilds the URI's `data` slice as
+//  `?<absolute>` in `databuf`.  Both buffers must outlive the
+//  caller's use of `u`.  Sets `*was_relative_out = YES` if the
+//  input had a relative prefix (caller can use this to enable
+//  create-on-miss).
+static ok64 sniff_resolve_rel_(uri *u, u8b qbuf, u8b databuf,
+                               b8 *was_relative_out) {
+    sane(u);
+    if (was_relative_out) *was_relative_out = NO;
+    if (u->query[0] == NULL || $empty(u->query)) done;
+    a_dup(u8c, q_in, u->query);
+    qref qspec = {};
+    if (QURYu8sDrain(q_in, &qspec) != OK) done;
+    if (qspec.type != QURY_REF || qspec.rel == QURY_REL_NONE) done;
+    if (was_relative_out) *was_relative_out = YES;
+
+    //  Current branch from sniff baseline.  Empty / missing baseline
+    //  = trunk, which the resolver treats as the empty path.
+    ron60 bts = 0, bverb = 0;
+    uri bu = {};
+    u8cs current = {};
+    if (SNIFFAtBaseline(&bts, &bverb, &bu) == OK) {
+        current[0] = bu.query[0];
+        current[1] = bu.query[1];
+    }
+
+    if (QURYBuildAbsolute(qbuf, &qspec, current) != OK) fail(SNIFFFAIL);
+
+    u8bFeed1(databuf, '?');
+    u8bFeed(databuf, u8bDataC(qbuf));
+    u->query[0] = u8bDataHead(qbuf);
+    u->query[1] = u8bIdleHead(qbuf);
+    u->data[0]  = u8bDataHead(databuf);
+    u->data[1]  = u8bIdleHead(databuf);
+    done;
+}
+
+//  Wrapper that drops the was-relative flag for callers that don't
+//  care.  Existing call sites use this; create-on-miss callers use
+//  the underscore variant directly.
+static ok64 sniff_resolve_rel(uri *u, u8b qbuf, u8b databuf) {
+    return sniff_resolve_rel_(u, qbuf, databuf, NULL);
+}
+
 // Checkout from a parsed URI: resolve ?ref via keeper REFS, then checkout.
 //
 //  Resolution strategy (keeper WIREFetch no longer records per-origin
@@ -331,10 +379,49 @@ static ok64 SNIFFGetURI(u8cs reporoot, uri *u) {
     //  lookup, distinct from "no query at all" (which falls through
     //  to the at-log branch resume below).
     b8 has_q = (u->query[0] != NULL);
+
+    //  Pre-resolve relative refs (`?./X`, `?../X`, `?..`).  Storage
+    //  must outlive the call (REFSResolve and GETCheckout both
+    //  consume slices into u->query / u->data); _reluri rebases
+    //  those into our stack-local buffer.  `was_relative` enables
+    //  create-on-miss below.
+    a_pad(u8, abs_qbuf,    256);
+    a_pad(u8, abs_databuf, 260);
+    b8 was_relative = NO;
+    if (sniff_resolve_rel_(u, abs_qbuf, abs_databuf, &was_relative)
+        != OK)
+        fail(SNIFFFAIL);
+
     if (has_q || !$empty(u->authority)) {
         a_pad(u8, arena1, 1024);
         uri resolved = {};
         ok64 o = REFSResolve(&resolved, arena1, $path(keepdir), u->data);
+
+        //  Create-on-miss: relative refs (`?./X`, `?../X`) fork a new
+        //  branch at the wt's current tip when the resolved absolute
+        //  ref doesn't exist.  Bare `?A` (absolute) deliberately
+        //  errors on miss — explicit-only creation, per VERBS.md.
+        if (o != OK && was_relative) {
+            ron60 bts = 0, bverb = 0;
+            uri bu = {};
+            u8 hex40[40];
+            if (SNIFFAtBaseline(&bts, &bverb, &bu) == OK &&
+                SNIFFAtQueryFirstSha(&bu, hex40) == OK) {
+                a_dup(u8c, ref_uri, u->data);
+                u8cs hex_in = {hex40, hex40 + 40};
+                ok64 lo = POSTSetLabel(ref_uri, hex_in);
+                if (lo == OK) {
+                    fprintf(stderr, "sniff: created %.*s at %.*s\n",
+                            (int)$len(u->query),
+                            (char *)u->query[0],
+                            40, (char *)hex40);
+                    //  Retry the resolve.
+                    o = REFSResolve(&resolved, arena1, $path(keepdir),
+                                    u->data);
+                }
+            }
+        }
+
         if (o == OK && !$empty(resolved.query)) {
             a_pad(u8, src, 256);
             u8bFeed1(src, '?');
@@ -573,6 +660,18 @@ ok64 SNIFFExec(cli *c) {
         for (u32 i = 0; i < c->nuris; i++)
             if (!$empty(c->uris[i].query)) { label_uri = &c->uris[i]; break; }
 
+        //  Resolve a relative label (`?./X`, `?../X`, `?..`) before
+        //  POSTSetLabel sees it.  Buffers must outlive POSTSetLabel —
+        //  hence stack-local pads scoped to this if-block.
+        a_pad(u8, label_qbuf,    256);
+        a_pad(u8, label_databuf, 260);
+        if (label_uri != NULL) {
+            if (sniff_resolve_rel(label_uri, label_qbuf, label_databuf)
+                != OK) {
+                ret = SNIFFFAIL;
+            }
+        }
+
         if (!$ok(commit_msg) && label_uri == NULL) {
             //  Bare `sniff post` (no -m, no ?label) → dry run:
             //  list the change-set the next commit would produce
@@ -583,18 +682,29 @@ ok64 SNIFFExec(cli *c) {
             //  no pre-pass needed anymore.
             a_pad(u8, hex, 40);
             if ($ok(commit_msg)) {
-                //  Create a new commit.
+                //  Cross-branch POST: when a label_uri is present,
+                //  its query is the *commit target*.  POSTCommit
+                //  lands the new commit on that branch (instead of
+                //  the wt's baseline branch); the wt's other branch
+                //  is left untouched in REFS, and `.sniff` resets
+                //  to (target, new_tip).  No separate POSTSetLabel
+                //  pass — that was the old "label both branches at
+                //  the same sha" behaviour, replaced here.
+                u8cs target = {};
+                if (label_uri != NULL) {
+                    target[0] = label_uri->query[0];
+                    target[1] = label_uri->query[1];
+                }
                 sha1 sha = {};
-                ret = POSTCommit(reporoot,
+                ret = POSTCommit(reporoot, target,
                                  commit_msg, commit_author, &sha);
                 if (ret == OK) {
                     a_rawc(rs, sha);
                     HEXu8sFeedSome(hex_idle, rs);
                 }
-            } else {
-                //  No -m: label points at the current baseline sha —
-                //  the first 40-hex SHA spec in the latest
-                //  get/post/patch row's URI query (dog/QURY).
+            } else if (label_uri != NULL) {
+                //  No commit_msg + label_uri = pure label op: point
+                //  the URI's branch at the wt's current baseline sha.
                 ron60 bts = 0, bverb = 0;
                 uri bu = {};
                 ret = SNIFFAtBaseline(&bts, &bverb, &bu);
@@ -603,18 +713,19 @@ ok64 SNIFFExec(cli *c) {
                     SNIFFAtQueryFirstSha(&bu, hex40) == OK) {
                     u8cs h40 = {hex40, hex40 + 40};
                     u8bFeed(hex, h40);
+                    a_dup(u8c, hex_in, u8bData(hex));
+                    a_dup(u8c, ref_uri, label_uri->data);
+                    ret = POSTSetLabel(ref_uri, hex_in);
+                    if (ret == OK)
+                        fprintf(stderr,
+                                "sniff: label %.*s -> %.*s\n",
+                                (int)u8csLen(ref_uri),
+                                (char *)ref_uri[0],
+                                (int)u8bDataLen(hex),
+                                (char *)u8bDataHead(hex));
                 } else {
                     ret = SNIFFFAIL;
                 }
-            }
-            if (ret == OK && label_uri != NULL) {
-                a_dup(u8c, hex_in, u8bData(hex));
-                a_dup(u8c, ref_uri, label_uri->data);
-                ret = POSTSetLabel(ref_uri, hex_in);
-                if (ret == OK)
-                    fprintf(stderr, "sniff: label %.*s -> %.*s\n",
-                            (int)u8csLen(ref_uri), (char *)ref_uri[0],
-                            (int)u8bDataLen(hex), (char *)u8bDataHead(hex));
             }
         }
     } else if (is_put) {
@@ -622,9 +733,41 @@ ok64 SNIFFExec(cli *c) {
         if (ret == OK && c->nuris > 0)
             fprintf(stderr, "sniff: staged %u put row(s)\n", c->nuris);
     } else if (is_delete) {
-        ret = DELStage(c->nuris, c->uris);
-        if (ret == OK && c->nuris > 0)
-            fprintf(stderr, "sniff: staged %u delete row(s)\n", c->nuris);
+        //  Two URI shapes:
+        //    * branch-form (`?branch`) — drop the label via REFS
+        //      tombstone; safety-checked by DELBranch.
+        //    * path-form (`<file>`)    — stage a file removal.
+        //  Bare `sniff delete` (no URIs) is the legacy "sweep
+        //  missing tracked files" path; route through DELStage.
+        u32 branch_n = 0, path_n = 0;
+        if (c->nuris == 0) {
+            ret = DELStage(0, NULL);
+        } else {
+            for (u32 i = 0; i < c->nuris && ret == OK; i++) {
+                uri *u = &c->uris[i];
+                //  Branch-form is signalled by a literal leading `?`
+                //  in the original token (u->data).  Bare tokens like
+                //  `a.txt` also land in u->query via DOGNormalizeArg
+                //  but their data has no `?` sigil — those are path-
+                //  form deletes.
+                b8 branch_form = !$empty(u->data) && u->data[0][0] == '?';
+                if (branch_form) {
+                    //  Resolve relative `?./X`, `?../X`, `?..` first.
+                    a_pad(u8, del_qbuf,    256);
+                    a_pad(u8, del_databuf, 260);
+                    if (sniff_resolve_rel(u, del_qbuf, del_databuf)
+                        != OK) { ret = SNIFFFAIL; break; }
+                    ret = DELBranch(u);
+                    if (ret == OK) branch_n++;
+                } else {
+                    ret = DELStage(1, u);
+                    if (ret == OK) path_n++;
+                }
+            }
+        }
+        if (ret == OK && path_n > 0)
+            fprintf(stderr, "sniff: staged %u delete row(s)\n", path_n);
+        (void)branch_n;
     } else if (is_checkout) {
         if (c->nuris < 1) {
             fprintf(stderr, "sniff: get/checkout requires a URI or hex\n");

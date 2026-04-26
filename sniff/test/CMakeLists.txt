@@ -24,6 +24,46 @@ add_test(NAME SNIFFls
 set_tests_properties(SNIFFls PROPERTIES
     ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFls")
 
+#  dirty.sh — GET pre-flight: cross-branch dirty refuse + same-branch
+#  overlap refuse + untracked-only carry-over + rollback semantics.
+add_test(NAME SNIFFdirty
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dirty.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFdirty PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFdirty")
+
+#  post-ff.sh — POST pre-flight: empty-commit refuse + non-ff refuse
+#  (REFS tip vs .sniff base divergence).
+add_test(NAME SNIFFpostff
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/post-ff.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFpostff PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFpostff")
+
+#  relref.sh — `?./X`, `?../X`, `?..` resolve via .sniff baseline.
+add_test(NAME SNIFFrelref
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/relref.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFrelref PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFrelref")
+
+#  branchdel.sh — `sniff delete ?branch` writes a tombstone +
+#  safety checks (current-wt, descendants, resurrection).
+add_test(NAME SNIFFbranchdel
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/branchdel.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFbranchdel PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFbranchdel")
+
+#  cross-post.sh — `sniff post -m "msg" ?<target>` lands the new
+#  commit on target only (other branches in REFS unchanged) +
+#  non-ff cross-branch refusal.
+add_test(NAME SNIFFcrosspost
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cross-post.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFcrosspost PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFcrosspost")
+
 if (WITH_SSH)
     #  patch.sh — 3-way merge toys (sniff patch <ref>).  Needs ssh
     #  localhost (same transport as beagle/test/blobs-from-git.sh).

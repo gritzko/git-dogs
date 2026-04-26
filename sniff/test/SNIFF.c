@@ -5,6 +5,8 @@
 #include "sniff/POST.h"
 #include "sniff/PUT.h"
 
+#include "graf/GRAF.h"
+
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -357,10 +359,13 @@ ok64 SNIFFCheckoutCommit() {
     bump_mtime((char *)u8bDataHead(fp), 2);
 
     // Commit (HEAD is already set to the initial commit from GETCheckout).
+    //  POSTCommit's ff check uses GRAFLca, which needs GRAF open.
+    call(GRAFOpen, &h, YES);
     a_cstr(msg, "second commit");
     a_cstr(author, "Test <t@t>");
     sha1 new_sha = {};
-    call(POSTCommit, root, msg, author, &new_sha);
+    u8cs no_target = {};
+    call(POSTCommit, root, no_target, msg, author, &new_sha);
 
     // Verify new commit exists
     u64 new_hashlet = WHIFFHashlet60(&new_sha);
@@ -380,6 +385,7 @@ ok64 SNIFFCheckoutCommit() {
 
     u8bFree(out);
     call(SNIFFClose);
+    GRAFClose();
     call(KEEPClose);
     HOMEClose(&h);
     rm_tmpdir();

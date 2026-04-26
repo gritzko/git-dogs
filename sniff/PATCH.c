@@ -684,7 +684,7 @@ ok64 PATCHApply(u8cs reporoot, u8cs target_query) {
         u8 zero[20] = {};
         if (memcmp(lca_sha.data, zero, 20) == 0) {
             fprintf(stderr, "sniff: patch: no common ancestor\n");
-            fail(PATCHUNRELATED);
+            fail(PATCHURELT);
         }
     }
 
@@ -761,7 +761,7 @@ ok64 PATCHApply(u8cs reporoot, u8cs target_query) {
 
     if (st.merged_conflict > 0 || st.mod_del_conflict > 0 ||
         st.failed > 0) {
-        return PATCHCONFLICT;
+        return PATCHCFLCT;
     }
     done;
 }
@@ -791,7 +791,7 @@ ok64 PATCHApplyFile(u8cs reporoot, u8cs filepath, u8cs target_query) {
     if (conflict) {
         fprintf(stderr, "sniff: patch: CONFLICT (content) %.*s\n",
                 (int)$len(filepath), (char *)filepath[0]);
-        return PATCHCONFLICT;
+        return PATCHCFLCT;
     }
     done;
 }

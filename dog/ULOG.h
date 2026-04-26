@@ -40,7 +40,9 @@ con ok64 ULOGBADFMT = 0x7956102ca34f59d;
 typedef struct {
     u8bp  data;   // FILEBook'd row text
     Bkv64 idx;    // key = ron60 timestamp, val = byte offset into data
-    b8    dirty;  // appended-to since open; trims file on Close
+    b8    dirty;  // appended-to since open
+    b8    rw;     // opened RW (FILEBook page-aligned the file —
+                  // Close must trim back even if no append happened)
 } ulog;
 
 typedef ulog       *ulogp;

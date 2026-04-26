@@ -350,15 +350,12 @@ ok64 RECVApplyUpdates(keeper *k, refadvcp adv, recv_reqcp req,
         b8 is_create = sha1empty(&u->old_sha);
         b8 is_delete = sha1empty(&u->new_sha);
 
-        //  TODO Phase 6 follow-up: implement ref deletion through REFS
-        //  (record a tombstone or zero-val entry, decide gossip rules).
-        if (is_delete) {
-            r->result = RECVBADREF;
-            continue;
-        }
-
-        //  FF check: unless creating, old_sha must equal current tip.
-        if (!is_create) {
+        //  FF check: unless creating or deleting, old_sha must equal
+        //  the current tip.  Deletes are unconditional — git's
+        //  receive-pack accepts them as long as the client knew the
+        //  current tip (handshake rule), which the wire layer
+        //  enforces upstream.
+        if (!is_create && !is_delete) {
             sha1 cur = {};
             b8 have_tip = NO;
             recv_lookup_tip(adv, u->refname, &cur, &have_tip);
@@ -368,7 +365,9 @@ ok64 RECVApplyUpdates(keeper *k, refadvcp adv, recv_reqcp req,
             }
         }
 
-        //  Build REFS key + val for this update.
+        //  Build REFS key + val for this update.  For deletes,
+        //  recv_build_val writes the all-zeros sha — exactly the
+        //  tombstone shape REFS recognises.
         a_pad(u8, kbuf, 512);
         ok64 ko = recv_build_key(kbuf, u->refname);
         if (ko != OK) { r->result = ko; continue; }

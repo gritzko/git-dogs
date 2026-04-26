@@ -187,6 +187,7 @@ ok64 ULOGOpenBooked(ulogp l, path8s path, size_t book_size, size_t init_size) {
     if (o != OK) {
         call(FILEBookCreate, &l->data, path, book_size, init_size);
     }
+    l->rw = YES;        // FILEBook page-aligned; Close must trim.
 
     call(kv64bAllocate, l->idx, 1024);
 
@@ -226,14 +227,14 @@ ok64 ULOGOpenRO(ulogp l, path8s path) {
 ok64 ULOGClose(ulogp l) {
     sane(l);
     if (l->data) {
-        //  Trim only when this handle dirtied the log.  RW opens
-        //  page-align via FILEBook's ftruncate so the next writer's
-        //  mmap is fully file-backed; FILETrimBook here restores the
-        //  on-disk length to the real data tail.  RO consumers go
-        //  through FILEBookRO, which never grew the file in the
-        //  first place — there's nothing to trim, and trimming
-        //  would race a concurrent RW owner.
-        if (l->dirty) FILETrimBook(l->data);
+        //  Any RW open page-aligned the file via FILEBook's
+        //  ftruncate, so Close must trim back regardless of
+        //  whether anything was actually appended.  Otherwise an
+        //  early-fail RW SNIFFExec leaves trailing pad bytes
+        //  visible to the next reader.  RO opens (FILEBookRO)
+        //  never grew the file — `rw` stays NO — and trimming
+        //  one would race a concurrent RW owner, so skip.
+        if (l->rw) FILETrimBook(l->data);
         FILEUnBook(l->data);
     }
     if (l->idx[0]) kv64bFree(l->idx);

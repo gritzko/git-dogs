@@ -68,7 +68,7 @@ static void wcli_sha_to_hex(u8 *out40, sha1 const *s) {
 #define WCLI_BUF (1u << 16)
 
 //  Drain one pkt-line, refilling from in_fd via FILEDrain on NODATA.
-//  Returns OK / PKTFLUSH / PKTDELIM / WIRECLIFAIL.
+//  Returns OK / PKTFLUSH / PKTDELIM / WIRECLFL.
 //
 //  When IDLE runs out we compact: bytes already consumed via `adv` head
 //  are reclaimed into IDLE so further reads have room.  Without this
@@ -82,18 +82,18 @@ static ok64 wcli_read_pkt(int in_fd, u8b buf, u8cs adv, u8csp line) {
         if (o != NODATA) return o;
         if (!u8bHasRoom(buf)) {
             size_t consumed = (size_t)(adv[0] - u8bDataC(buf)[0]);
-            if (consumed == 0) return WIRECLIFAIL;
+            if (consumed == 0) return WIRECLFL;
             u8bUsed(buf, consumed);
             u8bShift(buf, 0);
             adv[0] = u8bDataC(buf)[0];
             adv[1] = u8csTerm(u8bDataC(buf));
-            if (!u8bHasRoom(buf)) return WIRECLIFAIL;
+            if (!u8bHasRoom(buf)) return WIRECLFL;
         }
         u8s fill;
         u8sFork(u8bIdle(buf), fill);
         ok64 fr = FILEDrain(in_fd, fill);
-        if (fr == FILEEND) return WIRECLIFAIL;
-        if (fr != OK) return WIRECLIFAIL;
+        if (fr == FILEEND) return WIRECLFL;
+        if (fr != OK) return WIRECLFL;
         u8sJoin(u8bIdle(buf), fill);
         adv[1] = u8csTerm(u8bDataC(buf));
     }
@@ -147,13 +147,13 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
 
     uri u = {};
     a_dup(u8c, ru, remote_uri);
-    if (URIutf8Drain(ru, &u) != OK) return WIRECLIFAIL;
+    if (URIutf8Drain(ru, &u) != OK) return WIRECLFL;
 
     //  Path is what the peer's upload-pack sees as argv[1].  URI parser
     //  delivers it with a leading '/' for absolute forms (file:///foo,
     //  //host/foo) which is exactly what the peer expects.
     u8cs path = {u.path[0], u.path[1]};
-    if (u8csEmpty(path)) return WIRECLIFAIL;
+    if (u8csEmpty(path)) return WIRECLFL;
 
     a_cstr(file_s,    "file");
     a_cstr(keeper_s,  "keeper");
@@ -189,7 +189,7 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
     //  is honored as an extra git marker.
     a_cstr(ssh_path_s, "/usr/bin/ssh");
     u8cs host = {u.host[0], u.host[1]};
-    if (u8csEmpty(host)) return WIRECLIFAIL;
+    if (u8csEmpty(host)) return WIRECLFL;
 
     //  HOME-relative convention: //host/path delivers `path` with the
     //  URI parser's leading '/' attached.  ssh peers expect a path
@@ -197,7 +197,7 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
     //  remote paths need to come through file:/// or be encoded
     //  differently — matching what KEEPSync/keeper_get_remote did pre-Phase8.
     if (!u8csEmpty(path) && *path[0] == '/') path[0]++;
-    if (u8csEmpty(path)) return WIRECLIFAIL;
+    if (u8csEmpty(path)) return WIRECLFL;
 
     b8 use_keeper_ssh = is_keeper || is_be;
     b8 force_git      = wcli_path_is_git(path);
@@ -356,7 +356,7 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
         ok64 d = wcli_read_pkt(rfd, buf, adv, line);
         if (d == PKTFLUSH) break;
         if (d == PKTDELIM) continue;
-        if (d != OK) return WIRECLIFAIL;
+        if (d != OK) return WIRECLFL;
 
         //  Trim trailing '\n'.
         if (u8csLen(line) > 0 && line[1][-1] == '\n') line[1]--;
@@ -431,7 +431,7 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
             WCLI_RECORD_NAME(fn);
             done;
         }
-        return WIRECLINOREF;
+        return WIRECLNRF;
     }
     #undef WCLI_RECORD_NAME
     done;
@@ -508,12 +508,12 @@ static ok64 wcli_send_request(int wfd, sha1 const *want_sha,
 static ok64 wcli_drain_response(int rfd, Bu8 buf) {
     sane(rfd >= 0);
     for (;;) {
-        if (!u8bHasRoom(buf)) return WIRECLIFAIL;
+        if (!u8bHasRoom(buf)) return WIRECLFL;
         u8s fill;
         u8sFork(u8bIdle(buf), fill);
         ok64 fr = FILEDrain(rfd, fill);
         if (fr == FILEEND) return OK;
-        if (fr != OK) return WIRECLIFAIL;
+        if (fr != OK) return WIRECLFL;
         u8sJoin(u8bIdle(buf), fill);
     }
 }
@@ -589,7 +589,7 @@ static ok64 wcli_record_ref(keeper *k, u8csc remote_uri, u8csc be_branch,
 
 ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     sane(k);
-    if (u8csEmpty(remote_uri)) return WIRECLIFAIL;
+    if (u8csEmpty(remote_uri)) return WIRECLFL;
 
     //  Empty want_ref → let wcli_match_advert pick the peer's HEAD or
     //  first advertised ref (mirrors `git clone`'s default-branch
@@ -600,10 +600,10 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     int wfd = -1, rfd = -1;
     pid_t pid = 0;
     ok64 so = wcli_spawn(remote_uri, "upload-pack", &wfd, &rfd, &pid);
-    if (so != OK) return WIRECLIFAIL;
+    if (so != OK) return WIRECLFL;
 
     Bu8 advbuf = {};
-    ok64 rv = WIRECLIFAIL;
+    ok64 rv = WIRECLFL;
     if (u8bAllocate(advbuf, WCLI_BUF) != OK) goto fetch_close;
 
     //  1.  Drain refs advertisement; pick the want sha + capture the
@@ -740,7 +740,7 @@ static ok64 wpush_walk_tree(keeper *k, sha1 const *tree_sha,
     //  exploding O(N) into O(2^depth).
     if (add_to_have && sha_set_has(add_to_have, tree_sha)) done;
     if (out) {
-        if (*n >= cap) return WIRECLIFAIL;
+        if (*n >= cap) return WIRECLFL;
         out[(*n)++] = *tree_sha;
     }
     if (add_to_have) sha_set_add(add_to_have, tree_sha);
@@ -803,7 +803,7 @@ static ok64 wpush_walk_commit(keeper *k, sha1 const *commit_sha,
     //  closure re-walks ancestors through every alternate path.
     if (add_to_have && sha_set_has(add_to_have, commit_sha)) done;
     if (out) {
-        if (*n >= cap) return WIRECLIFAIL;
+        if (*n >= cap) return WIRECLFL;
         out[(*n)++] = *commit_sha;
     }
     if (add_to_have) sha_set_add(add_to_have, commit_sha);
@@ -815,13 +815,13 @@ static ok64 wpush_walk_commit(keeper *k, sha1 const *commit_sha,
     if (KEEPGetExact(k, commit_sha, cbuf, &ctype) != OK ||
         ctype != KEEP_OBJ_COMMIT) {
         u8bUnMap(cbuf);
-        return WIRECLIFAIL;
+        return WIRECLFL;
     }
     u8cs commit_body = {u8bDataHead(cbuf), u8bIdleHead(cbuf)};
     sha1 tree_sha = {};
     if (GITu8sCommitTree(commit_body, tree_sha.data) != OK) {
         u8bUnMap(cbuf);
-        return WIRECLIFAIL;
+        return WIRECLFL;
     }
 
     //  Walk parents.  Each `parent <40-hex>` header line names another
@@ -889,7 +889,7 @@ static ok64 wpush_build_pack(keeper *k, sha1 const *shas, u32 nshas,
         u8 otype = 0;
         if (KEEPGetExact(k, &shas[i], obuf, &otype) != OK) {
             u8bUnMap(obuf);
-            return WIRECLIFAIL;
+            return WIRECLFL;
         }
         u64 olen = u8bDataLen(obuf);
 
@@ -945,7 +945,7 @@ static ok64 wpush_peer_tip(int rfd, u8b advbuf, u8csc branch_refname,
         ok64 d = wcli_read_pkt(rfd, advbuf, adv, line);
         if (d == PKTFLUSH) break;
         if (d == PKTDELIM) continue;
-        if (d != OK) return WIRECLIFAIL;
+        if (d != OK) return WIRECLFL;
         if (u8csLen(line) > 0 && line[1][-1] == '\n') line[1]--;
         if (u8csLen(line) < 41) continue;
         u8csc hex = {line[0], line[0] + 40};
@@ -1046,14 +1046,14 @@ static ok64 wpush_drain_status(int rfd, u8csc refname) {
         }
     }
     u8bFree(buf);
-    return (unpack_ok && ref_ok) ? OK : WIRECLIFAIL;
+    return (unpack_ok && ref_ok) ? OK : WIRECLFL;
 }
 
 ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch) {
     sane(k);
     //  `local_branch` is be-side; empty (NULL or zero-length) selects
     //  the trunk shard, which goes on the wire as `refs/heads/main`.
-    if (u8csEmpty(remote_uri)) return WIRECLIFAIL;
+    if (u8csEmpty(remote_uri)) return WIRECLFL;
 
     //  Resolve our local tip via REFADV (one-shot snapshot).
     sha1 local_tip = {};
@@ -1065,7 +1065,7 @@ ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch) {
         wpush_local_tip(&adv, local_branch, &local_tip, &have_local);
         REFADVClose(&adv);
     }
-    if (!have_local) return WIRECLINOREF;
+    if (!have_local) return WIRECLNRF;
 
     //  Build the wire refname (refs/heads/X, trunk → main) once.
     a_pad(u8, refname_buf, 256);
@@ -1081,12 +1081,12 @@ ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch) {
     if (so != OK) {
         fprintf(stderr, "wpush: spawn failed (so=%llx)\n",
                 (unsigned long long)so);
-        return WIRECLIFAIL;
+        return WIRECLFL;
     }
     fprintf(stderr, "wpush: spawned ok, pid=%d\n", (int)pid);
 
     Bu8 advbuf = {};
-    ok64 rv = WIRECLIFAIL;
+    ok64 rv = WIRECLFL;
     if (u8bAllocate(advbuf, WCLI_BUF) != OK) {
         fprintf(stderr, "wpush: advbuf alloc failed\n");
         goto push_close;

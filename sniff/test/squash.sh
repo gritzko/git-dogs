@@ -59,6 +59,13 @@ parent_of() {
         | awk '/^parent / { print $2; exit }'
 }
 
+#  Every parent sha of a commit, in order (first parent first).
+parents_of() {
+    hex=$1
+    keeper get ".#$hex" 2>/dev/null \
+        | awk '/^parent / { print $2 }'
+}
+
 #  Tip of a local ref via keeper refs.  Output lines look like
 #  `  <key>\t→ ?<40-hex>`; grep the line, take the last token, strip
 #  the leading `?`.
@@ -151,11 +158,20 @@ TRUNK_REF=$(ref_tip "?")
     || fail "trunk not advanced to squash ($TRUNK_REF vs $SQUASH)"
 note "trunk -> $SQUASH"
 
-#  History check: squash's parent must be trunk's concurrent tip.
-SQUASH_PARENT=$(parent_of "$SQUASH")
-[ "$SQUASH_PARENT" = "$TRUNK1" ] \
-    || fail "squash parent is $SQUASH_PARENT, expected TRUNK1=$TRUNK1"
-note "squash parent = TRUNK1 (linear history on trunk)"
+#  History check: squash's first parent must be trunk's concurrent
+#  tip, and the second parent must be the feat tip the PATCH brought
+#  in (.sniff `patch` row → POST drained).
+SQUASH_PARENTS=$(parents_of "$SQUASH")
+SQUASH_NPAR=$(echo "$SQUASH_PARENTS" | wc -l)
+[ "$SQUASH_NPAR" = "2" ] \
+    || fail "squash has $SQUASH_NPAR parents, expected 2 (PATCH+POST)"
+SQUASH_P1=$(echo "$SQUASH_PARENTS" | sed -n '1p')
+SQUASH_P2=$(echo "$SQUASH_PARENTS" | sed -n '2p')
+[ "$SQUASH_P1" = "$TRUNK1" ] \
+    || fail "squash 1st parent is $SQUASH_P1, expected TRUNK1=$TRUNK1"
+[ "$SQUASH_P2" = "$FEAT2" ] \
+    || fail "squash 2nd parent is $SQUASH_P2, expected FEAT2=$FEAT2"
+note "squash parents = TRUNK1, FEAT2 (multi-parent merge commit)"
 
 #  A fresh checkout of the squash tip should materialise the merged
 #  tree (a=feat, b=trunk, c=feat).

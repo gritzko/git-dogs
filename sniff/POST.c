@@ -32,6 +32,7 @@
 #include "dog/IGNO.h"
 #include "dog/QURY.h"
 #include "dog/WHIFF.h"
+#include "graf/GRAF.h"
 #include "keeper/GIT.h"
 #include "keeper/REFS.h"
 #include "keeper/SHA1.h"
@@ -984,11 +985,12 @@ ok64 POSTPrintStatus(u8cs reporoot) {
     done;
 }
 
-ok64 POSTCommit(u8cs reporoot, u8cs message, u8cs author, sha1 *sha_out) {
+ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
+                u8cs message, u8cs author, sha1 *sha_out) {
     sane($ok(message) && $ok(author) && sha_out);
     keeper *k = &KEEP;
 
-    //  1. Resolve baseline (branch, parents).  Three cases:
+    //  1. Resolve baseline parents.  Three cases:
     //       * no baseline row at all  → root commit (0 parents, OK).
     //       * baseline + 1+ parents   → normal / merge commit.
     //       * baseline + 0 parents    → corrupt at-log; refuse.
@@ -1011,10 +1013,86 @@ ok64 POSTCommit(u8cs reporoot, u8cs message, u8cs author, sha1 *sha_out) {
                 "on push)\n");
         return SNIFFFAIL;
     }
-    //  No baseline branch recovered → default to trunk (empty be-side
-    //  query).  Locally trunk has no name; the wire layer aliases it
-    //  to refs/heads/main.  brbuf left empty signals "trunk" to the
-    //  ULOG/REFS writers below.
+
+    //  Cross-branch override: when the caller passes a non-empty
+    //  target_branch, the new commit lands on that branch instead
+    //  of the baseline-derived one.  brbuf carries the branch path
+    //  used downstream by both the REFS writer and the .sniff post
+    //  row's query, so swapping it here is enough.
+    if ($ok(target_branch) && !u8csEmpty(target_branch)) {
+        u8bReset(brbuf);
+        u8bFeed(brbuf, target_branch);
+    }
+    //  No baseline branch recovered AND no override → default to
+    //  trunk (empty be-side query).  Locally trunk has no name; the
+    //  wire layer aliases it to refs/heads/main.  brbuf left empty
+    //  signals "trunk" to the ULOG/REFS writers below.
+
+    //  --- ff-only pre-flight ----------------------------------------
+    //  POST onto a branch with a recorded REFS tip is fast-forward
+    //  only: the target's tip must be an ancestor of (or equal to)
+    //  the wt's first parent.  Different = someone advanced the
+    //  branch since our last sync, OR this is a cross-branch POST
+    //  whose target is on an unrelated lineage; either way, refuse
+    //  and let the user resolve manually (`be patch ?<branch>` for
+    //  same-branch divergence, or `be delete ?<branch>` followed by
+    //  recreate for cross-branch reset).
+    if (had_baseline && nparents > 0) {
+        a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+        a_pad(u8, refkey_buf, 128);
+        u8bFeed1(refkey_buf, '?');
+        a_dup(u8c, branch, u8bData(brbuf));
+        if (!u8csEmpty(branch)) u8bFeed(refkey_buf, branch);
+        a_dup(u8c, refkey_s, u8bData(refkey_buf));
+
+        a_pad(u8, arena, 1024);
+        uri resolved = {};
+        ok64 ro = REFSResolve(&resolved, arena, $path(keepdir),
+                              refkey_s);
+        if (ro == OK && !$empty(resolved.query)) {
+            //  Decode the target's 40-hex tip into a sha1 so we can
+            //  feed it to GRAFLca alongside parents[0].
+            u8cs tip_hex = {resolved.query[0], resolved.query[1]};
+            if ($len(tip_hex) > 0 && *tip_hex[0] == '?')
+                tip_hex[0]++;
+            sha1 tip_sha = {};
+            if ($len(tip_hex) == 40) {
+                u8s bin = {tip_sha.data, tip_sha.data + 20};
+                a_dup(u8c, hx, tip_hex);
+                (void)HEXu8sDrainSome(bin, hx);
+            }
+
+            //  ff iff tip is an ancestor of (or equal to) parents[0].
+            //  Identity short-circuit: GRAFLca treats the ancestor
+            //  set as strict ancestors, so LCA(X, X) returns 0 for
+            //  matching shas — handle equality up front.
+            //  Otherwise: tip is an ancestor of parents[0] iff
+            //  LCA(parents[0], tip) == tip.  GRAFLca zeroes `out`
+            //  for unrelated histories — also non-ff.
+            b8 ff_ok = NO;
+            if (sha1eq(&parents[0], &tip_sha)) {
+                ff_ok = YES;
+            } else {
+                sha1 lca = {};
+                (void)GRAFLca(&lca, &parents[0], &tip_sha);
+                if (sha1eq(&lca, &tip_sha)) ff_ok = YES;
+            }
+            if (!ff_ok) {
+                a_pad(u8, p0_hex, 40);
+                a_rawc(p0_sha, parents[0]);
+                HEXu8sFeedSome(p0_hex_idle, p0_sha);
+                fprintf(stderr,
+                        "sniff: post: target `?%.*s` tip %.*s is "
+                        "not an ancestor of wt's base %.*s — "
+                        "non-ff\n",
+                        (int)u8csLen(branch), (char *)branch[0],
+                        (int)$len(tip_hex), (char *)tip_hex[0],
+                        40, (char *)u8bDataHead(p0_hex));
+                return SNIFFNOFF;
+            }
+        }
+    }
+    //  --- end ff-only pre-flight ------------------------------------
 
     //  Steps 2..5 — the change-set scan — share their entire body
     //  with POSTPrintStatus's dry-run path.  See post_scan_changeset.
@@ -1077,6 +1155,21 @@ ok64 POSTCommit(u8cs reporoot, u8cs message, u8cs author, sha1 *sha_out) {
             return bo;
         }
         have_root = !sha1empty(&root_tree);
+    }
+
+    //  7b. Empty-commit refuse: if the new root tree matches the
+    //      baseline's tree exactly, the wt has nothing to record.
+    //      Refusing here keeps `.sniff` and REFS clean — VERBS.md
+    //      says "empty POSTs are refused."  Skip on a fresh repo
+    //      (no baseline tree to compare against).
+    if (had_baseline && have_root && have_base &&
+        memcmp(root_tree.data, base_tree_sha.data, 20) == 0) {
+        fprintf(stderr,
+                "sniff: post: no changes since base — refusing empty "
+                "commit\n");
+        u8bFree(tree_bodies);
+        u8bFree(rec_buf); u8bFree(flag_buf);
+        return SNIFFNOOP;
     }
 
     //  8. If the result has no files, fall back to the empty-tree sha.

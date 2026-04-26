@@ -13,6 +13,21 @@
 #include "dog/DOG.h"
 #include "dog/ULOG.h"
 
+// --- tombstone detection ---
+//
+//  A "tombstone" row records branch deletion as `?<branch>#<zeros>`,
+//  where the fragment is 40 ASCII '0' chars.  This shape round-trips
+//  through git's wire-protocol delete-via-push (`<old> 000…0
+//  refs/heads/X`) without translation.  Resolvers and advertisers
+//  treat zero-sha values as "branch absent".
+
+static b8 refs_is_tombstone(u8cs frag) {
+    if (u8csLen(frag) != 40) return NO;
+    for (u8cp p = frag[0]; p < frag[1]; p++)
+        if (*p != '0') return NO;
+    return YES;
+}
+
 // --- verb RON60 constants (cached) ---
 
 //  Every REFS row carries one of these HTTP-shaped verbs:
@@ -169,6 +184,16 @@ static ok64 refs_each_store(ron60 ts, ron60 verb, uricp u, void *ctx) {
     (void)verb;
     refs_load_ctx *c = (refs_load_ctx *)ctx;
     if (c->cnt >= c->max) done;
+
+    //  Skip tombstoned keys: zero-sha fragment means the branch was
+    //  deleted (`?<branch>#0000…`).  Loaders/advertisers must not
+    //  surface ghost branches whose latest write was a delete.
+    {
+        u8cs r_frag = {u->fragment[0], u->fragment[1]};
+        if (!u8csEmpty(r_frag) && r_frag[0][0] == '?')
+            u8csUsed(r_frag, 1);
+        if (refs_is_tombstone(r_frag)) done;
+    }
 
     //  Key: URI with fragment elided, serialised straight into
     //  arena's IDLE (URIutf8Feed advances the idle slice in place).
@@ -354,6 +379,8 @@ ok64 REFSResolve(urip resolved, u8bp arena, u8csc dir, u8csc input) {
     //  Fill resolved.query = fragment bytes (minus leading `?`).
     u8cs frag = {u.fragment[0], u.fragment[1]};
     if (!u8csEmpty(frag) && frag[0][0] == '?') u8csUsed(frag, 1);
+    //  Zero-sha tombstone: branch was deleted; report as absent.
+    if (refs_is_tombstone(frag)) { ULOGClose(&l); fail(REFSNONE); }
     if (!u8csEmpty(frag))
         call(refs_capture_cs, arena, frag, resolved->query);
     if (!u8csEmpty(u.scheme))

@@ -120,8 +120,8 @@ ok64 WIREServeUpload(int in_fd, int out_fd, keeper *k, refadvcp adv);
 
 // --- client side (Phase 7) ---------------------------------------------
 
-con ok64 WIRECLIFAIL  = 0x49b38c5523ca495;
-con ok64 WIRECLINOREF = 0x26ce31549761b38f;
+con ok64 WIRECLFL  = 0x8126ce3153d5;
+con ok64 WIRECLNRF = 0x2049b38c5576cf;
 
 //  Spawn a git-protocol peer (ssh or local exec) and run a fetch
 //  conversation: drain refs advertisement, send wants/haves, read pack.
@@ -140,8 +140,8 @@ con ok64 WIRECLINOREF = 0x26ce31549761b38f;
 //    "refs/<...>"       match the full refname
 //    ""                 use the peer's first-line / HEAD ref
 //
-//  Returns OK on success, WIRECLINOREF if the peer doesn't advertise
-//  the requested ref, WIRECLIFAIL on transport / ingest errors.
+//  Returns OK on success, WIRECLNRF if the peer doesn't advertise
+//  the requested ref, WIRECLFL on transport / ingest errors.
 ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref);
 
 //  Spawn a git-protocol peer (ssh or local exec) and run a push
@@ -154,8 +154,8 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref);
 //  `local_branch` is the local refname to push, e.g. "heads/main" or
 //  "main".  The same name is offered to the peer (`refs/heads/<X>`).
 //
-//  Returns OK on success, WIRECLINOREF if the local branch has no
-//  REFS entry, WIRECLIFAIL on transport / pack-build / refusal.
+//  Returns OK on success, WIRECLNRF if the local branch has no
+//  REFS entry, WIRECLFL on transport / pack-build / refusal.
 ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch);
 
 #endif

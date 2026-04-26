@@ -23,9 +23,9 @@
 #include "keeper/GIT.h"
 #include "keeper/KEEP.h"
 
-con ok64 GETFAIL   = 0x47e9993ca495;
-con ok64 GETBAD    = 0x1f9d284b28d;
-con ok64 GETNOTIPS = 0x47e9995d85ce;
+con ok64 GETFAIL   = 0x1039d3ca495;
+con ok64 GETBAD    = 0x40e74b28d;
+con ok64 GETNOTIPS = 0x1039d5d875265c;
 
 #define GET_MAX_TIPS   8
 #define GET_MAX_VERS   512

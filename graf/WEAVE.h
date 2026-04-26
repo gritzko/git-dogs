@@ -20,7 +20,7 @@
 #include "dog/TOK.h"
 
 con ok64 WEAVEFAIL   = 0x2038a7ce3ca495;
-con ok64 WEAVENOROOM = 0x38a7ce5d86d8616;
+con ok64 WEAVNOROM = 0x2038a7d761b616;
 
 // --- wtok: one token in the weave ---
 

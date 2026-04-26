@@ -14,7 +14,17 @@
 #include "SNIFF.h"
 #include "keeper/KEEP.h"
 
-ok64 POSTCommit(u8cs reporoot,
+//  Commit the wt to a branch.  `target_branch` overrides the branch
+//  the commit lands on:
+//    * empty (path[0] == NULL or len 0) — use the wt's recorded
+//      baseline branch (same-branch POST).
+//    * non-empty — cross-branch POST: the new commit goes on
+//      `?<target_branch>`, the wt's recorded baseline branch is
+//      left untouched in REFS, and `.sniff` is reset to
+//      `(target_branch, new_tip)`.  Refused when the target
+//      branch's REFS tip exists and is not an ancestor of the wt's
+//      recorded base (non-ff).
+ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
                 u8cs message, u8cs author, sha1 *sha_out);
 
 //  Dry run: walk the same change-set the next POSTCommit would

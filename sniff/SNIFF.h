@@ -29,9 +29,13 @@
 #include "keeper/KEEP.h"
 
 con ok64 SNIFFFAIL   = 0x1c5d23cf3ca495;
-con ok64 SNIFFNOROOM = 0xc5d23cf5d86d8616;
+con ok64 SNIFFNOROM = 0x71748f3d761b616;
 con ok64 SNIFFOPEN   = 0x1c5d23cf619397;
-con ok64 SNIFFOPENRO = 0xc5d23cf6193976d8;
+con ok64 SNIFFOPRO = 0x1c5d23cf6196d8;
+con ok64 SNIFFDRTY   = 0x1c5d23cf35b762;
+con ok64 SNIFFOVRL   = 0x1c5d23cf61f6d5;
+con ok64 SNIFFNOFF   = 0x1c5d23cf5d83cf;
+con ok64 SNIFFNOOP   = 0x1c5d23cf5d8619;
 
 #define SNIFF_FILE ".sniff"
 

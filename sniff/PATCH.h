@@ -40,12 +40,12 @@ ok64 PATCHApplyFile(u8cs reporoot, u8cs filepath, u8cs target_query);
 
 // --- Error / sentinel codes ---
 
-con ok64 PATCHFAIL     = 0x483e0c3ca495;    // general failure
-con ok64 PATCHCONFLICT = 0x483e0c619d50f3;  // conflicts recorded in wt
-con ok64 PATCHDIRTY    = 0x483e0c49b762;    // wt has dirty files that
+con ok64 PATCHFAIL     = 0x1929d3113ca495;   // general failure
+con ok64 PATCHCFLCT    = 0x64a74c44c3d531d;  // conflicts recorded in wt
+con ok64 PATCHDIRTY    = 0x64a74c44d49b762;  // wt has dirty files that
                                              // would be clobbered
-con ok64 PATCHUNRELATED = 0x483e0c5d86d8;   // no shared ancestor
-con ok64 PATCHBUSY     = 0x483e0c6d23ca;    // merge already in progress —
+con ok64 PATCHURELT    = 0x64a74c45e6ce55d;  // no shared ancestor
+con ok64 PATCHBUSY     = 0x1929d3112de722;   // merge already in progress —
                                              // baseline is a `patch` row;
                                              // complete with `be post` or
                                              // abort by checking out the
