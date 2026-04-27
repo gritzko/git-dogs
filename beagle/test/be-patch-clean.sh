@@ -11,14 +11,14 @@ vc_fresh_wt
 sp_seed_trunk             # T1 on trunk
 sp_label_feat             # ?feat at T1
 sp_switch_feat            # wt on feat
-sleep 1
+usleep 10000
 echo "y" > y.txt
 "$BE" put y.txt >/dev/null
 "$BE" post add y on feat >/dev/null
 FEAT_HEAD=$(awk -F'\t' '$2=="post"{h=$3;sub(/^[^#]*#/,"",h);last=h} END{print last}' .sniff)
 
 "$BE" get "?" >/dev/null  # back on trunk
-sleep 1
+usleep 10000
 echo "x v2" > x.txt
 "$BE" post v2 on trunk >/dev/null
 

@@ -119,7 +119,7 @@ note "both put-staged files present; pre-put + post-put untracked all absent"
 # ------------------------------------------------------------------
 echo "=== 4. modify + bare be post (implicit all-dirty) ==="
 cd "$D3b"
-sleep 1                               # force distinct mtime
+usleep 10000                          # force distinct mtime
 echo alpha-v2 > a.txt
 "$BE" post a v2 >/dev/null
 C4=$(head_hex)
@@ -248,7 +248,7 @@ echo top > README
 C9a=$(head_hex)
 note "baseline HEAD=$C9a"
 
-sleep 1
+usleep 10000
 echo v2 > src/foo.c                      # modify tracked
 echo stray > src/bar.c                   # add untracked
 "$BE" put src/ >/dev/null
@@ -320,7 +320,7 @@ echo v1 > lib/foo.c
 C11a=$(head_hex)
 note "baseline HEAD=$C11a"
 
-sleep 1
+usleep 10000
 echo v2 > lib/foo.c                       # modify tracked
 mkdir -p side/inner
 echo nested > side/inner/n.txt            # untracked subtree
@@ -371,7 +371,7 @@ echo v1 > foo.c
 C12a=$(head_hex)
 note "baseline HEAD=$C12a"
 
-sleep 1
+usleep 10000
 echo v2 > foo.c                            # modify tracked
 "$BE" put >/dev/null
 awk -F'\t' '$2 == "put" && $3 == "foo.c"' .sniff | grep -q . \

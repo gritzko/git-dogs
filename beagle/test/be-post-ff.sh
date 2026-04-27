@@ -12,7 +12,7 @@ vc_fresh_wt
 sp_seed_trunk             # T1, wt on trunk
 
 vc_step "edit x.txt; snapshot before; be post"
-sleep 1
+usleep 10000
 echo "x v2" > x.txt
 
 vc_snapshot before

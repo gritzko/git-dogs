@@ -73,7 +73,7 @@ note "worktree has .dogs symlink + local .sniff + checked-out files"
 
 # --- 4. edits in clone and worktree ---
 echo "=== 4. edits ==="
-sleep 1                                      # ensure mtime differs from checkout
+usleep 10000                                 # ensure mtime differs from checkout
 echo alpha-CLONE > "$CLONE/a.txt"
 echo charlie > "$WT/c.txt"
 echo bravo-WT > "$WT/b.txt"

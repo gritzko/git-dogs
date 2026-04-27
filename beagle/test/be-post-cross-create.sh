@@ -14,7 +14,7 @@ sp_seed_trunk             # exports T1; wt on trunk
 vc_snapshot before
 
 vc_step "be post ?feat feat work — cross-branch create"
-sleep 1
+usleep 10000
 echo "x feat" > x.txt     # actual change so POST isn't empty
 vc_run xpost "$BE" post "?feat" feat work
 

@@ -52,7 +52,7 @@ sp_seed_trunk() {
 #    T2 — second commit sha (T2 != T1; T1 is T2's parent).
 sp_seed_two_tips() {
     sp_seed_trunk
-    sleep 1
+    usleep 10000
     echo "x v2" > x.txt
     "$BE" post v2 >/dev/null
     T2=$(sp_head_hex)
@@ -78,7 +78,7 @@ sp_switch_feat() {
 #  appears dirty.  Pass a path; defaults to x.txt.
 sp_make_dirty() {
     p=${1:-x.txt}
-    sleep 1
+    usleep 10000
     echo "$(date +%N) dirty" >> "$p"
 }
 
