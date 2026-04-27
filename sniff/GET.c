@@ -1,15 +1,22 @@
 //  GET: checkout a commit tree from keeper.
 //
-//  Responsibilities:
-//    * Materialise every file in the commit's tree, creating parent
-//      dirs as needed.
-//    * Dirty-protect: if a file on disk has an mtime not in sniff's
-//      stamp-set, leave it alone.
-//    * Stamp every file we write with a shared ron60 timestamp via
-//      utimensat, so a later stat() recovers that same stamp.
-//    * Append one `get` ULOG row with the same timestamp.
-//    * Prune: unlink any wt file that sniff wrote before but isn't
-//      in the new target tree (stamp-set check protects user files).
+//  Pipeline:
+//    1. Resolve the baseline tree from the latest get/post/patch row
+//       (NULL on first checkout).
+//    2. Pre-flight classifier (`get_overlap_check`) merges baseline
+//       and target tree path-lists via `KEEPu8ssDrain` and produces:
+//         * a no-op overlay list (paths whose content is unchanged —
+//           WRITE skips them so dirty user content survives);
+//         * an unlink list (clean baseline-only paths the post-WRITE
+//           step drops from the wt);
+//         * a refusal when any incoming change would clobber a dirty
+//           wt file.
+//    3. WRITE pass: WALKTreeLazy over target → materialise files,
+//       creating parent dirs as needed, stamping each with a shared
+//       ron60 ts via utimensat.
+//    4. Drain the unlink list.
+//    5. Append one `get` ULOG row with the same ts; advance the
+//       keeper-side per-branch tip via REFSAppendVerb.
 //
 #include "GET.h"
 
@@ -33,17 +40,6 @@ typedef struct {
     u8cs           reporoot;
     ron60          ts;          // stamp to apply via utimensat
     struct timespec tv;         // same stamp in timespec form
-    Bu8            target;      // bitmap: target[idx] = 1 iff path idx is
-                                // in the new tree (set during walk, read
-                                // during prune).
-    Bu8            gitlink;     // bitmap: gitlink[idx] = 1 iff path idx is
-                                // a submodule entry (mode 160000) in the
-                                // new tree.  Prune does not descend into
-                                // any path whose ancestor is a gitlink —
-                                // sniff doesn't manage submodule contents,
-                                // so wiping files there would corrupt a
-                                // legitimately checked-out submodule.
-    u32            target_cap;
     ok64           error;
     //  Newline-separated, lex-sorted path list (subset of the target
     //  tree) where the target sha matches the baseline sha.  WALKTreeLazy
@@ -52,49 +48,6 @@ typedef struct {
     //  preserve whatever bytes are on disk" (including dirty user edits).
     u8cs           noop_cursor;
 } get_ctx;
-
-static void get_mark_target(get_ctx *g, u32 idx) {
-    if (idx >= g->target_cap) return;
-    u8 *base = u8bDataHead(g->target);
-    base[idx] = 1;
-}
-
-static b8 get_is_target(get_ctx const *g, u32 idx) {
-    if (idx >= g->target_cap) return NO;
-    u8 const *base = u8bDataHead(g->target);
-    return base[idx] != 0;
-}
-
-static void get_mark_gitlink(get_ctx *g, u32 idx) {
-    if (idx >= g->target_cap) return;
-    u8 *base = u8bDataHead(g->gitlink);
-    base[idx] = 1;
-}
-
-static b8 get_is_gitlink(get_ctx const *g, u32 idx) {
-    if (idx >= g->target_cap) return NO;
-    u8 const *base = u8bDataHead(g->gitlink);
-    return base[idx] != 0;
-}
-
-//  YES iff `rel` lives strictly beneath any path the new tree marks
-//  as a gitlink (submodule).  Walks rel left-to-right, interning each
-//  `<prefix-up-to-slash>` and checking the gitlink bitmap.  Used by
-//  prune to leave the submodule's own contents alone.
-static b8 get_under_gitlink(get_ctx const *g, u8cs rel) {
-    u8c const *start = rel[0];
-    u8c const *end   = rel[1];
-    u8c const *cur   = start;
-    while (cur < end) {
-        if (*cur == '/') {
-            u8cs prefix = {start, cur};
-            u32 idx = SNIFFIntern(prefix);
-            if (get_is_gitlink(g, idx)) return YES;
-        }
-        cur++;
-    }
-    return NO;
-}
 
 //  Write one blob to disk, create dirs as needed, chmod if exec,
 //  symlink if link; then stamp it with ctx->tv.  Caller is
@@ -145,16 +98,10 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     (void)blob;  // lazy mode
     get_ctx *g = (get_ctx *)vctx;
 
-    if (kind == WALK_KIND_SUB) {
-        //  Submodule (gitlink, mode 160000).  Mark the path so prune
-        //  treats it as part of the target tree (don't unlink the
-        //  submodule directory itself), and record the gitlink prefix
-        //  so prune doesn't descend into the submodule's own files.
-        u32 idx = SNIFFIntern(path);
-        get_mark_target(g, idx);
-        get_mark_gitlink(g, idx);
-        return WALKSKIP;
-    }
+    //  Submodule (gitlink, mode 160000).  Sniff doesn't manage submodule
+    //  contents — git's own submodule machinery does.  Skip the entry;
+    //  no write, no mark.
+    if (kind == WALK_KIND_SUB) return WALKSKIP;
 
     if (kind == WALK_KIND_DIR) {
         if ($empty(path)) return OK;    // root; walker recurses
@@ -162,13 +109,6 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
         SNIFFFullpath(dp, g->reporoot, path);
         FILEMakeDirP($path(dp));
         return OK;
-    }
-
-    //  File-like entry (REG / EXE / LNK).  Mark the path as a target
-    //  before writing so prune won't touch it even if write fails.
-    {
-        u32 idx = SNIFFIntern(path);
-        get_mark_target(g, idx);
     }
 
     //  No-op overlay: target's content at this path equals baseline's;
@@ -201,31 +141,32 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     return o;
 }
 
-// --- Pre-flight overlap check via baseline ↔ target N-way merge.
+// --- Pre-flight classifier via baseline ↔ target N-way merge.
 //
 //  Materialise both trees as sorted (path, meta) pairs (meta = 21-byte
-//  records {kind, sha[20]}), then drain via KEEPu8ssDrain.  For each
-//  emitted path:
-//    * both sides + identical {kind,sha} → no-op overlay: append to
-//      `noop_out` so the WRITE pass can skip the rewrite (preserving
-//      any dirty user content), no dirty check needed
-//    * either side is SUB                → gitlink change, no wt-file
-//                                           write → skip
-//    * else (real change, add, or delete) → lstat; conflict if mtime
-//                                            ∉ stamp-set.
+//  records {kind, sha[20]}), then drain via KEEPu8ssDrain.  Per path:
+//    * both sides + identical {kind,sha} → no-op overlay: WRITE skips
+//      so dirty user content survives.  Appended to `noop_out`.
+//    * either side is SUB                → gitlink (submodule) entry:
+//      sniff doesn't manage it.  Ignored — neither write nor unlink.
+//    * real change / add / delete        → lstat; if mtime ∉ stamp-set,
+//      conflict.  For deletes (baseline-only) where the file is clean
+//      and present on disk, append to `unlink_out` so the post-WRITE
+//      step can drop it.
+//
 //  Returns SNIFFOVRL when conflicts > 0 (printing up to 5 paths and a
-//  summary line).  `noop_out` is reset on entry; on success it carries
-//  newline-separated lex-sorted paths (subset of the target tree).
+//  summary line).  `noop_out` and `unlink_out` are reset on entry; on
+//  success each carries newline-separated lex-sorted paths.
 //
 //  `base_tree` may be NULL — first-checkout / no-baseline case.  Then
 //  every drained path has mask 0b10 (target only) and is treated as
-//  incoming, matching the pre-merge per-target-path overlap check;
-//  `noop_out` ends up empty.
+//  incoming; both output lists end up empty.
 static ok64 get_overlap_check(keeper *k, u8cs reporoot,
                               u8cp base_tree, u8cp tgt_tree,
-                              u8bp noop_out) {
-    sane(k && tgt_tree && noop_out);
+                              u8bp noop_out, u8bp unlink_out) {
+    sane(k && tgt_tree && noop_out && unlink_out);
     u8bReset(noop_out);
+    u8bReset(unlink_out);
     Bu8 bp = {}, bm = {}, tp = {}, tm = {};
     call(u8bAllocate, bp, 1UL << 20);
     call(u8bAllocate, bm, 1UL << 20);
@@ -278,7 +219,7 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
         b8 is_sub  = (b_kind == WALK_KIND_SUB) || (t_kind == WALK_KIND_SUB);
 
         if (!changed && in_tgt && !is_sub) {
-            //  No-op overlay: record the path so the WRITE pass skips it.
+            //  No-op overlay: WRITE pass skips it.
             u8bFeed(noop_out, path);
             u8bFeed1(noop_out, '\n');
         } else if (changed && !is_sub) {
@@ -297,6 +238,10 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
                                     (int)$len(path),
                                     (char *)path[0]);
                         conflicts++;
+                    } else if (in_base && !in_tgt) {
+                        //  Clean delete: schedule unlink.
+                        u8bFeed(unlink_out, path);
+                        u8bFeed1(unlink_out, '\n');
                     }
                 }
             }
@@ -318,56 +263,24 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
     done;
 }
 
-// --- Prune: unlink any wt file that sniff wrote before but isn't in
-//     the new target tree.  The stamp-set check protects user-created
-//     untracked files (they never carry a sniff stamp).
-
-typedef struct { get_ctx *g; u32 pruned; } prune_ctx;
-
-static ok64 get_prune_cb(void *varg, path8bp path) {
-    sane(varg);
-    prune_ctx *p = (prune_ctx *)varg;
-    get_ctx *g = p->g;
-    a_dup(u8c, full, u8bData(path));
-
-    u8cs rel = {};
-    if (!SNIFFRelFromFull(&rel, g->reporoot, full)) return OK;
-    if (SNIFFSkipMeta(rel))                         return OK;
-
-    //  Don't descend into a submodule the new tree carries as a
-    //  gitlink.  The submodule's own files (mtimes ≠ sniff stamps in
-    //  the normal case, but stale leaks from a corrupted commit can
-    //  still carry sniff stamps) are not ours to manage.
-    if (get_under_gitlink(g, rel)) return OK;
-
-    u32 idx = SNIFFIntern(rel);
-    if (get_is_target(g, idx)) return OK;
-
-    struct stat sb = {};
-    if (lstat((char const *)full[0], &sb) != 0) return OK;
-    struct timespec ts = {.tv_sec = sb.st_mtim.tv_sec,
-                          .tv_nsec = sb.st_mtim.tv_nsec};
-    ron60 r = SNIFFAtOfTimespec(ts);
-    if (!SNIFFAtKnown(r)) return OK;   // untracked user file — leave alone.
-
-    //  unlink() wants a NUL-terminated C string; `path` is NUL-termed
-    //  by FILEScanRecurse → PATHu8bTerm at each level, so the byte at
-    //  full[1] is already '\0' (see abc/PATH.h).
-    if (unlink((char const *)full[0]) == 0) p->pruned++;
-    return OK;
-}
-
-static ok64 get_prune(get_ctx *g) {
-    sane(g);
-    a_path(root_path);
-    u8bFeed(root_path, g->reporoot);
-    call(PATHu8bTerm, root_path);
-    prune_ctx pctx = {.g = g, .pruned = 0};
-    call(FILEScan, root_path,
-         (FILE_SCAN)(FILE_SCAN_FILES | FILE_SCAN_LINKS | FILE_SCAN_DEEP),
-         get_prune_cb, &pctx);
-    if (pctx.pruned > 0)
-        fprintf(stderr, "sniff: pruned %u file(s)\n", pctx.pruned);
+//  Drain a newline-separated path list and unlink each entry.  Paths
+//  came from get_overlap_check's classifier, which already verified
+//  presence + clean stamp; defensive lstat is omitted.  Reports the
+//  count to stderr to mirror the prior `pruned %u file(s)` notice.
+static ok64 get_drain_unlinks(u8cs reporoot, u8cs unlinks) {
+    sane($ok(reporoot));
+    u32 dropped = 0;
+    a_dup(u8c, scan, unlinks);
+    for (;;) {
+        u8cs path = {};
+        if (u8csDrainLine(scan, path) != OK) break;
+        if ($empty(path)) continue;
+        a_path(fp);
+        if (SNIFFFullpath(fp, reporoot, path) != OK) continue;
+        if (unlink((char const *)u8bDataHead(fp)) == 0) dropped++;
+    }
+    if (dropped > 0)
+        fprintf(stderr, "sniff: pruned %u file(s)\n", dropped);
     done;
 }
 
@@ -533,12 +446,13 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         }
     }
 
-    Bu8 noop = {};
-    call(u8bAllocate, noop, 1UL << 20);
+    Bu8 noop = {}, unlinks = {};
+    call(u8bAllocate, noop,    1UL << 20);
+    call(u8bAllocate, unlinks, 1UL << 20);
     o = get_overlap_check(k, reporoot,
                           has_base_tree ? base_tree.data : NULL,
-                          tree_sha.data, noop);
-    if (o != OK) { u8bFree(noop); return o; }
+                          tree_sha.data, noop, unlinks);
+    if (o != OK) { u8bFree(noop); u8bFree(unlinks); return o; }
 
     get_ctx ctx = {.k = k, .error = OK};
     u8csMv(ctx.reporoot, reporoot);
@@ -546,25 +460,16 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     ctx.noop_cursor[0] = u8bDataHead(noop);
     ctx.noop_cursor[1] = u8bIdleHead(noop);
 
-    //  Size the target/gitlink bitmaps: SNIFFCount() grows during the
-    //  walk as keeper interns new tree paths, so pad generously.
-    ctx.target_cap = SNIFFCount() + (1u << 20);
-    call(u8bAllocate, ctx.target, ctx.target_cap);
-    memset(u8bDataHead(ctx.target), 0, ctx.target_cap);
-    call(u8bAllocate, ctx.gitlink, ctx.target_cap);
-    memset(u8bDataHead(ctx.gitlink), 0, ctx.target_cap);
-
     o = WALKTreeLazy(k, tree_sha.data, get_visit, &ctx);
     if (o == OK && ctx.error != OK) o = ctx.error;
-    if (o != OK) {
-        u8bFree(noop); u8bFree(ctx.target); u8bFree(ctx.gitlink);
-        return o;
-    }
+    if (o != OK) { u8bFree(noop); u8bFree(unlinks); return o; }
 
-    //  Prune: any path on disk that was sniff-stamped but isn't in the
-    //  new target tree.
-    (void)get_prune(&ctx);
-    u8bFree(ctx.target); u8bFree(ctx.gitlink); u8bFree(noop);
+    //  Prune the baseline-only paths the classifier flagged as clean.
+    {
+        a_dup(u8c, ulist, u8bData(unlinks));
+        (void)get_drain_unlinks(reporoot, ulist);
+    }
+    u8bFree(noop); u8bFree(unlinks);
 
     //  Compose the `get` row URI via abc/URI.  Canonical at-log form:
     //  `?<branch>#<curhash>` — query carries the be-branch path

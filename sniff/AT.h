@@ -171,4 +171,17 @@ ok64 SNIFFAtScanDirty(u8cs reporoot, sniff_at_dirty_cb cb, void *ctx);
 //  Returns ULOGNONE when no such spec is present.
 ok64 SNIFFAtQueryFirstSha(uricp u, u8 *out_hex40);
 
+//  Materialise the wt's non-meta files (excluding `.dogs/`, `.sniff*`,
+//  etc — same filter as `SNIFFAtScanDirty`) in lex order into two
+//  parallel buffers.  Same shape as `KEEPTreeListLeaves` so a
+//  `[tree, wt]` pair feeds straight into `KEEPu8ssDrain`.
+//    out_paths — newline-terminated relative paths in lex order.
+//    out_meta  — flat sequence of 1-byte `WALK_KIND_REG/EXE/LNK`
+//                records, indexed by line number in `out_paths`.
+//  Both buffers are reset before writing; caller owns them.
+//  Order is produced via `FILEScanSorted` + `FILEentryZ` (dirs sort as
+//  if "name/" trailing-slash, matching git tree sort) so depth-first
+//  yields strictly lex-sorted full paths.
+ok64 SNIFFWtListPaths(u8cs reporoot, u8bp out_paths, u8bp out_meta);
+
 #endif

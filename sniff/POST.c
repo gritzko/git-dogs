@@ -140,44 +140,12 @@ static ok64 post_pd_cb(ron60 verb, u8cs path, ron60 ts, void *vctx) {
     return OK;
 }
 
-// --- Baseline walk ---
+// --- Baseline tree resolution ---
 
-typedef struct {
-    post_ctx *c;
-} base_ctx;
-
-static ok64 post_base_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
-                             void0p vctx) {
-    sane(vctx);
-    (void)blob;
-    base_ctx *b = (base_ctx *)vctx;
-    post_ctx *c = b->c;
-    if (kind == WALK_KIND_DIR) {
-        //  Root dir arrives with empty path; inner dirs get recorded
-        //  only if we plan to emit them (we'll derive that from the
-        //  set of files during tree-build).  We don't need per-dir
-        //  records here.
-        return OK;
-    }
-    u32 idx = SNIFFIntern(path);
-    if (idx >= c->cap) return OK;
-    c->flag[idx] |= POST_IN_BASE;
-    memcpy(c->rec[idx].old_sha.data, esha, 20);
-    c->rec[idx].old_mode = post_mode_of_kind(kind);
-    if (kind == WALK_KIND_SUB) {
-        //  Gitlink (submodule).  Carry it through to the new tree
-        //  verbatim — POST is not in the business of advancing
-        //  submodule shas (that's what `git submodule update` does).
-        //  Without this entry, the wt scan + post_decide treat the
-        //  baseline gitlink as "missing on disk" and DROP it,
-        //  silently removing the submodule from history.
-        c->flag[idx] |= POST_KEEP;
-        return WALKSKIP;
-    }
-    return OK;
-}
-
-static ok64 post_load_baseline(post_ctx *c, sha1 *root_out, b8 *has_out) {
+//  Resolve the baseline URI to a tree sha (no walk — the merge below
+//  consumes the tree via KEEPTreeListLeaves).  Sets c->has_base and
+//  c->base_is_patch as a side-effect.
+static ok64 post_resolve_baseline(post_ctx *c, sha1 *root_out, b8 *has_out) {
     sane(c && root_out && has_out);
     *has_out = NO;
 
@@ -219,52 +187,86 @@ static ok64 post_load_baseline(post_ctx *c, sha1 *root_out, b8 *has_out) {
     u8bFree(cbuf);
     if (to != OK) done;
 
-    base_ctx bctx = {.c = c};
-    ok64 wo = WALKTreeLazy(c->k, tree_sha.data, post_base_visit, &bctx);
-    if (wo != OK) return wo;
-
     *root_out = tree_sha;
     *has_out = YES;
     done;
 }
 
-// --- Worktree scan ---
+// --- Baseline ↔ wt classifier via N-way merge ---
 
-static ok64 post_wt_callback(void *varg, path8bp path) {
-    sane(varg && path);
-    post_ctx *c = (post_ctx *)varg;
-    a_dup(u8c, full, u8bData(path));
+//  Drive `flag[idx]` / `rec[idx]` population from a 2-input merge over
+//  the baseline tree's leaf list and the wt's path list.  Replaces the
+//  separate WALKTreeLazy + FILEScan passes.  SUB entries on the
+//  baseline side go through the same POST_KEEP carry-through the old
+//  baseline visitor applied.
+//
+//  `wp_out` is left populated with the wt path list — `post_expand_
+//  dir_rows`'s new-dir-put case prefix-filters it so we don't re-walk
+//  the wt subtree per dir-put row.  Caller owns `wp_out`.
+static ok64 post_classify_via_merge(post_ctx *c, u8cp base_tree,
+                                    b8 has_base, u8bp wp_out) {
+    sane(c && wp_out);
 
-    u8cs rel = {};
-    if (!SNIFFRelFromFull(&rel, c->reporoot, full)) return OK;
-    if (SNIFFSkipMeta(rel))                         return OK;
+    Bu8 bp = {}, bm = {}, wm = {};
+    call(u8bAllocate, bp, 1UL << 20);
+    call(u8bAllocate, bm, 1UL << 20);
+    call(u8bAllocate, wm, 1UL << 20);
 
-    //  lstat the file to capture mode + mtime.
-    struct stat lsb = {};
-    if (lstat((char const *)full[0], &lsb) != 0) return OK;
+    ok64 r = OK;
+    if (has_base) r = KEEPTreeListLeaves(c->k, base_tree, bp, bm);
+    if (r == OK)  r = SNIFFWtListPaths(c->reporoot, wp_out, wm);
+    if (r != OK) {
+        u8bFree(bp); u8bFree(bm); u8bFree(wm);
+        return r;
+    }
 
-    u16 mode;
-    if (S_ISLNK(lsb.st_mode))               mode = 0120000;
-    else if (lsb.st_mode & S_IXUSR)         mode = 0100755;
-    else                                    mode = 0100644;
+    a_dup(u8c, view_b, u8bData(bp));
+    a_dup(u8c, view_w, u8bData(wp_out));
+    a_pad(u8cs, ins, 2);
+    u8cssFeed1(ins_idle, view_b);
+    u8cssFeed1(ins_idle, view_w);
+    a_dup(u8cs, view, u8csbData(ins));
 
-    u32 idx = SNIFFIntern(rel);
-    if (idx >= c->cap) return OK;
+    u8 const *bm_base = u8bDataHead(bm);
+    u8 const *wm_base = u8bDataHead(wm);
+    size_t b_idx = 0, w_idx = 0;
 
-    c->flag[idx] |= POST_ON_DISK;
-    c->rec[idx].new_mode = mode;
-    return OK;
-}
+    for (;;) {
+        u8cs path = {};
+        u64 mask = 0;
+        ok64 dr = KEEPu8ssDrain(view, path, &mask);
+        if (dr != OK) break;
 
-static ok64 post_scan_wt(post_ctx *c) {
-    sane(c);
-    a_path(root_path);
-    u8bFeed(root_path, c->reporoot);
-    call(PATHu8bTerm, root_path);
-    return FILEScan(root_path,
-                    (FILE_SCAN)(FILE_SCAN_FILES | FILE_SCAN_LINKS |
-                                FILE_SCAN_DEEP),
-                    post_wt_callback, c);
+        b8 in_base = (mask & 1) != 0;
+        b8 in_wt   = (mask & 2) != 0;
+
+        u32 idx = SNIFFIntern(path);
+        if (idx < c->cap) {
+            if (in_base) {
+                c->flag[idx] |= POST_IN_BASE;
+                u8 b_kind = bm_base[b_idx * 21];
+                u8 const *b_sha = bm_base + b_idx * 21 + 1;
+                memcpy(c->rec[idx].old_sha.data, b_sha, 20);
+                c->rec[idx].old_mode = post_mode_of_kind(b_kind);
+                if (b_kind == WALK_KIND_SUB) {
+                    //  Gitlink: carry through verbatim (see comments on
+                    //  the old post_base_visit).  No on-disk file
+                    //  expected — POST_KEEP short-circuits post_decide.
+                    c->flag[idx] |= POST_KEEP;
+                }
+            }
+            if (in_wt) {
+                c->flag[idx] |= POST_ON_DISK;
+                c->rec[idx].new_mode = post_mode_of_kind(wm_base[w_idx]);
+            }
+        }
+
+        if (in_base) b_idx++;
+        if (in_wt)   w_idx++;
+    }
+
+    u8bFree(bp); u8bFree(bm); u8bFree(wm);
+    done;
 }
 
 // --- Dir-level put/delete expansion ---
@@ -295,42 +297,7 @@ fun b8 post_path_under(u8cs p, u8cs prefix) {
     return memcmp(p[0], prefix[0], plen) == 0;
 }
 
-typedef struct {
-    post_ctx *c;
-    ignocp    ig;      // NULL if no .gitignore at wt root
-} wt_put_ctx;
-
-static ok64 post_expand_put_wt_cb(void *varg, path8bp path) {
-    sane(varg && path);
-    wt_put_ctx *w = (wt_put_ctx *)varg;
-    post_ctx *c = w->c;
-    a_dup(u8c, full, u8bData(path));
-
-    u8cs rel = {};
-    if (!SNIFFRelFromFull(&rel, c->reporoot, full)) return OK;
-    if (SNIFFSkipMeta(rel))                         return OK;
-    if (w->ig && IGNOMatch(w->ig, rel, NO))         return OK;
-
-    u32 idx = SNIFFIntern(rel);
-    if (idx >= c->cap) return OK;
-
-    //  Capture mode + on-disk flag here — the file may have been
-    //  interned only now (post_scan_wt sees it too, but scan order
-    //  isn't contractual with the registry).
-    struct stat lsb = {};
-    if (lstat((char const *)full[0], &lsb) == 0) {
-        u16 mode;
-        if (S_ISLNK(lsb.st_mode))           mode = 0120000;
-        else if (lsb.st_mode & S_IXUSR)     mode = 0100755;
-        else                                mode = 0100644;
-        c->rec[idx].new_mode = mode;
-        c->flag[idx] |= POST_ON_DISK;
-    }
-    c->flag[idx] |= POST_EXPL_PUT;
-    return OK;
-}
-
-static ok64 post_expand_dir_rows(post_ctx *c, ignocp ig) {
+static ok64 post_expand_dir_rows(post_ctx *c, ignocp ig, u8cs wp) {
     sane(c);
 
     //  DELETE: baseline-only.
@@ -347,8 +314,12 @@ static ok64 post_expand_dir_rows(post_ctx *c, ignocp ig) {
         }
     }
 
-    //  PUT: try baseline expansion first; fall through to wt walk
-    //  only when the prefix names a dir that wasn't tracked yet.
+    //  PUT: try baseline expansion first; fall through to a wp-cursor
+    //  prefix scan when the prefix names a dir that wasn't tracked yet.
+    //  IGNO still applies — the merge-classifier doesn't filter
+    //  gitignored files (so they show up as POST_ON_DISK), but a
+    //  user-issued `be put dir/` shouldn't auto-stage gitignored
+    //  contents inside `dir/` along with the rest.
     for (u32 di = 0; di < c->n_dir_puts; di++) {
         a_dup(u8c, pfx, c->dir_puts[di]);
         b8 any_base = NO;
@@ -364,14 +335,19 @@ static ok64 post_expand_dir_rows(post_ctx *c, ignocp ig) {
         }
         if (any_base) continue;
 
-        //  New dir — walk the wt subtree with wt-root IGNO applied.
-        a_path(full);
-        if (SNIFFFullpath(full, c->reporoot, pfx) != OK) continue;
-        wt_put_ctx wc = {.c = c, .ig = ig};
-        (void)FILEScan(full,
-                       (FILE_SCAN)(FILE_SCAN_FILES | FILE_SCAN_LINKS |
-                                   FILE_SCAN_DEEP),
-                       post_expand_put_wt_cb, &wc);
+        //  New dir — drain the wp cursor and flag every wt path
+        //  beneath the prefix that survives IGNO.
+        a_dup(u8c, scan, wp);
+        for (;;) {
+            u8cs rel = {};
+            if (u8csDrainLine(scan, rel) != OK) break;
+            if ($empty(rel))               continue;
+            if (!post_path_under(rel, pfx)) continue;
+            if (ig && IGNOMatch(ig, rel, NO)) continue;
+            u32 idx = SNIFFIntern(rel);
+            if (idx >= c->cap) continue;
+            c->flag[idx] |= POST_EXPL_PUT;
+        }
     }
     done;
 }
@@ -967,19 +943,32 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
                                 b8 *have_base) {
     sane(c && base_tree_sha && have_base);
 
-    //  2. Baseline walk.
-    call(post_load_baseline, c, base_tree_sha, have_base);
+    //  2. Resolve baseline URI → tree sha (no walk yet).
+    call(post_resolve_baseline, c, base_tree_sha, have_base);
 
     //  3. Put/delete scan since last post.
     call(SNIFFAtScanPutDelete, c->last_post_ts, post_pd_cb, c);
 
-    //  4. Worktree scan.
-    call(post_scan_wt, c);
+    //  4. Classify baseline + wt via N-way merge, populating
+    //     POST_IN_BASE / POST_ON_DISK + per-path metadata.  `wp` is
+    //     the wt path list (newline-separated, lex-sorted) that the
+    //     merge produced; (4b) reuses it for dir-row expansion.
+    Bu8 wp = {};
+    call(u8bAllocate, wp, 1UL << 20);
+    ok64 cr = post_classify_via_merge(c,
+                                      *have_base ? base_tree_sha->data : NULL,
+                                      *have_base, wp);
+    if (cr != OK) { u8bFree(wp); return cr; }
 
     //  4b. Expand dir-level put/delete rows into file-level flags.
     //      The wt-root .gitignore is already loaded into SNIFF.ignores
     //      at SNIFFOpen time, so every op consults the same set.
-    call(post_expand_dir_rows, c, &SNIFF.ignores);
+    {
+        a_dup(u8c, wp_view, u8bData(wp));
+        ok64 er = post_expand_dir_rows(c, &SNIFF.ignores, wp_view);
+        if (er != OK) { u8bFree(wp); return er; }
+    }
+    u8bFree(wp);
 
     //  5. Decide fate per path.
     u32 n_now = SNIFFCount();
