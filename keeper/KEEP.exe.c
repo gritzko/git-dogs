@@ -2,6 +2,7 @@
 //  Same effect as invoking `keeper ...` as a separate process.
 //
 #include "KEEP.h"
+#include "PROJ.h"
 #include "REFS.h"
 #include "WIRE.h"
 
@@ -576,6 +577,21 @@ ok64 KEEPExec(keeper *k, cli *c) {
 
     if ($eq(c->verb, v_help) || CLIHas(c, "-h") || CLIHas(c, "--help")) {
         keep_usage(); done;
+    }
+
+    //  Verb-less projector invocation (VERBS.md §"View projectors"):
+    //  `keeper <proj>:<URI>` — no verb.  Scheme selects the projector;
+    //  dog/DOG.c owns the scheme→dog table so we dispatch only when
+    //  the URI's scheme resolves to this dog ("keeper").  `--tlv`
+    //  switches the emitter from raw bytes to a HUNK TLV record so
+    //  `bro` (started by BE on a TTY) can render it.
+    if ($empty(c->verb) && c->nuris > 0) {
+        uri *pu = &c->uris[0];
+        char const *dog = DOGProjectorDog(pu->scheme);
+        if (dog != NULL && strcmp(dog, "keeper") == 0) {
+            b8 tlv = CLIHas(c, "--tlv");
+            return KEEPProjDispatch(k, pu, tlv);
+        }
     }
 
     if ($empty(c->verb)) {

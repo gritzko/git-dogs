@@ -12,11 +12,13 @@
 #include "UNPK.h"
 #include "WIRE.h"
 
+#include <string.h>
 #include <unistd.h>
 
 #include "abc/FILE.h"
 #include "abc/PRO.h"
 #include "dog/CLI.h"
+#include "dog/DOG.h"
 #include "dog/SHA1.h"
 #include "graf/GRAF.h"
 #include "spot/CAPO.h"
@@ -128,6 +130,12 @@ ok64 keepercli() {
     a_cstr(v_verify, "verify");
     b8 ro = $eq(c.verb, v_status) || $eq(c.verb, v_refs)
          || $eq(c.verb, v_verify);
+    //  Verb-less projector dispatch (`keeper tree:?...`, `commit:`,
+    //  `blob:`) is also read-only — no pack ingest, no ref writes.
+    if (!ro && $empty(c.verb) && c.nuris > 0) {
+        char const *dog = DOGProjectorDog(c.uris[0].scheme);
+        if (dog != NULL && strcmp(dog, "keeper") == 0) ro = YES;
+    }
     b8 rw = !ro;
 
     home h = {};

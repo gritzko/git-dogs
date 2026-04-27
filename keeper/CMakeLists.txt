@@ -8,7 +8,7 @@ find_package(ZLIB REQUIRED)
 add_library(gitcompat STATIC GIT.c PKT.c PACK.c DELT.c ZINF.c SHA1.c)
 target_link_libraries(gitcompat dog abc-core ZLIB::ZLIB)
 
-add_library(keeplib STATIC KEEP.c KEEP.exe.c REFS.c REFADV.c WALK.c UNPK.c PATHS.c PSTR.c WIRE.c WIRECLI.c RECV.c)
+add_library(keeplib STATIC KEEP.c KEEP.exe.c REFS.c REFADV.c WALK.c UNPK.c PATHS.c PSTR.c WIRE.c WIRECLI.c RECV.c PROJ.c)
 target_link_libraries(keeplib gitcompat dog abc-core)
 
 #  keeper-cli links graflib/spotlib so its indexer fan-out (installed
