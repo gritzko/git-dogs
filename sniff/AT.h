@@ -103,6 +103,19 @@ ok64 SNIFFAtBaseline(ron60 *ts_out, ron60 *verb_out, urip u_out);
 //  computation.
 ron60 SNIFFAtLastPostTs(void);
 
+//  Look up the ULOG row whose ts equals `mtime` (the canonical
+//  per-file classifier — `lstat → ron60 → row → verb`).  On OK,
+//  `*verb_out` carries the owning verb and `u_out` is URILexer-
+//  parsed (slices live in the mmap, valid until ULOGClose).
+//  ULOGNONE if no row stamps exactly `mtime`.  Cheap binary search.
+ok64 SNIFFAtRowAtTs(ron60 mtime, ron60 *verb_out, urip u_out);
+
+//  Wall-clock guard: refuse if the system clock has moved backwards
+//  past the latest log row.  Returns SNIFFCLOCKBAD when `RONNow() <
+//  tail_ts`; OK otherwise (including on an empty log).  Cheap;
+//  intended to run once at command entry.
+ok64 SNIFFCheckClock(void);
+
 //  Sample a wall-clock timestamp in both ULOG-row and filesystem form.
 //  `*ts_out` is the ron60 stamp to append to the log; `*tv_out` is the
 //  paired timespec to hand to futimens / utimensat so the file's mtime

@@ -82,3 +82,11 @@ if (WITH_SSH)
     set_tests_properties(SNIFFpostroundtrip PROPERTIES
         ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFpostroundtrip")
 endif()
+
+#  refuse.sh — coverage for the new refusal codes (PUTNONE on
+#  baseline-clean / empty bare-put; DELDIRTY on user-edited).
+add_test(NAME SNIFFrefuse
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/refuse.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(SNIFFrefuse PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=SNIFFrefuse")

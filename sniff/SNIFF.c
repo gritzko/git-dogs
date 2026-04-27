@@ -98,6 +98,15 @@ ok64 SNIFFOpen(home *h, b8 rw) {
                  : ULOGOpenRO(&s->log, $path(atpath));
     if (uo != OK) { zerop(s); return uo; }
 
+    //  Wall-clock guard: refuse on entry if the system clock is before
+    //  the latest log row.  RW only — read-only paths (status, list)
+    //  don't append rows or stamp files, so a backwards clock can't
+    //  corrupt anything they observe.
+    if (rw) {
+        ok64 co = SNIFFCheckClock();
+        if (co != OK) { ULOGClose(&s->log); zerop(s); return co; }
+    }
+
     //  Row-0 `repo` anchor.  Bootstrap on a fresh log (writes the
     //  colocated default `file:///<wt>/.dogs/`); honour an existing
     //  anchor for secondary worktrees by redirecting h->root to the

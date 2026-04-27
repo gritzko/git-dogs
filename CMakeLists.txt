@@ -54,10 +54,14 @@ endif ()
 
 set(DOG_BIN_DIR ${CMAKE_BINARY_DIR}/bin)
 
-#  Root dir for toy-repo tests' scratch files.  Scripts compose
-#  `$TMP/$$/$TEST_ID/` under this for their per-run workspaces.
-set(DOG_TEST_TMP_ROOT "$ENV{HOME}/tmp" CACHE PATH
-    "Base dir for toy-repo test scratch files")
+#  Per-configure run dir for toy-repo tests' scratch files.  Each
+#  script puts its workspace at `$TMP/$TEST_ID/` and cleans it up on
+#  exit; the run dir itself is rmdir'd best-effort once empty.
+set(DOG_TEST_TMP_BASE "$ENV{HOME}/tmp" CACHE PATH
+    "Parent dir for toy-repo test scratch run dirs")
+string(TIMESTAMP _dog_test_run_ts "%Y%m%d-%H%M%S")
+set(DOG_TEST_TMP_ROOT "${DOG_TEST_TMP_BASE}/run-${_dog_test_run_ts}")
+file(MAKE_DIRECTORY "${DOG_TEST_TMP_ROOT}")
 
 set(TEST_CXX_FLAGS "-g")
 set(TEST_LDD_FLAGS "-g")

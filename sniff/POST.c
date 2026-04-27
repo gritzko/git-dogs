@@ -387,6 +387,7 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
     if (SNIFFIsDir(idx)) return OK;
     if (!(f & (POST_IN_BASE | POST_ON_DISK))) return OK;
 
+
     //  Gitlinks (submodule entries, mode 0160000) are carried through
     //  verbatim — POST_KEEP was already set by post_base_visit.  The
     //  on-disk presence rule below would otherwise see "no file at
@@ -460,24 +461,33 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
         c->flag[idx] |= POST_DROP;
         return OK;
     }
-    //  Squash-merge case: baseline is a `patch` row, which stamps its
-    //  merge output with the row's own ts.  Those stamps make mtimes
-    //  "known", but the disk bytes are the merge result — NOT the
-    //  ours-tree baseline — so KEEP (use old_sha) would regress the
-    //  new commit's tree to pre-merge content.  Force REWRITE from
-    //  disk for every on-disk file.
-    if (c->base_is_patch) {
-        c->flag[idx] |= POST_REWRITE;
-        return OK;
-    }
-
     struct timespec ts = {.tv_sec = sb.st_mtim.tv_sec,
                           .tv_nsec = sb.st_mtim.tv_nsec};
     ron60 mtime_r = SNIFFAtOfTimespec(ts);
     if (SNIFFAtKnown(mtime_r)) {
-        //  Clean: keep baseline sha if present.
-        if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
-        //  Otherwise: untracked clean (shouldn't happen) — ignore.
+        //  Per-file stamp-lookup: who owns this mtime?
+        //    get/post stamp → KEEP (matches baseline)
+        //    patch    stamp → REWRITE (current bytes; row's `theirs`
+        //                     joins parents via post_add_patch_parents)
+        //    put      stamp → REWRITE (user explicitly staged it)
+        ron60 ow_verb = 0;
+        uri ow_u = {};
+        ok64 lo = SNIFFAtRowAtTs(mtime_r, &ow_verb, &ow_u);
+        if (lo == OK) {
+            ron60 vg = SNIFFAtVerbGet();
+            ron60 vp = SNIFFAtVerbPost();
+            if (ow_verb == vg || ow_verb == vp) {
+                if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
+                //  else: untracked clean (shouldn't happen) — ignore.
+            } else {
+                //  patch / put / mod owns this stamp → REWRITE.
+                c->flag[idx] |= POST_REWRITE;
+            }
+        } else {
+            //  ts-known but row-not-found (corrupt log?) — fall back to
+            //  the conservative KEEP-if-tracked behaviour.
+            if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
+        }
     } else if (f & POST_IN_BASE) {
         //  Tracked + mtime-unknown.  Defer the decision: post_hash_one
         //  will read the file, compare its sha to old_sha, and flip
@@ -781,6 +791,12 @@ static ok64 post_parent_sha(keeper *k, u8cs parent_hex, sha1 *out) {
 //  Returns OK in both the "baseline exists" and "no baseline" cases —
 //  callers branch on `*had_baseline_out`.  Non-OK reflects ULOG /
 //  parse failures upstream.
+//
+//  Per the new model, this collects only `ours` (parent[0]).  Patch
+//  parents (extra SHAs from prior `&<theirs>` chain entries) are added
+//  later by `post_add_patch_parents`, but only for files actually
+//  committed and only when their owning patch's ts stamps them — so
+//  cherry-pick / selective commits get a single parent.
 static ok64 post_collect_parents(u8bp out, sha1 *parents, u32 *nparents_out,
                                  u32 cap, b8 *had_baseline_out) {
     sane(out && parents && nparents_out && had_baseline_out);
@@ -794,40 +810,115 @@ static ok64 post_collect_parents(u8bp out, sha1 *parents, u32 *nparents_out,
     if (r != OK) return r;
     *had_baseline_out = YES;
 
-    //  Current commit lives in the row's `#fragment` (canonical form).
+    //  Current commit (`ours`) lives in the row's `#fragment` (canonical
+    //  form); legacy rows kept it in the query, which `SNIFFAtQueryFirstSha`
+    //  handles transparently.
     {
-        u8cs frag = {u.fragment[0], u.fragment[1]};
-        if (u8csLen(frag) == 40 && *nparents_out < cap) {
+        u8 hex40[40];
+        if (SNIFFAtQueryFirstSha(&u, hex40) == OK && cap > 0) {
             sha1 ph = {};
             u8s bin = {ph.data, ph.data + 20};
-            a_dup(u8c, hx, frag);
+            u8cs hx = {hex40, hex40 + 40};
             if (HEXu8sDrainSome(bin, hx) == OK && bin[0] == ph.data + 20)
                 parents[(*nparents_out)++] = ph;
         }
     }
 
-    //  Walk the query's `&`-chain.  First non-SHA spec is the branch
-    //  path; any 40-hex specs are extra parents (patch's `theirs`).
+    //  Walk the query for the branch (first QURY_REF).  Query SHAs are
+    //  intentionally ignored here — they're patch-recorded `theirs`
+    //  candidates, surfaced per-file in `post_add_patch_parents`.
     a_dup(u8c, q, u.query);
     while (!$empty(q)) {
         qref spec = {};
         if (QURYu8sDrain(q, &spec) != OK) break;
         if (spec.type == QURY_NONE) {
-            //  Empty between separators (leading `&` or trailing).
-            //  Don't break — keep draining; the SHAs may be later.
             if ($empty(q)) break;
             continue;
         }
         if (spec.type == QURY_REF && u8bDataLen(out) == 0) {
             u8bFeed(out, spec.body);
-        } else if (spec.type == QURY_SHA && $len(spec.body) == 40 &&
-                   *nparents_out < cap) {
-            sha1 ph = {};
-            u8s bin = {ph.data, ph.data + 20};
-            a_dup(u8c, hx, spec.body);
-            if (HEXu8sDrainSome(bin, hx) == OK && bin[0] == ph.data + 20)
-                parents[(*nparents_out)++] = ph;
+            break;
         }
+    }
+    done;
+}
+
+//  Pull the `theirs` sha THIS patch row contributed.  PATCH appends
+//  one new `&<theirs>` to the prior baseline's query each time, so
+//  the most recent patch row's last query SHA is the one it added.
+//  Returns OK + 40 hex bytes copied into `hex_out` on success.
+static ok64 post_patch_theirs(uri const *u, u8 hex_out[40]) {
+    sane(u && hex_out);
+    a_dup(u8c, q, u->query);
+    b8 found = NO;
+    u8 last[40];
+    while (!$empty(q)) {
+        qref spec = {};
+        if (QURYu8sDrain(q, &spec) != OK) break;
+        if (spec.type == QURY_NONE) {
+            if ($empty(q)) break;
+            continue;
+        }
+        if (spec.type == QURY_SHA && $len(spec.body) == 40) {
+            memcpy(last, spec.body[0], 40);
+            found = YES;
+        }
+    }
+    if (!found) fail(ULOGNONE);
+    memcpy(hex_out, last, 40);
+    done;
+}
+
+//  Walk every path that POST is rewriting (REWRITE, on disk).  For
+//  each, look up its owning ULOG row by mtime; if the row is a `patch`
+//  then its contributed `theirs` becomes a parent of the new commit
+//  (de-duped against existing parents).  Implicit mode only — selective
+//  commits stay single-parent ("cherry-pick") even when they touch
+//  patched files.
+static ok64 post_add_patch_parents(post_ctx *c, sha1 *parents,
+                                   u32 *nparents, u32 cap) {
+    sane(c && parents && nparents);
+    ron60 v_patch = SNIFFAtVerbPatch();
+    u32 n_now = SNIFFCount();
+
+    for (u32 i = 0; i < n_now && i < c->cap; i++) {
+        u8 f = c->flag[i];
+        if (!(f & POST_REWRITE)) continue;
+        if (!(f & POST_ON_DISK)) continue;
+        if (SNIFFIsDir(i))       continue;
+
+        u8cs rel = {};
+        if (SNIFFPath(rel, i) != OK) continue;
+        a_path(fp);
+        if (SNIFFFullpath(fp, c->reporoot, rel) != OK) continue;
+
+        struct stat sb = {};
+        if (lstat((char const *)u8bDataHead(fp), &sb) != 0) continue;
+        struct timespec mts = {.tv_sec  = sb.st_mtim.tv_sec,
+                               .tv_nsec = sb.st_mtim.tv_nsec};
+        ron60 mr = SNIFFAtOfTimespec(mts);
+
+        ron60 ow_verb = 0;
+        uri ow_u = {};
+        if (SNIFFAtRowAtTs(mr, &ow_verb, &ow_u) != OK) continue;
+        if (ow_verb != v_patch) continue;
+
+        u8 hex40[40];
+        if (post_patch_theirs(&ow_u, hex40) != OK) continue;
+        sha1 ph = {};
+        u8s bin = {ph.data, ph.data + 20};
+        u8cs hx = {hex40, hex40 + 40};
+        if (HEXu8sDrainSome(bin, hx) != OK) continue;
+        if (bin[0] != ph.data + 20) continue;
+
+        //  Dedupe against the existing parent list (multiple files may
+        //  share the same patch row).
+        b8 dup = NO;
+        for (u32 p = 0; p < *nparents; p++)
+            if (sha1eq(&parents[p], &ph)) { dup = YES; break; }
+        if (dup) continue;
+        if (*nparents >= cap) break;
+        parents[(*nparents)++] = ph;
     }
     done;
 }
@@ -1148,6 +1239,19 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
         for (u32 i = 0; i < n_now && i < cap; i++) {
             ok64 hr = post_hash_one(&ctx, i);
             if (hr != OK) { u8bFree(rec_buf); u8bFree(flag_buf); return hr; }
+        }
+    }
+
+    //  6b. Per-file patch parents: in implicit (commit-all) mode, every
+    //  patch row whose ts stamps a committed file contributes its
+    //  `theirs` to the parent set.  Selective mode skips this — a
+    //  cherry-pick is intentionally single-parent.  See VERBS.md §POST.
+    if (!ctx.any_pd) {
+        ok64 pp = post_add_patch_parents(&ctx, parents, &nparents,
+                                         POST_MAX_PARENTS);
+        if (pp != OK) {
+            u8bFree(rec_buf); u8bFree(flag_buf);
+            return pp;
         }
     }
 

@@ -33,11 +33,11 @@ REPO=${REPO:-$HOME/src/git}
 REPO_REL=${REPO#$HOME/}
 HOST=${HOST:-localhost}
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-GRAFmillMerges}
-TMILL=$TMP/$$/$TEST_ID
+TMILL=$TMP/$TEST_ID
 mkdir -p "$TMILL/client/.dogs"
-trap 'rm -rf "$TMILL"' EXIT
+trap 'rm -rf "$TMILL"; rmdir "$TMP" 2>/dev/null || true' EXIT
 
 #  Curated merges: 2-parent, file-overlapping, and CLEAN under
 #  `git merge-tree --write-tree P1 P2`.  Small ones first so a

@@ -12,32 +12,51 @@ the primary's store.
 
 ## The one-paragraph model
 
-Every op that touches the wt — `get`, `post`, `patch` (attribution-bearing)
-or `put`, `delete` (intent-only) — appends one row to
-`.sniff`.  Each attribution row's timestamp is the mtime that
-sniff sets on every file it wrote via `utimensat`.  A file is "clean"
-iff its mtime is in the ULOG's stamp-set; anything else is a user
-edit.  The baseline tree at any moment is the URI of the most recent
-`get`/`post`/`patch` row: one hash in the fragment → keeper commit
-tree; two or more (comma-separated) → graf-reconstructed merge tree.
-POST walks that baseline plus the wt, applies the change-set rules
-below, emits one keeper pack `commit → trees → blobs`, stamps every
-surviving wt file, and appends a `post` row.
+Every row sniff writes (`get`, `post`, `patch`, `put`) stamps
+its files with the row's ts via `utimensat`.  A file's mtime is
+therefore a pointer back into the ULOG: lookup-by-ts identifies
+the row that owns the file's content.  ∉ stamp-set means the
+user edited it since.  POST walks the wt, classifies each file
+via stamp lookup, emits one keeper pack `commit → trees → blobs`,
+stamps every surviving wt file with the new post row's ts, and
+appends a `post` row.  Parents of the new commit are computed
+per-file: each `patch` row whose ts stamps any committed file
+contributes its `theirs` SHAs.
+
+## Wall-clock guard
+
+Every sniff command checks `now ≥ last_log_ts` on entry and
+refuses with `CLOCKBAD` if the system clock has moved backwards.
+One ts is reserved per command, shared by every row + file
+stamp it writes.
 
 ## Change-set at commit time
 
-For each candidate path:
+For each candidate path, look up the on-disk mtime in the ULOG:
 
-1. **Explicit delete** (`delete <path>` row after last post): drop
-   from the new tree, `unlink` from disk.
-2. **Explicit put** (`put <path>` row after last post): include,
-   content from wt.
-3. **Selective mode** (any put/delete rows after last post, no
-   explicit match for this path): carry the baseline entry through
-   unchanged (or skip the path if it was never in baseline).
-4. **Implicit mode** (no put/delete rows since the last post):
-   `mtime ∉ stamp-set` ⇒ rewrite from wt; `mtime ∈ stamp-set` ⇒
-   carry baseline; file missing from wt ⇒ drop.
+| `mtime` lookup       | Selective (any put/delete in scope) | Implicit |
+|----------------------|------------------------------|----------|
+| `< last_get_ts`      | KEEP (untouched since reset) | KEEP |
+| `get` / `post` row   | KEEP (baseline content)      | KEEP |
+| `patch` row          | REWRITE; row's `theirs` joins parents | REWRITE; row's `theirs` joins parents |
+| `put` row            | REWRITE (current bytes)      | REWRITE (current bytes) |
+| ∉ stamp-set          | ignore unless explicit `put` named it (warn if so; current bytes win) | REWRITE (auto-stage) |
+| `delete <path>` row  | DROP (file already unlinked at `be delete` time) | DROP |
+
+Parents = `[ours] ∪ {patch.theirs | patch row's ts stamps any
+committed file}`.  This subsumes the previous merge-vs-cherry-pick
+split — provenance is per-file, not per-mode.
+
+### Boundaries in `.sniff`
+
+  * **pd boundary** = most recent `get` *or* `post` row.  `put` /
+    `delete` rows after this are in scope.
+  * **patch boundary** = most recent `get` *or* commit-all `post`.
+    `patch` rows after this are in scope.
+
+A `post` row is commit-all iff no put/delete rows lie between its
+own pd boundary and itself.  Detected on the fly during a forward
+scan; no new ULOG verb required.
 
 ## Headers
 

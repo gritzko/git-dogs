@@ -16,13 +16,13 @@ export PATH="$BIN:$PATH"
 BE="$(command -v be || echo $BIN/be)"
 echo "# BE=$BE"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-mill-toy}
-TMILL=${TMILL:-$TMP/$$-$TEST_ID}
+TMILL=${TMILL:-$TMP/$TEST_ID}
 HOST=${HOST:-localhost}
 
 KEEP_WORK=""
-trap '[ -z "$KEEP_WORK" ] && rm -rf "$TMILL"; echo; echo "workdir: $TMILL${KEEP_WORK:+ (kept)}"' EXIT
+trap '[ -z "$KEEP_WORK" ] && { rm -rf "$TMILL"; rmdir "$TMP" 2>/dev/null || true; }; echo; echo "workdir: $TMILL${KEEP_WORK:+ (kept)}"' EXIT
 mkdir -p "$TMILL/src" "$TMILL/be01" "$TMILL/git01"
 
 #  --- Build toy source repo ---

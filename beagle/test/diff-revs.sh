@@ -19,11 +19,11 @@ set -eu
 BIN=${BIN:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
 export PATH="$BIN:$PATH"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-diff-revs}
-T=$TMP/$$-$TEST_ID
+T=$TMP/$TEST_ID
 mkdir -p "$T"
-trap 'rm -rf "$T"' EXIT INT TERM
+trap 'rm -rf "$T"; rmdir "$TMP" 2>/dev/null || true' EXIT INT TERM
 
 FAIL=0
 CASE=0

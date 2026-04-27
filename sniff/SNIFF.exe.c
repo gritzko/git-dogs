@@ -698,9 +698,9 @@ ok64 SNIFFExec(cli *c) {
             }
         }
     } else if (is_put) {
+        //  PUT.c prints its own staged-row count (it's the only path
+        //  that knows how many input URIs survived dedup / validation).
         ret = PUTStage(c->nuris, c->uris);
-        if (ret == OK && c->nuris > 0)
-            fprintf(stderr, "sniff: staged %u put row(s)\n", c->nuris);
     } else if (is_delete) {
         //  Two URI shapes:
         //    * branch-form (`?branch`) — drop the label via REFS
@@ -735,8 +735,8 @@ ok64 SNIFFExec(cli *c) {
                 }
             }
         }
-        if (ret == OK && path_n > 0)
-            fprintf(stderr, "sniff: staged %u delete row(s)\n", path_n);
+        //  DEL.c prints its own per-call message.
+        (void)path_n;
     } else if (is_checkout) {
         if (c->nuris < 1) {
             fprintf(stderr, "sniff: get/checkout requires a URI or hex\n");

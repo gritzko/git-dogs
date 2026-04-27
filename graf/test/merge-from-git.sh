@@ -26,12 +26,12 @@ export PATH="$BIN:$PATH"
 export DOG_REMOTE_PATH="$BIN"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-GRAFmergeFromGit}
-TMP=$TMP/$$/$TEST_ID
+TMP=$TMP/$TEST_ID
 TMP_REL=${TMP#$HOME/}
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT
 
 # --- 1. toy git source: base + feat-a + feat-b, concurrent edits ----
 

@@ -11,10 +11,10 @@ BIN=${BIN:-$(dirname "$0")/../../build-debug/bin}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-SNIFFbranchdel}
-TMP=$TMP/$$/$TEST_ID
-trap 'rm -rf "$TMP"' EXIT INT TERM
+TMP=$TMP/$TEST_ID
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT INT TERM
 mkdir -p "$TMP"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

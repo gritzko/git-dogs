@@ -17,11 +17,11 @@ BIN=$(cd "$BIN" && pwd)
 BE="$BIN/be"
 export PATH="$BIN:$PATH"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-BEworkflow}
-TMP=$TMP/$$-$TEST_ID
+TMP=$TMP/$TEST_ID
 mkdir -p "$TMP"; echo "Running in $PWD"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 note() { echo "  - $*"; }
@@ -65,32 +65,54 @@ want_file README "hello"
 note "README restored by be get"
 
 # ------------------------------------------------------------------
-# Scenario 3: be put a; be put b; be post — explicit rows in ULOG
+# Scenario 3: be put a; be put b; be post — explicit rows in ULOG.
+#
+# An untracked non-gitignored sibling (`stray.txt`) sits in the wt
+# the entire time and must NOT end up in either put row's URI nor
+# the resulting commit's tree.  Selective mode (any put rows in
+# scope) is supposed to ignore untracked-without-put paths.
 # ------------------------------------------------------------------
-echo "=== 3. be put a; be put b; be post ==="
+echo "=== 3. be put a; be put b; be post (untracked stray must stay out) ==="
 D3="$TMP/r3"; mkdir -p "$D3"; cd "$D3"
 echo alpha > a.txt
 echo bravo > b.txt
+echo stray > stray.txt                   # untracked, never put-ed
 
 "$BE" put a.txt >/dev/null
 awk -F'\t' '$2 == "put" && $3 == "a.txt"' .sniff | grep -q . \
     || fail "no \`put a.txt\` row in ULOG"
+awk -F'\t' '$2 == "put" && $3 == "stray.txt"' .sniff | grep -q . \
+    && fail "stray.txt should not be in any put row"
 "$BE" put b.txt >/dev/null
 awk -F'\t' '$2 == "put" && $3 == "b.txt"' .sniff | grep -q . \
     || fail "no \`put b.txt\` row in ULOG"
-note "ULOG records two put rows"
+awk -F'\t' '$2 == "put" && $3 == "stray.txt"' .sniff | grep -q . \
+    && fail "stray.txt should not be in any put row"
+note "ULOG records two put rows; stray.txt absent from both"
+
+# A second untracked file appears AFTER the put rows are written —
+# this is the timing the user-reported leak hit.  It must also stay
+# out of the commit's tree.
+echo late > late.txt
+mkdir -p side/inner
+echo nested > side/inner/n.txt
 
 "$BE" post a plus b >/dev/null
 C3=$(head_hex)
 note "HEAD=$C3"
 
-# Verify: fresh worktree + be get restores both files.
+# Verify: fresh worktree + be get restores both files; stray.txt and
+# late.txt + side/ were never committed.
 D3b="$TMP/r3b"; mkdir -p "$D3b"; cd "$D3b"
 cp -r "$D3/.dogs" .
 "$BE" get "$C3" >/dev/null
 want_file a.txt "alpha"
 want_file b.txt "bravo"
-note "both files present after be get"
+want_missing stray.txt
+want_missing late.txt
+want_missing side/inner/n.txt
+want_missing side
+note "both put-staged files present; pre-put + post-put untracked all absent"
 
 # ------------------------------------------------------------------
 # Scenario 4: implicit-all-dirty via bare post (no put/delete rows)
@@ -275,5 +297,56 @@ want_file    keep.txt "k"
 want_missing dd/a.txt
 want_missing dd/inner/b.txt
 note "commit tree excludes the deleted subtree"
+
+# ------------------------------------------------------------------
+# Scenario 11: bare `be put` is tracked-only — repro for the
+# untracked-leak bug.
+#
+#   Baseline carries `lib/foo.c`.  Modify foo.c and add an untracked
+#   sibling subtree `side/inner/n.txt`.  Bare `be put` must walk the
+#   baseline tree (tracked-only) and emit a row for foo.c only —
+#   never for any path under `side/`.  POST then commits foo.c only;
+#   side/ stays out of the tree.
+#
+#   The earlier bug: bare put walked the wt via stamp-set membership
+#   (any mtime ∉ stamp-set), which silently picked up untracked
+#   subtrees and committed them under "selective mode".  See
+#   sniff/PUT.c §"Bare-walk callback (baseline-tree visitor)".
+# ------------------------------------------------------------------
+echo "=== 11. bare be put stages tracked-only (no untracked leak) ==="
+D11="$TMP/r11"; mkdir -p "$D11/lib"; cd "$D11"
+echo v1 > lib/foo.c
+"$BE" post seed lib >/dev/null
+C11a=$(head_hex)
+note "baseline HEAD=$C11a"
+
+sleep 1
+echo v2 > lib/foo.c                       # modify tracked
+mkdir -p side/inner
+echo nested > side/inner/n.txt            # untracked subtree
+echo top    > top.txt                     # untracked top-level
+
+"$BE" put >/dev/null                      # bare put — tracked-only
+awk -F'\t' '$2 == "put" && $3 == "lib/foo.c"' .sniff | grep -q . \
+    || fail "bare put did not stage lib/foo.c"
+awk -F'\t' '$2 == "put" && $3 ~ /^side\//' .sniff | grep -q . \
+    && fail "bare put leaked an untracked side/ path into the ULOG"
+awk -F'\t' '$2 == "put" && $3 == "top.txt"' .sniff | grep -q . \
+    && fail "bare put leaked untracked top.txt into the ULOG"
+note "bare put staged lib/foo.c only; untracked side/ + top.txt absent from ULOG"
+
+"$BE" post tracked-only modify >/dev/null
+C11b=$(head_hex)
+[ "$C11b" != "$C11a" ] || fail "HEAD unchanged after bare-put + post"
+note "updated HEAD=$C11b"
+
+D11c="$TMP/r11c"; mkdir -p "$D11c"; cd "$D11c"
+cp -r "$D11/.dogs" .
+"$BE" get "$C11b" >/dev/null
+want_file    lib/foo.c        "v2"
+want_missing side
+want_missing side/inner/n.txt
+want_missing top.txt
+note "commit tree carries the modified tracked file; untracked subtree stayed out"
 
 echo "=== all be-dispatch scenarios passed ==="

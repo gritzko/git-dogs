@@ -28,14 +28,18 @@
 #include "dog/ULOG.h"
 #include "keeper/KEEP.h"
 
-con ok64 SNIFFFAIL   = 0x1c5d23cf3ca495;
-con ok64 SNIFFNOROM = 0x71748f3d761b616;
-con ok64 SNIFFOPEN   = 0x1c5d23cf619397;
-con ok64 SNIFFOPRO = 0x1c5d23cf6196d8;
-con ok64 SNIFFDRTY   = 0x1c5d23cf35b762;
-con ok64 SNIFFOVRL   = 0x1c5d23cf61f6d5;
-con ok64 SNIFFNOFF   = 0x1c5d23cf5d83cf;
-con ok64 SNIFFNOOP   = 0x1c5d23cf5d8619;
+con ok64 SNIFFFAIL     = 0x1c5d23cf3ca495;
+con ok64 SNIFFNOROM    = 0x71748f3d761b616;
+con ok64 SNIFFOPEN     = 0x1c5d23cf619397;
+con ok64 SNIFFOPRO     = 0x1c5d23cf6196d8;
+con ok64 SNIFFDRTY     = 0x1c5d23cf35b762;
+con ok64 SNIFFOVRL     = 0x1c5d23cf61f6d5;
+con ok64 SNIFFNOFF     = 0x1c5d23cf5d83cf;
+con ok64 SNIFFNOOP     = 0x1c5d23cf5d8619;     // legacy alias, prefer SNIFFPOSTNONE
+con ok64 SNIFFCLOCKBAD = 0x23cf31560c50b28d;
+con ok64 SNIFFPUTNONE  = 0x748f3d979d5d85ce;
+con ok64 SNIFFDELDIRTY = 0x23cf34e54d49b762;
+con ok64 SNIFFPOSTNONE = 0x23cf65871d5d85ce;
 
 #define SNIFF_FILE ".sniff"
 

@@ -17,11 +17,11 @@ if [ ! -x "$KEEPER" ]; then
     exit 1
 fi
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-keeper-alias}
-TMPDIR=$TMP/$$/$TEST_ID
+TMPDIR=$TMP/$TEST_ID
 mkdir -p "$TMPDIR"
-trap "rm -rf $TMPDIR" EXIT
+trap 'rm -rf "$TMPDIR"; rmdir "$TMP" 2>/dev/null || true' EXIT
 
 WORK="$TMPDIR/work"
 mkdir -p "$WORK/.dogs/keeper"

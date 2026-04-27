@@ -23,13 +23,14 @@ HOST=${HOST:-localhost}
 #  (useful for inspecting the clone); otherwise mktemp + cleanup on exit.
 if [ -n "${TMILL:-}" ]; then
     KEEP_ON_EXIT=1
+    TMP=
 else
-    TMP=${TMP:-$HOME/tmp}
+    TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
     TEST_ID=${TEST_ID:-mill-last10}
-    TMILL=$TMP/$$-$TEST_ID
+    TMILL=$TMP/$TEST_ID
     KEEP_ON_EXIT=
 fi
-trap '[ -z "$KEEP_ON_EXIT" ] && rm -rf "$TMILL"; echo "workdir: $TMILL${KEEP_ON_EXIT:+ (kept)}"' EXIT
+trap '[ -z "$KEEP_ON_EXIT" ] && { rm -rf "$TMILL"; [ -n "$TMP" ] && rmdir "$TMP" 2>/dev/null || true; }; echo "workdir: $TMILL${KEEP_ON_EXIT:+ (kept)}"' EXIT
 mkdir -p "$TMILL/be01" "$TMILL/git01"
 
 #  Dynamically pick the N most-recent v* tags (NTAGS, default 10).

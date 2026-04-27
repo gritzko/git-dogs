@@ -8,10 +8,11 @@
 
 REMOTE="${1:?usage: treadmill.sh <remote> [keeper-binary]}"
 KEEPER="${2:-keeper}"
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-keeper-treadmill}
-WORKDIR="${WORKDIR:-$TMP/$$/$TEST_ID}"
+WORKDIR="${WORKDIR:-$TMP/$TEST_ID}"
 mkdir -p "$WORKDIR"
+trap 'rm -rf "$WORKDIR"; rmdir "$TMP" 2>/dev/null || true' EXIT INT TERM
 HOST="${REMOTE%% *}"
 REPO="${REMOTE#* }"
 

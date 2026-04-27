@@ -19,9 +19,22 @@ on-disk files are "clean" vs user-edited.
 | `get`    | `[//origin/path]?heads/X&<sha>` (or `?<sha>` detached) | yes |
 | `post`   | `?heads/X&<sha>` (or `?<sha>` detached)               | yes |
 | `patch`  | `?heads/X&<ours>&<theirs>[…]` (extends prior query)   | yes |
-| `put`    | `<path>`                                              | no  |
-| `delete` | `<path>`                                              | no  |
-| `mod`    | `<path>`  (watch daemon hint — inotify observed edit) | no  |
+| `put`    | `<path>`                                              | yes (the staged file) |
+| `delete` | `<path>`                                              | no (file unlinked) |
+| `mod`    | `<path>`  (watch daemon hint — inotify observed edit) | no |
+
+Stamping every owning row means a file's mtime points back into
+the ULOG by ts: `lstat → ron60 → row → verb` is the canonical
+classification.  `put` joining the stamping verbs is what enables
+"all-changed + some-new" via `be put && be put new1.c && be post`.
+
+### Wall-clock guard
+
+Every sniff command checks `now ≥ last_log_ts` on entry.  If the
+system clock has moved backwards (NTP step, suspend/resume drift),
+refuse with `CLOCKBAD` rather than write rows whose ts would alias
+or precede an existing stamp's owning row.  One ts is reserved
+per command, shared by every row + file stamp written.
 
 Version info — branch ref plus tip/merge-participant SHAs — lives in
 the URI **query** (`?`-side), parsed by `dog/QURY`.  The **fragment**

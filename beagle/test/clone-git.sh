@@ -17,9 +17,9 @@ export PATH="$BIN:$PATH"
 TESTDIR=$(cd "$(dirname "$0")" && pwd)
 
 REPO=${REPO:-$HOME/src/git}
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-clone-git}
-CLONE=${CLONE:-$TMP/$$-$TEST_ID}
+CLONE=${CLONE:-$TMP/$TEST_ID}
 REF=${REF:-HEAD}
 NAME=${NAME:-$(basename "$REPO" .git)}
 
@@ -28,6 +28,7 @@ GIT_DIR="$CLONE/$NAME.git-ref"
 
 rm -rf "$DOGS_DIR" "$GIT_DIR"
 mkdir -p "$DOGS_DIR"
+trap 'rm -rf "$CLONE"; rmdir "$TMP" 2>/dev/null || true' EXIT INT TERM
 
 # --- git reference clone ---
 echo "=== git clone reference ==="

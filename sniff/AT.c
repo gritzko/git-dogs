@@ -3,6 +3,7 @@
 #include "AT.h"
 #include "SNIFF.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -178,6 +179,36 @@ void SNIFFAtNow(ron60 *ts_out, struct timespec *tv_out) {
     }
     *ts_out = now;
     *tv_out = at_ts_of_ron60(now);
+}
+
+ok64 SNIFFAtRowAtTs(ron60 mtime, ron60 *verb_out, urip u_out) {
+    sane(SNIFF.h && verb_out && u_out);
+    u32 i = 0;
+    ok64 fo = ULOGFind(&SNIFF.log, mtime, &i);
+    if (fo != OK) return fo;
+    ron60 ts = 0, verb = 0;
+    uri u = {};
+    call(ULOGRow, &SNIFF.log, i, &ts, &verb, &u);
+    *verb_out = verb;
+    *u_out = u;
+    done;
+}
+
+ok64 SNIFFCheckClock(void) {
+    sane(1);
+    if (!SNIFF.h) done;                       // no log yet, nothing to compare
+    ron60 tail_ts = 0, tail_verb = 0;
+    uri tu = {};
+    if (ULOGTail(&SNIFF.log, &tail_ts, &tail_verb, &tu) != OK) done;
+    ron60 now = RONNow();
+    if (now < tail_ts) {
+        fprintf(stderr,
+                "sniff: clock skew — system clock is before the latest "
+                ".sniff row; refusing every command until clock catches "
+                "up\n");
+        return SNIFFCLOCKBAD;
+    }
+    done;
 }
 
 ok64 SNIFFAtStampPath(path8b path, ron60 ts) {

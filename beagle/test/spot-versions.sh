@@ -31,15 +31,15 @@ export PATH="$BIN:$PATH"
 BE="$(command -v be   || echo $BIN/be)"
 SPOT="$(command -v spot || echo $BIN/spot)"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-spot-versions}
-TMP=$TMP/$$-$TEST_ID
+TMP=$TMP/$TEST_ID
 HOST=${HOST:-localhost}
 SYMBOL=${SYMBOL:-MarkerXYZ}
 RENAMED=${RENAMED:-RenamedABC}
 
 KEEP_WORK=""
-trap '[ -z "$KEEP_WORK" ] && rm -rf "$TMP"; \
+trap '[ -z "$KEEP_WORK" ] && { rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true; }; \
       echo; echo "workdir: $TMP${KEEP_WORK:+ (kept)}"' EXIT
 mkdir -p "$TMP/src" "$TMP/be01"
 

@@ -13,12 +13,12 @@ export PATH="$BIN:$PATH"
 #  Keeper treats URI paths in `//host/path` as HOME-relative (see
 #  keeper/KEEP.exe.c); $TMILL must live under $HOME and the URI must
 #  use the HOME-relative form.  CMake seeds TMP=$HOME/tmp by default.
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-mill}
-TMILL=$TMP/$$-$TEST_ID
+TMILL=$TMP/$TEST_ID
 TMILL_REL=${TMILL#$HOME/}
 mkdir -p "$TMILL"
-trap 'rm -rf "$TMILL"' EXIT
+trap 'rm -rf "$TMILL"; rmdir "$TMP" 2>/dev/null || true' EXIT
 
 echo "=== mill: be get + verify ==="
 

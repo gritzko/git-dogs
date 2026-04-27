@@ -23,11 +23,11 @@ BIN=${BIN:-$(dirname "$0")/../../build-debug/bin}
 SNIFF="$BIN/sniff"
 KEEPER="$BIN/keeper"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-SNIFFworkflow}
-TMP=$TMP/$$/$TEST_ID
+TMP=$TMP/$TEST_ID
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 note() { echo "  - $*"; }

@@ -25,13 +25,13 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
 HOST=${HOST:-localhost}
 
-#  Per-run scratch dir: $TMP/<pid>/<test-id>/.  Base TMP and TEST_ID
-#  come from ctest (see sniff/test/CMakeLists.txt); standalone runs
-#  fall back to $HOME/tmp and the script's basename.
-TMP=${TMP:-$HOME/tmp}
+#  Per-run scratch dir: $TMP/<test-id>/.  Base TMP and TEST_ID come
+#  from ctest (see sniff/test/CMakeLists.txt); standalone runs fall
+#  back to $HOME/tmp/run-<timestamp> and the script's basename.
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-SNIFFpatch}
-TMP=$TMP/$$/$TEST_ID
-trap 'rm -rf "$TMP"' EXIT
+TMP=$TMP/$TEST_ID
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT
 mkdir -p "$TMP"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

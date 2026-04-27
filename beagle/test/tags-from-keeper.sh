@@ -17,12 +17,12 @@ BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"
 export DOG_REMOTE_PATH="$BIN"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-tags-from-keeper}
-TMP=$TMP/$$-$TEST_ID
+TMP=$TMP/$TEST_ID
 TMP_REL=${TMP#$HOME/}
 mkdir -p "$TMP"; echo "Running in $PWD"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true' EXIT
 
 # --- 1. toy git source: 3 revs, v1, v2 tags, master tip ---
 SRC=$TMP/src

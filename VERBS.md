@@ -165,12 +165,67 @@ After a successful GET, `.sniff` records the new base as
 POST commits the wt's current state to a branch, or pushes a
 branch to a peer.  POST is **fast-forward-only**: refused if the
 target branch's tip is not an ancestor of the wt's recorded
-base.  Empty POSTs (no changes since base) are also refused.
+base.  Empty POSTs (no changes since base) are refused with
+`POSTNONE`.
 
-POST drains the `.sniff` tail to populate the commit's parent
-list — the base entry is the first parent, each PATCH appended
-since adds another.  After commit, `.sniff` resets to
-`(target-branch, new-tip)` with no pending patches.
+### Per-file classification via stamps
+
+Every row sniff writes (`get`, `post`, `patch`, `put`) stamps
+each file it touched with the row's `ts` via `utimensat`.  At
+POST time we read each on-disk file's mtime and look up the
+owning row by ts:
+
+| `mtime` lookup       | Fate (selective mode¹) | Fate (implicit mode²) |
+|----------------------|------------------------|------------------------|
+| `< last_get_ts`      | KEEP (unchanged since reset) | KEEP |
+| `get` / `post` row   | KEEP (baseline content)      | KEEP |
+| `patch` row          | REWRITE; row's `theirs` joins the parent set | REWRITE; row's `theirs` joins the parent set |
+| `put` row            | REWRITE (current bytes)      | REWRITE (current bytes) |
+| ∉ stamp-set (edited) | ignore unless explicit `put` named it (warn if put exists; current bytes win) | REWRITE |
+
+¹ Selective = at least one explicit `put` / `delete` row since
+last post.  ² Implicit (a.k.a. commit-all) = none.
+
+### Parents are computed per-file
+
+```
+parents = [ours]  ∪  { patch.theirs | patch row's ts stamps any committed file }
+```
+
+So:
+
+  * `commit-all` (no put/delete + no patch in scope): single parent.
+  * `commit` (put/delete + no patch): single parent.
+  * `merge` (no put/delete + patch in scope): multi-parent — every
+    patch's `theirs` joins.
+  * `cherry-pick` (put/delete + patch in scope): single parent if
+    the picked files are local edits; multi-parent for *only* those
+    patches whose changes you actually committed.
+
+The earlier "drop patch parents on cherry-pick" rule and the
+`base_is_patch` exception both fall out of this — provenance is
+per-file, not per-mode.
+
+### ULOG scope and boundaries
+
+Two boundaries in `.sniff`, both anchored at the most recent `get`
+row (a `get` is a hard reset of the world):
+
+  * **pd boundary** — most recent `get` *or* `post`.  `put` /
+    `delete` rows after this are in scope for the next POST.
+  * **patch boundary** — most recent `get` *or* commit-all `post`.
+    `patch` rows after this are in scope.
+
+A `post` row classifies as commit-all iff no put/delete rows lie
+between its own pd boundary and itself; determinable on the fly
+from a single forward scan, so no new ULOG verb is needed.
+
+### Wall-clock guard
+
+Every command checks `now ≥ last_log_ts` on entry and refuses
+with `CLOCKBAD` if the system clock has moved backwards.  One
+`ts` is reserved per command, shared by every row + file stamp
+written in that invocation.
 
 The wt's branch pointer moves to the target on a successful POST
 (its on-disk file state already matches; only the recorded
@@ -208,28 +263,39 @@ extra parents come from `.sniff`.
 
 ##  PUT — stage additions
 
-PUT is strictly local — it updates the branch's staging pack.
-No commit, no `REFS` write, no remote.
+PUT records explicit staging intent.  Each `put` row also stamps
+its file via `utimensat` to the row's ts, so the file's mtime
+points back to the put row that owns its content.
 
 | Form | Effect |
 |---|---|
-| `be put`          | Stage every dirty file (sniff walks the watch log). |
-| `be put file.c`   | Stage one file. |
-| `be put src/`     | Stage a subtree. |
+| `be put`          | Walk the wt; stage every tracked-and-dirty file (one `put` row per path).  Refuses with `PUTNONE` if no tracked file is dirty. |
+| `be put file.c`   | Stage one file.  Refuses with `PUTNONE` if the file is missing, or if it is already clean and matches baseline.  Re-stamps the file. |
+| `be put src/`     | Stage a subtree.  If `src/` is **tracked** (any baseline entry under it): tracked-dirty files only.  If **untracked**: every non-ignored file under it. |
 
-PUT touches `stage.sniff` + `stage.idx` in the current branch
-dir (see `sniff/STAGE.md`).  Pushing to a peer is POST's job.
+PUT only writes to `<wt>/.sniff` (the ULOG) and stamps files;
+no pack writes happen until POST.  Pushing to a peer is POST's
+job.
+
+A `put` on a clean baseline-stamped file is refused — re-stamping
+it under a `put` row would shift its provenance from baseline to
+put for no semantic gain.
 
 ##  DELETE — remove
 
-DELETE's meaning depends on URI shape.  In-tree paths stage
-removals; a ref URI drops the branch dir.
+DELETE's meaning depends on URI shape.  In-tree paths actually
+unlink files **immediately** (after a dirty-safety check) and
+append a `delete <path>` row; a ref URI drops the branch dir.
+
+The dirty check refuses (`DELDIRTY`) if the file's mtime is out
+of the stamp-set **and** its content differs from the baseline
+sha (cheap mtime check, content-hash only on drift).  Already-
+absent paths are an OK no-op.
 
 | Form | Effect |
 |---|---|
-| `be delete file.c`                  | Stage a file removal (next POST drops it). |
-| `be delete`                         | Stage every tracked file missing from disk. |
-| `be delete src/`                    | Stage subtree removal. |
+| `be delete file.c`                  | Unlink the file (refused as `DELDIRTY` if user-edited); append `delete file.c` row. |
+| `be delete src/`                    | Atomic pre-flight: scan all descendants; refuse if **any** is dirty.  On pass, unlink all + append one `delete src/` row. |
 | `be delete ?feat/fix1`              | **Drop a branch dir.**  Leaf-only; refused if descendants exist or any wt's `.sniff` records this branch as base.  Reclaims unreachable shards (current GC path).  See `keeper/README.md` §"Delta-dependency DAG" and `sniff/AT.md`. |
 | `be delete //origin?feat`           | Push a delete (`<old-sha> 000…0 refs/heads/feat`) via `keeper receive-pack` — same wire git uses for `git push -d`. |
 

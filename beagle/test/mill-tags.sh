@@ -16,15 +16,15 @@ BIN=${BIN:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
 >>>>>>> dogs-bro
 export PATH="$BIN:$PATH"
 
-TMP=${TMP:-$HOME/tmp}
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
 TEST_ID=${TEST_ID:-mill-tags}
-TMILL=${TMILL:-$TMP/$$-$TEST_ID}
+TMILL=${TMILL:-$TMP/$TEST_ID}
 REPO=${REPO:-$HOME/src/git}
 NTAGS=${NTAGS:-12}
 #  Keeper URI paths are $HOME-relative: //host/src/git → $HOME/src/git.
 REPO_REL=${REPO#$HOME/}
 HOST=${HOST:-localhost}
-trap 'rm -rf "$TMILL"' EXIT
+trap 'rm -rf "$TMILL"; rmdir "$TMP" 2>/dev/null || true' EXIT
 
 TAGS=${TAGS:-$(git -C "$REPO" tag --sort=creatordate | tail -n "$NTAGS")}
 
