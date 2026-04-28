@@ -79,17 +79,6 @@ typedef struct {
 
 // --- git mode helpers ---
 
-static u16 post_mode_of_kind(u8 kind) {
-    switch (kind) {
-        case WALK_KIND_REG: return 0100644;
-        case WALK_KIND_EXE: return 0100755;
-        case WALK_KIND_LNK: return 0120000;
-        case WALK_KIND_DIR: return 040000;
-        case WALK_KIND_SUB: return 0160000;
-    }
-    return 0100644;
-}
-
 static void post_mode_feed(Bu8 tree, u16 mode) {
     //  Git modes are printed in octal without leading zeros.  All four
     //  values we emit are 5- or 6-digit strings.
@@ -227,7 +216,7 @@ static ok64 post_pd_cb(ron60 verb, u8cs path, ron60 ts, void *vctx) {
     //  File-level put/delete row → emit one ULOG line into the
     //  appropriate intent buffer.  Sort+dedup happens after the walk;
     //  the merge classifier then dispatches on `verb` to set
-    //  POST_EXPL_PUT / POST_EXPL_DEL.
+    //  the appropriate intent buffer for the merge.
     uri u = {};
     u.path[0] = path[0];
     u.path[1] = path[1];
@@ -314,7 +303,7 @@ static ok64 post_resolve_baseline(post_ctx *c, sha1 *root_out, b8 *has_out) {
     //  branch REF plus 1-to-N SHAs.  For a squash-merge POST we only
     //  need the ours tree as the baseline — patched files are
     //  mtime-dirty (PATCH does not stamp), added files aren't in ours
-    //  and fall into POST_REWRITE via the implicit-dirty rule, and
+    //  and fall into add via the implicit-dirty rule, and
     //  deleted files were unlinked by PATCH so they vanish via the
     //  implicit-drop rule.  So take the first SHA spec as "ours".
     u8 hex40[40];
@@ -948,36 +937,6 @@ static ok64 post_add_patch_parents(post_ctx *c, sha1 *parents,
     done;
 }
 
-//  Legacy single-parent variant, kept for callers that only need the
-//  branch + first parent hex.
-static ok64 post_baseline_branch(u8bp out, u8bp hex_out) {
-    sane(out && hex_out);
-    u8bReset(out);
-    u8bReset(hex_out);
-    ron60 ts = 0, verb = 0;
-    uri u = {};
-    ok64 r = SNIFFAtBaseline(&ts, &verb, &u);
-    if (r != OK) done;
-
-    //  Split the baseline query into its first REF spec (branch name,
-    //  no leading `?`) and its first 40-hex SHA spec (parent commit).
-    //  Additional specs — extra SHAs from an in-progress merge — are
-    //  not relevant to the branch/parent lookup here.
-    a_dup(u8c, q, u.query);
-    while (!$empty(q)) {
-        qref spec = {};
-        if (QURYu8sDrain(q, &spec) != OK) break;
-        if (spec.type == QURY_NONE) break;
-        if (spec.type == QURY_REF && u8bDataLen(out) == 0) {
-            u8bFeed(out, spec.body);
-        } else if (spec.type == QURY_SHA && $len(spec.body) == 40 &&
-                   u8bDataLen(hex_out) == 0) {
-            u8bFeed(hex_out, spec.body);
-        }
-    }
-    done;
-}
-
 // --- Shared scan: produce the change-set into a post_ctx ---
 //
 //  Steps 2..5 of POSTCommit, lifted so a dry-run print path can run
@@ -1072,8 +1031,8 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
     }
 
     //  5. Classify baseline + wt + put/del intents via 4-way merge,
-    //     populating POST_IN_BASE / POST_ON_DISK / POST_EXPL_PUT /
-    //     POST_EXPL_DEL + per-path metadata.
+    //     emitting one keep/unlink/add decision row per distinct path
+    //     into ctx.decisions.
     ok64 cr = post_classify_via_merge(c, bu, wu, put_buf, del_buf,
                                       v_base, v_wt, v_put_emit, v_del_emit);
     u8bFree(bu); u8bFree(wu);
@@ -1168,6 +1127,12 @@ static ok64 post_emit_decision(post_ctx *c, ron60 verb,
 //  Iterate the decisions buffer, invoking `cb` for every row whose
 //  verb is in `verb_mask` (bitmask: 1=keep, 2=unlink, 4=add).  cb sees
 //  the parsed ulogrec and can pull path/mode/sha from rec->uri.
+//  Verb-mask bits for `post_walk_decisions`.
+#define POST_VM_KEEP   1u
+#define POST_VM_UNLINK 2u
+#define POST_VM_ADD    4u
+#define POST_VM_ALL    (POST_VM_KEEP | POST_VM_UNLINK | POST_VM_ADD)
+
 typedef ok64 (*post_decision_cb)(post_ctx *c, ulogreccp rec, void *ctx);
 static ok64 post_walk_decisions(post_ctx *c, u32 verb_mask,
                                 post_decision_cb cb, void *cbctx) {
@@ -1179,14 +1144,61 @@ static ok64 post_walk_decisions(post_ctx *c, u32 verb_mask,
         if (dr == NODATA) break;
         if (dr != OK) continue;
         u32 bit = 0;
-        if      (rec.verb == c->v_keep)   bit = 1;
-        else if (rec.verb == c->v_unlink) bit = 2;
-        else if (rec.verb == c->v_add)    bit = 4;
+        if      (rec.verb == c->v_keep)   bit = POST_VM_KEEP;
+        else if (rec.verb == c->v_unlink) bit = POST_VM_UNLINK;
+        else if (rec.verb == c->v_add)    bit = POST_VM_ADD;
         if (!(verb_mask & bit)) continue;
         ok64 cr = cb(c, &rec, cbctx);
         if (cr != OK) return cr;
     }
     done;
+}
+
+// --- Decision-walk callbacks for the simple per-row loops ---
+
+//  Unlink the wt file.  Errors swallowed — best-effort.
+static ok64 post_drain_unlink_cb(post_ctx *c, ulogreccp rec, void *vctx) {
+    (void)vctx;
+    u8cs path = {rec->uri.path[0], rec->uri.path[1]};
+    a_path(fp);
+    if (SNIFFFullpath(fp, c->reporoot, path) != OK) return OK;
+    (void)FILEUnLink($path(fp));
+    return OK;
+}
+
+//  Stamp the wt file with the post ts (only `add` rows reach here).
+static ok64 post_drain_stamp_cb(post_ctx *c, ulogreccp rec, void *vctx) {
+    (void)vctx;
+    u8cs path = {rec->uri.path[0], rec->uri.path[1]};
+    a_path(fp);
+    if (SNIFFFullpath(fp, c->reporoot, path) != OK) return OK;
+    (void)SNIFFAtStampPath(fp, rec->ts);
+    return OK;
+}
+
+//  M/A/D printer.  ctx is FILE* (stdout for dry run, stderr for commit
+//  with optional grey ANSI on/off pair).
+typedef struct {
+    FILE       *out;
+    char const *on;
+    char const *off;
+    u32         changed;
+} post_mad_ctx;
+
+static ok64 post_drain_mad_cb(post_ctx *c, ulogreccp rec, void *vctx) {
+    post_mad_ctx *m = (post_mad_ctx *)vctx;
+    char code = 0;
+    if (rec->verb == c->v_unlink)   code = 'D';
+    else if (rec->verb == c->v_add) {
+        sha1 old = {};
+        code = post_decision_old_sha(&rec->uri, &old) ? 'M' : 'A';
+    }
+    if (code == 0) return OK;
+    fprintf(m->out, "%s%c %.*s%s\n",
+            m->on, code, (int)u8csLen(rec->uri.path),
+            (char *)rec->uri.path[0], m->off);
+    m->changed++;
+    return OK;
 }
 
 //  Free everything post_ctx_init allocated.
@@ -1210,27 +1222,11 @@ ok64 POSTPrintStatus(u8cs reporoot) {
     if (so != OK) { post_ctx_free(&ctx); return so; }
 
     //  Walk decisions, print one line per changed path.
-    u32 changed = 0;
-    a_dup(u8c, scan, u8bData(ctx.decisions));
-    while (!u8csEmpty(scan)) {
-        ulogrec rec = {};
-        ok64 dr = ULOGu8sDrain(scan, &rec);
-        if (dr == NODATA) break;
-        if (dr != OK) continue;
-        char code = 0;
-        if (rec.verb == ctx.v_unlink)      code = 'D';
-        else if (rec.verb == ctx.v_add) {
-            sha1 old = {};
-            code = post_decision_old_sha(&rec.uri, &old) ? 'M' : 'A';
-        }
-        if (code == 0) continue;
-        fprintf(stdout, "%c %.*s\n",
-                code, (int)u8csLen(rec.uri.path),
-                (char *)rec.uri.path[0]);
-        changed++;
-    }
+    post_mad_ctx mad = {.out = stdout, .on = "", .off = "", .changed = 0};
+    post_walk_decisions(&ctx, POST_VM_UNLINK | POST_VM_ADD,
+                        post_drain_mad_cb, &mad);
     fflush(stdout);
-    fprintf(stderr, "sniff: %u change(s)\n", changed);
+    fprintf(stderr, "sniff: %u change(s)\n", mad.changed);
 
     post_ctx_free(&ctx);
     done;
@@ -1371,24 +1367,11 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     ok64 so = post_scan_changeset(&ctx, &base_tree_sha, &have_base);
     if (so != OK) { post_ctx_free(&ctx); return so; }
 
-    //  5b. Unlink files marked for delete on disk (drain `unlink`
-    //      decisions).  Done BEFORE the pack feed so a follow-up `be
-    //      post` doesn't pick them up via auto-stage; mtime-attribution
-    //      fix for the BEhistory "deleted-file re-added" regression.
-    {
-        a_dup(u8c, scan, u8bData(ctx.decisions));
-        while (!u8csEmpty(scan)) {
-            ulogrec rec = {};
-            ok64 dr = ULOGu8sDrain(scan, &rec);
-            if (dr == NODATA) break;
-            if (dr != OK) continue;
-            if (rec.verb != ctx.v_unlink) continue;
-            u8cs path = {rec.uri.path[0], rec.uri.path[1]};
-            a_path(fp);
-            if (SNIFFFullpath(fp, reporoot, path) != OK) continue;
-            (void)FILEUnLink($path(fp));
-        }
-    }
+    //  5b. Unlink files marked for delete on disk.  Done BEFORE the
+    //      pack feed so a follow-up `be post` doesn't pick them up via
+    //      auto-stage; mtime-attribution fix for the BEhistory
+    //      "deleted-file re-added" regression.
+    post_walk_decisions(&ctx, POST_VM_UNLINK, post_drain_unlink_cb, NULL);
 
     //  6b. Per-file patch parents: in implicit (commit-all) mode, every
     //  patch row whose ts stamps a committed file contributes its
@@ -1656,57 +1639,28 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
         urow.fragment[1] = h[1];
     }
 
-    ron60 ts = 0;
-    struct timespec tv = {};
-    SNIFFAtNow(&ts, &tv);
+    //  Use the single per-commit stamp the decision rows already
+    //  carry — keeps the post ULOG row, the decision rows, and the
+    //  on-disk file stamps all in lockstep.
     ron60 verb = SNIFFAtVerbPost();
-    ok64 ar = SNIFFAtAppendAt(ts, verb, &urow);
+    ok64 ar = SNIFFAtAppendAt(ctx.stamp_ts, verb, &urow);
     (void)ar;
 
     //  Stamp only `add` files (drain add decisions).  KEEP files keep
     //  their previous get/post stamp — re-stamping them is redundant.
-    {
-        a_dup(u8c, scan, u8bData(ctx.decisions));
-        while (!u8csEmpty(scan)) {
-            ulogrec rec = {};
-            ok64 dr = ULOGu8sDrain(scan, &rec);
-            if (dr == NODATA) break;
-            if (dr != OK) continue;
-            if (rec.verb != ctx.v_add) continue;
-            u8cs path = {rec.uri.path[0], rec.uri.path[1]};
-            a_path(fp);
-            if (SNIFFFullpath(fp, reporoot, path) != OK) continue;
-            (void)SNIFFAtStampPath(fp, ts);
-        }
-    }
+    post_walk_decisions(&ctx, POST_VM_ADD, post_drain_stamp_cb, NULL);
 
     //  16. Pretty-print actually-changed paths in grey (TTY only).
-    //  Drains the decisions buffer:
-    //    add (with old-sha chain)    → 'M'
-    //    add (without old-sha chain) → 'A'
-    //    unlink                      → 'D'
-    //    keep                        → silent
     {
         b8 tty = isatty(STDERR_FILENO) ? YES : NO;
-        char const *on  = tty ? "\033[90m" : "";
-        char const *off = tty ? "\033[0m"  : "";
-        a_dup(u8c, scan, u8bData(ctx.decisions));
-        while (!u8csEmpty(scan)) {
-            ulogrec rec = {};
-            ok64 dr = ULOGu8sDrain(scan, &rec);
-            if (dr == NODATA) break;
-            if (dr != OK) continue;
-            char code = 0;
-            if (rec.verb == ctx.v_unlink)          code = 'D';
-            else if (rec.verb == ctx.v_add) {
-                sha1 old = {};
-                code = post_decision_old_sha(&rec.uri, &old) ? 'M' : 'A';
-            }
-            if (code == 0) continue;
-            fprintf(stderr, "%s%c %.*s%s\n",
-                    on, code, (int)u8csLen(rec.uri.path),
-                    (char *)rec.uri.path[0], off);
-        }
+        post_mad_ctx mad = {
+            .out = stderr,
+            .on  = tty ? "\033[90m" : "",
+            .off = tty ? "\033[0m"  : "",
+            .changed = 0,
+        };
+        post_walk_decisions(&ctx, POST_VM_UNLINK | POST_VM_ADD,
+                            post_drain_mad_cb, &mad);
     }
 
     //  17. Clean up.
