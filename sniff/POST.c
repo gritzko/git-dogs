@@ -42,8 +42,9 @@
 
 // --- Per-path state ---
 //
-//  Parallel arrays keyed by the path-registry index (SNIFFIntern).
-//  Allocated once per POSTCommit invocation and freed at the end.
+//  Dense per-step records produced by `post_classify_step` — one entry
+//  per distinct path the merge sees.  Allocated/freed per POST scan;
+//  no intern-table indexing.
 
 enum post_flag {
     POST_IN_BASE  = 1 << 0,  // path had an entry in the baseline tree
@@ -59,27 +60,38 @@ enum post_flag {
 };
 
 typedef struct {
+    u8cs   path;        // slice into ctx.path_arena (lex-sorted globally)
     sha1   old_sha;     // from baseline (empty if POST_IN_BASE unset)
     sha1   new_sha;     // final sha (empty if dropped)
     u16    old_mode;    // from baseline
     u16    new_mode;    // final
+    u8     flag;        // POST_* bits
+    u8     _pad[5];     // align Bu8 (32 bytes) to 8-byte boundary
     Bu8    content;     // blob content for rewrites (freed at end)
-} post_rec;
+} post_step_rec;
 
 typedef struct {
-    keeper     *k;
-    u8cs        reporoot;
-    post_rec   *rec;
-    u8         *flag;
-    u32         cap;
-    Bu32        sorted_idx;     // intern indices in path-lex order
-                                // (populated by post_classify_step)
-    b8          any_pd;     // any put/delete rows since last post
-    b8          base_is_patch;  // baseline row is a `patch`, not get/post
-    b8          has_base;   // baseline row exists (any get/post/patch)
-    ron60       last_post_ts;
-    ok64        error;
+    keeper        *k;
+    u8cs           reporoot;
+    Bu8            path_arena;   // backing bytes for rec.path slices
+    Bu8            recs;         // u8b of post_step_rec (dense, lex-sorted)
+    b8             any_pd;       // any put/delete rows since last post
+    b8             base_is_patch;// baseline row is a `patch`, not get/post
+    b8             has_base;     // baseline row exists (any get/post/patch)
+    ron60          last_post_ts;
+    ok64           error;
 } post_ctx;
+
+//  Accessors over the dense recs buffer.
+fun post_step_rec *post_recs_head(post_ctx *c) {
+    return (post_step_rec *)u8bDataHead(c->recs);
+}
+fun u32 post_recs_count(post_ctx *c) {
+    return (u32)(u8bDataLen(c->recs) / sizeof(post_step_rec));
+}
+fun post_step_rec *post_recs_at(post_ctx *c, u32 i) {
+    return post_recs_head(c) + i;
+}
 
 // --- git mode helpers ---
 
@@ -338,45 +350,55 @@ typedef struct {
 
 //  SNIFFMergeWalk step callback.  Each `recs[i]` shares the same path
 //  but carries a different verb identifying its source (base / wt /
-//  put / del).
+//  put / del).  Pushes one fresh `post_step_rec` (path bytes copied
+//  into ctx.path_arena) and folds each merge contributor into it.
 static ok64 post_classify_step(ulogreccp recs, u32 n, void *vctx) {
     post_classify_step_ctx *cctx = (post_classify_step_ctx *)vctx;
     post_ctx *c = cctx->c;
 
-    //  Path is identical across the tie group; intern once.
-    u8cs path = {recs[0].uri.path[0], recs[0].uri.path[1]};
-    u32 idx = SNIFFIntern(path);
-    if (idx >= c->cap) return OK;
+    //  Stash the path bytes into the arena so the slice survives the
+    //  lifetime of bu/wu/put_buf/del_buf (freed in post_scan_changeset
+    //  while ctx.recs lives until POSTCommit / POSTPrintStatus end).
+    u8cs src = {recs[0].uri.path[0], recs[0].uri.path[1]};
+    if ($empty(src)) return OK;
+    u8c *path_start = u8bIdleHead(c->path_arena);
+    ok64 fo = u8bFeed(c->path_arena, src);
+    if (fo != OK) return fo;
+    u8c *path_end = u8bIdleHead(c->path_arena);
 
-    //  Record this idx in sorted-by-lex order — SNIFFMergeWalk fires
-    //  cb once per distinct path-key in lex order, so just append.
-    //  Replaces the post-classify SNIFFSort/qsort that walked the
-    //  intern table to rebuild a lex permutation.
-    u32bFeed1(c->sorted_idx, idx);
+    //  Push a zeroed post_step_rec; SNIFFMergeWalk fires us in lex
+    //  order, so appending preserves the sort.
+    post_step_rec blank = {};
+    blank.path[0] = path_start;
+    blank.path[1] = path_end;
+    a_dup(u8c, blank_view,
+          ((u8cs){(u8c *)&blank, (u8c *)&blank + sizeof(blank)}));
+    fo = u8bFeed(c->recs, blank_view);
+    if (fo != OK) return fo;
+    post_step_rec *r =
+        post_recs_at(c, post_recs_count(c) - 1);
 
     for (u32 i = 0; i < n; i++) {
-        ulogreccp r = &recs[i];
-        if (r->verb == cctx->v_base) {
-            u8cs mode_s = {r->uri.query[0], r->uri.query[1]};
+        ulogreccp m = &recs[i];
+        if (m->verb == cctx->v_base) {
+            u8cs mode_s = {m->uri.query[0], m->uri.query[1]};
             u16  mode   = post_parse_octal_mode(mode_s);
-            c->flag[idx]         |= POST_IN_BASE;
-            c->rec[idx].old_mode  = mode;
-            //  Decode the 40-hex fragment into the 20-byte sha slot.
-            u8s bin_s = {c->rec[idx].old_sha.data,
-                         c->rec[idx].old_sha.data + 20};
-            a_dup(u8c, frag_dup, r->uri.fragment);
+            r->flag    |= POST_IN_BASE;
+            r->old_mode = mode;
+            u8s bin_s = {r->old_sha.data, r->old_sha.data + 20};
+            a_dup(u8c, frag_dup, m->uri.fragment);
             HEXu8sDrainSome(bin_s, frag_dup);
             //  Gitlink (160000): carry through verbatim — no on-disk
             //  file expected; POST_KEEP short-circuits post_decide.
-            if (mode == 0160000) c->flag[idx] |= POST_KEEP;
-        } else if (r->verb == cctx->v_wt) {
-            u8cs mode_s = {r->uri.query[0], r->uri.query[1]};
-            c->flag[idx]         |= POST_ON_DISK;
-            c->rec[idx].new_mode  = post_parse_octal_mode(mode_s);
-        } else if (r->verb == cctx->v_put) {
-            c->flag[idx] |= POST_EXPL_PUT;
-        } else if (r->verb == cctx->v_del) {
-            c->flag[idx] |= POST_EXPL_DEL;
+            if (mode == 0160000) r->flag |= POST_KEEP;
+        } else if (m->verb == cctx->v_wt) {
+            u8cs mode_s = {m->uri.query[0], m->uri.query[1]};
+            r->flag     |= POST_ON_DISK;
+            r->new_mode  = post_parse_octal_mode(mode_s);
+        } else if (m->verb == cctx->v_put) {
+            r->flag |= POST_EXPL_PUT;
+        } else if (m->verb == cctx->v_del) {
+            r->flag |= POST_EXPL_DEL;
         }
     }
     return OK;
@@ -416,62 +438,55 @@ static ok64 post_classify_via_merge(post_ctx *c,
 
 // --- Change-set resolution ---
 
-static ok64 post_decide(post_ctx *c, u32 idx) {
-    sane(c);
-    u8 f = c->flag[idx];
+static ok64 post_decide(post_ctx *c, post_step_rec *r) {
+    sane(c && r);
+    u8 f = r->flag;
 
-    //  Skip directory entries in the registry — they are reconstructed
-    //  during tree-build rather than selected here.
-    if (SNIFFIsDir(idx)) return OK;
     if (!(f & (POST_IN_BASE | POST_ON_DISK))) return OK;
 
-
     //  Gitlinks (submodule entries, mode 0160000) are carried through
-    //  verbatim — POST_KEEP was already set by post_base_visit.  The
+    //  verbatim — POST_KEEP was already set by classify_step.  The
     //  on-disk presence rule below would otherwise see "no file at
     //  path" (the gitlink references a different repo, not a file in
     //  this one) and drop the entry.  Skip the rest of the logic.
-    if (c->rec[idx].old_mode == 0160000) {
-        c->flag[idx] |= POST_KEEP;
+    if (r->old_mode == 0160000) {
+        r->flag |= POST_KEEP;
         return OK;
     }
 
     //  Explicit rules win.
     if (f & POST_EXPL_DEL) {
-        c->flag[idx] |= POST_DROP;
+        r->flag |= POST_DROP;
         return OK;
     }
     if (f & POST_EXPL_PUT) {
         if (!(f & POST_ON_DISK)) {   // explicit put of a missing file
-            c->flag[idx] |= POST_DROP;
+            r->flag |= POST_DROP;
             return OK;
         }
-        c->flag[idx] |= POST_REWRITE;
+        r->flag |= POST_REWRITE;
         return OK;
     }
 
     //  Missing from wt — only drop when implicit mode and the path is
     //  visible to the wt scan.  Gitignored baseline files (e.g. `.be`,
-    //  `.gitignore`-listed) are filtered out by `post_wt_callback` →
+    //  `.gitignore`-listed) are filtered out by `SNIFFWtULog` →
     //  `SNIFFSkipMeta`, so they never get POST_ON_DISK even though the
     //  bytes are right there on disk.  Treating them as deletions
     //  silently strips them from history.  Honor the gitignore by
     //  keeping the baseline entry verbatim.
     if (!(f & POST_ON_DISK)) {
-        u8cs rel_chk = {};
-        if ((f & POST_IN_BASE) &&
-            SNIFFPath(rel_chk, idx) == OK &&
-            SNIFFSkipMeta(rel_chk)) {
-            c->flag[idx] |= POST_KEEP;
+        if ((f & POST_IN_BASE) && SNIFFSkipMeta(r->path)) {
+            r->flag |= POST_KEEP;
             return OK;
         }
         if (c->any_pd) {
             //  No explicit rule for this path and we are in selective
             //  mode: keep the baseline entry unchanged.
-            if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
+            if (f & POST_IN_BASE) r->flag |= POST_KEEP;
         } else {
             //  Implicit mode: a missing file is a deletion.
-            c->flag[idx] |= POST_DROP;
+            r->flag |= POST_DROP;
         }
         return OK;
     }
@@ -491,12 +506,10 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
     }
 
     a_path(fp);
-    u8cs rel = {};
-    call(SNIFFPath, rel, idx);
-    call(SNIFFFullpath, fp, c->reporoot, rel);
+    call(SNIFFFullpath, fp, c->reporoot, r->path);
     struct stat sb = {};
     if (lstat((char const *)u8bDataHead(fp), &sb) != 0) {
-        c->flag[idx] |= POST_DROP;
+        r->flag |= POST_DROP;
         return OK;
     }
     struct timespec ts = {.tv_sec = sb.st_mtim.tv_sec,
@@ -515,16 +528,16 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
             ron60 vg = SNIFFAtVerbGet();
             ron60 vp = SNIFFAtVerbPost();
             if (ow_verb == vg || ow_verb == vp) {
-                if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
+                if (f & POST_IN_BASE) r->flag |= POST_KEEP;
                 //  else: untracked clean (shouldn't happen) — ignore.
             } else {
                 //  patch / put / mod owns this stamp → REWRITE.
-                c->flag[idx] |= POST_REWRITE;
+                r->flag |= POST_REWRITE;
             }
         } else {
             //  ts-known but row-not-found (corrupt log?) — fall back to
             //  the conservative KEEP-if-tracked behaviour.
-            if (f & POST_IN_BASE) c->flag[idx] |= POST_KEEP;
+            if (f & POST_IN_BASE) r->flag |= POST_KEEP;
         }
     } else if (f & POST_IN_BASE) {
         //  Tracked + mtime-unknown.  Defer the decision: post_hash_one
@@ -532,13 +545,13 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
         //  this to POST_REWRITE (real change) or POST_KEEP (mtime
         //  drifted but content is identical — re-stamp the file so
         //  next time the fast path skips it).
-        c->flag[idx] |= POST_MAYBE;
+        r->flag |= POST_MAYBE;
     } else if (!c->has_base) {
         //  Fresh-repo first commit (no baseline tree exists yet):
         //  auto-stage every dirty file.  Once a baseline lands,
         //  implicit `be post -m` reverts to tracked-only — a new
         //  untracked file then needs an explicit `be put`.
-        c->flag[idx] |= POST_REWRITE;
+        r->flag |= POST_REWRITE;
     }
     //  Else: untracked + dirty + already-have-a-baseline → ignore in
     //  implicit mode.  Side-checkouts (abc/, build/, *.diff scratch)
@@ -556,27 +569,23 @@ static ok64 post_decide(post_ctx *c, u32 idx) {
 //  fresh sha equals the baseline `old_sha`, flip to POST_KEEP and
 //  drop the content buffer (no pack write); otherwise flip to
 //  POST_REWRITE and keep the content for the tree-build phase.
-static ok64 post_hash_one(post_ctx *c, u32 idx) {
-    sane(c);
-    post_rec *r = &c->rec[idx];
-    u8 f = c->flag[idx];
-    if (!(f & POST_REWRITE)) done;
+static ok64 post_hash_one(post_ctx *c, post_step_rec *r) {
+    sane(c && r);
+    if (!(r->flag & POST_REWRITE)) done;
     //  Idempotent: skip if content was already populated upstream
     //  (e.g. by post_resolve_maybe taking the fall-through symlink
     //  path).  The presence of an allocated content buffer is the
     //  marker that this path has already been processed.
     if (u8bOK(r->content)) done;
 
-    u8cs rel = {};
-    call(SNIFFPath, rel, idx);
     a_path(fp);
-    call(SNIFFFullpath, fp, c->reporoot, rel);
+    call(SNIFFFullpath, fp, c->reporoot, r->path);
 
     struct stat lsb = {};
     if (lstat((char const *)u8bDataHead(fp), &lsb) != 0) {
         //  Disappeared between scan and hash — treat as drop.
-        c->flag[idx] &= ~POST_REWRITE;
-        c->flag[idx] |= POST_DROP;
+        r->flag &= ~POST_REWRITE;
+        r->flag |= POST_DROP;
         done;
     }
 
@@ -616,32 +625,29 @@ static ok64 post_hash_one(post_ctx *c, u32 idx) {
 //  mismatch flip to POST_REWRITE so post_hash_one re-reads it into
 //  r->content for the pack-feed phase.  Symlinks fall back to the
 //  full read+hash path (readlink doesn't compose with mmap).
-static ok64 post_resolve_maybe(post_ctx *c, u32 idx) {
-    sane(c);
-    post_rec *r = &c->rec[idx];
-    if (!(c->flag[idx] & POST_MAYBE)) done;
-    c->flag[idx] &= ~POST_MAYBE;
+static ok64 post_resolve_maybe(post_ctx *c, post_step_rec *r) {
+    sane(c && r);
+    if (!(r->flag & POST_MAYBE)) done;
+    r->flag &= ~POST_MAYBE;
 
-    u8cs rel = {};
-    call(SNIFFPath, rel, idx);
     a_path(fp);
-    call(SNIFFFullpath, fp, c->reporoot, rel);
+    call(SNIFFFullpath, fp, c->reporoot, r->path);
 
     struct stat lsb = {};
     if (lstat((char const *)u8bDataHead(fp), &lsb) != 0) {
-        c->flag[idx] |= POST_DROP;
+        r->flag |= POST_DROP;
         done;
     }
     if (S_ISLNK(lsb.st_mode)) {
         //  Defer to the standard hash path; symlinks are tiny.
-        c->flag[idx] |= POST_REWRITE;
-        ok64 ho = post_hash_one(c, idx);
+        r->flag |= POST_REWRITE;
+        ok64 ho = post_hash_one(c, r);
         if (ho == OK && sha1eq(&r->new_sha, &r->old_sha)) {
             //  Identical → flip back to KEEP, drop the buffer.
             u8bFree(r->content);
             r->new_sha = (sha1){};
-            c->flag[idx] &= ~POST_REWRITE;
-            c->flag[idx] |= POST_KEEP;
+            r->flag &= ~POST_REWRITE;
+            r->flag |= POST_KEEP;
         }
         return ho;
     }
@@ -654,9 +660,9 @@ static ok64 post_resolve_maybe(post_ctx *c, u32 idx) {
     FILEUnMap(mapped);
 
     if (sha1eq(&disk_sha, &r->old_sha)) {
-        c->flag[idx] |= POST_KEEP;
+        r->flag |= POST_KEEP;
     } else {
-        c->flag[idx] |= POST_REWRITE;
+        r->flag |= POST_REWRITE;
         //  post_hash_one will re-read the bytes for the pack feed.
     }
     done;
@@ -674,12 +680,10 @@ typedef struct {
 static u32 post_range_end(post_ctx *c, u32 lo, u32 hi, u8cs prefix) {
     u32 end = lo;
     while (end < hi) {
-        u8cs p = {};
-        u32 idx = *u32bDataAtP(c->sorted_idx, end);
-        if (SNIFFPath(p, idx) != OK) { end++; continue; }
+        post_step_rec *r = post_recs_at(c, end);
         size_t plen = $len(prefix);
-        if ($len(p) < plen) break;
-        if (memcmp(p[0], prefix[0], plen) != 0) break;
+        if ($len(r->path) < plen) break;
+        if (memcmp(r->path[0], prefix[0], plen) != 0) break;
         end++;
     }
     return end;
@@ -699,9 +703,8 @@ static ok64 post_build_tree(post_ctx *c, u32 lo, u32 hi, u8cs prefix,
 
     u32 i = lo;
     while (i < hi) {
-        u32 idx = *u32bDataAtP(c->sorted_idx, i);
-        u8cs rel = {};
-        if (SNIFFPath(rel, idx) != OK) { i++; continue; }
+        post_step_rec *r = post_recs_at(c, i);
+        u8cs rel = {r->path[0], r->path[1]};
 
         size_t plen = $len(prefix);
         if ($len(rel) <= plen) { i++; continue; }
@@ -745,18 +748,14 @@ static ok64 post_build_tree(post_ctx *c, u32 lo, u32 hi, u8cs prefix,
         }
 
         //  Direct-child file entry.
-        u8 f = c->flag[idx];
+        u8 f = r->flag;
         if (f & POST_DROP) { i++; continue; }
         if (!(f & (POST_KEEP | POST_REWRITE))) { i++; continue; }
 
-        sha1 entry_sha = (f & POST_REWRITE)
-            ? c->rec[idx].new_sha
-            : c->rec[idx].old_sha;
+        sha1 entry_sha = (f & POST_REWRITE) ? r->new_sha : r->old_sha;
         if (sha1empty(&entry_sha)) { i++; continue; }
 
-        u16 mode = (f & POST_REWRITE)
-            ? c->rec[idx].new_mode
-            : c->rec[idx].old_mode;
+        u16 mode = (f & POST_REWRITE) ? r->new_mode : r->old_mode;
         if (mode == 0) mode = 0100644;
 
         post_mode_feed(tree, mode);
@@ -917,18 +916,16 @@ static ok64 post_add_patch_parents(post_ctx *c, sha1 *parents,
                                    u32 *nparents, u32 cap) {
     sane(c && parents && nparents);
     ron60 v_patch = SNIFFAtVerbPatch();
-    u32 n_now = SNIFFCount();
+    u32 n = post_recs_count(c);
 
-    for (u32 i = 0; i < n_now && i < c->cap; i++) {
-        u8 f = c->flag[i];
+    for (u32 i = 0; i < n; i++) {
+        post_step_rec *r = post_recs_at(c, i);
+        u8 f = r->flag;
         if (!(f & POST_REWRITE)) continue;
         if (!(f & POST_ON_DISK)) continue;
-        if (SNIFFIsDir(i))       continue;
 
-        u8cs rel = {};
-        if (SNIFFPath(rel, i) != OK) continue;
         a_path(fp);
-        if (SNIFFFullpath(fp, c->reporoot, rel) != OK) continue;
+        if (SNIFFFullpath(fp, c->reporoot, r->path) != OK) continue;
 
         struct stat sb = {};
         if (lstat((char const *)u8bDataHead(fp), &sb) != 0) continue;
@@ -1095,9 +1092,9 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
 #undef PD_FREE_ALL
 
     //  6. Decide fate per path.
-    u32 n_now = SNIFFCount();
-    for (u32 i = 0; i < n_now && i < c->cap; i++) {
-        call(post_decide, c, i);
+    u32 n = post_recs_count(c);
+    for (u32 i = 0; i < n; i++) {
+        call(post_decide, c, post_recs_at(c, i));
     }
 
     //  5c. Resolve POST_MAYBE entries by hashing the on-disk content
@@ -1106,44 +1103,44 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
     //  differs) or KEEP (mtime drifted but bytes are identical).  This
     //  is the single source of "is this file actually modified?" truth
     //  — both POSTCommit and the dry-run printer rely on it.
-    for (u32 i = 0; i < n_now && i < c->cap; i++) {
-        if (!(c->flag[i] & POST_MAYBE)) continue;
-        call(post_resolve_maybe, c, i);
+    for (u32 i = 0; i < n; i++) {
+        post_step_rec *r = post_recs_at(c, i);
+        if (!(r->flag & POST_MAYBE)) continue;
+        call(post_resolve_maybe, c, r);
     }
     done;
 }
 
-//  Allocate parallel arrays + initialise the post_ctx for a scan.
-//  Caller provides the two Bu8 backing buffers and the reporoot;
-//  on success `c->rec` / `c->flag` / `c->cap` are wired and zeroed.
-//  On failure the buffers are freed before return.
-static ok64 post_ctx_init(post_ctx *c, u8cs reporoot, keeper *k,
-                          Bu8 rec_buf, Bu8 flag_buf) {
+//  Initialise the post_ctx for a scan.  Allocates the path arena and
+//  the dense recs buffer; both grow with `u8bFeed`.
+static ok64 post_ctx_init(post_ctx *c, u8cs reporoot, keeper *k) {
     sane(c);
-    u32 npath0 = SNIFFCount();
-    u32 cap = npath0 + (1u << 20);
-
-    ok64 ro = u8bAllocate(rec_buf, (u64)cap * sizeof(post_rec));
-    if (ro != OK) return ro;
-    memset(u8bDataHead(rec_buf), 0, (u64)cap * sizeof(post_rec));
-    ok64 fo = u8bAllocate(flag_buf, cap);
-    if (fo != OK) { u8bFree(rec_buf); return fo; }
-    memset(u8bDataHead(flag_buf), 0, cap);
-
     *c = (post_ctx){
-        .k = k, .rec = (post_rec *)u8bDataHead(rec_buf),
-        .flag = u8bDataHead(flag_buf), .cap = cap,
+        .k = k,
         .last_post_ts = SNIFFAtLastPostTs(),
     };
     c->reporoot[0] = reporoot[0];
     c->reporoot[1] = reporoot[1];
 
-    //  Lex-sorted intern-index buffer.  Populated by post_classify_step
-    //  (one push per distinct path the merge sees) — replaces the old
-    //  SNIFFSort/qsort over the intern table.
-    ok64 so = u32bAllocate(c->sorted_idx, npath0 + 1024);
-    if (so != OK) { u8bFree(rec_buf); u8bFree(flag_buf); return so; }
+    //  Path arena: ~1 MB initial; each path contributes its bytes only.
+    call(u8bAllocate, c->path_arena, 1UL << 20);
+    //  Dense recs: cap ~64K entries × ~96 B = ~6 MB.  Grown as needed.
+    ok64 ro = u8bAllocate(c->recs,
+                          (u64)(1u << 16) * sizeof(post_step_rec));
+    if (ro != OK) { u8bFree(c->path_arena); return ro; }
     done;
+}
+
+//  Free everything post_ctx_init / classify allocated.
+static void post_ctx_free(post_ctx *c) {
+    if (!c) return;
+    u32 n = post_recs_count(c);
+    for (u32 i = 0; i < n; i++) {
+        post_step_rec *r = post_recs_at(c, i);
+        if (u8bOK(r->content)) u8bFree(r->content);
+    }
+    u8bFree(c->recs);
+    u8bFree(c->path_arena);
 }
 
 // --- Public API ---
@@ -1152,47 +1149,34 @@ ok64 POSTPrintStatus(u8cs reporoot) {
     sane($ok(reporoot));
     keeper *k = &KEEP;
 
-    Bu8 rec_buf = {};
-    Bu8 flag_buf = {};
     post_ctx ctx = {};
-    call(post_ctx_init, &ctx, reporoot, k, rec_buf, flag_buf);
+    call(post_ctx_init, &ctx, reporoot, k);
 
     sha1 base_tree_sha = {};
     b8   have_base = NO;
     ok64 so = post_scan_changeset(&ctx, &base_tree_sha, &have_base);
-    if (so != OK) { u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx); return so; }
+    if (so != OK) { post_ctx_free(&ctx); return so; }
 
-    //  Walk the registry, print one line per changed path.
-    //  Codes mirror git's `status --short`: `M` modified, `A` added,
-    //  `D` deleted.  KEEP rows are silent (no change).
-    u32 n_now = SNIFFCount();
+    //  Walk the dense recs in lex order, print one line per changed
+    //  path.  Codes mirror git's `status --short`: `M` modified,
+    //  `A` added, `D` deleted.  KEEP rows are silent (no change).
+    u32 n = post_recs_count(&ctx);
     u32 changed = 0;
-    for (u32 i = 0; i < n_now && i < ctx.cap; i++) {
-        u8 f = ctx.flag[i];
-        if (SNIFFIsDir(i)) continue;
+    for (u32 i = 0; i < n; i++) {
+        post_step_rec *r = post_recs_at(&ctx, i);
+        u8 f = r->flag;
         char code = 0;
         if (f & POST_DROP)        code = 'D';
         else if (f & POST_REWRITE) code = (f & POST_IN_BASE) ? 'M' : 'A';
         if (code == 0) continue;
-        u8cs rel = {};
-        if (SNIFFPath(rel, i) != OK) continue;
         fprintf(stdout, "%c %.*s\n",
-                code, (int)$len(rel), (char *)rel[0]);
+                code, (int)$len(r->path), (char *)r->path[0]);
         changed++;
     }
     fflush(stdout);
     fprintf(stderr, "sniff: %u change(s)\n", changed);
 
-    //  post_scan_changeset hashed POST_MAYBE entries via post_hash_one,
-    //  which allocates a content buffer per file.  Free them — the
-    //  dry-run path doesn't feed any pack and has nothing else to do
-    //  with the bytes.
-    for (u32 i = 0; i < n_now && i < ctx.cap; i++) {
-        if (u8bOK(ctx.rec[i].content)) u8bFree(ctx.rec[i].content);
-    }
-    u8bFree(rec_buf);
-    u8bFree(flag_buf);
-    u32bFree(ctx.sorted_idx);
+    post_ctx_free(&ctx);
     done;
 }
 
@@ -1323,16 +1307,13 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
 
     //  Steps 2..5 — the change-set scan — share their entire body
     //  with POSTPrintStatus's dry-run path.  See post_scan_changeset.
-    Bu8 rec_buf = {};
-    Bu8 flag_buf = {};
     post_ctx ctx = {};
-    call(post_ctx_init, &ctx, reporoot, k, rec_buf, flag_buf);
-    u32 cap = ctx.cap;
+    call(post_ctx_init, &ctx, reporoot, k);
 
     sha1 base_tree_sha = {};
     b8   have_base = NO;
     ok64 so = post_scan_changeset(&ctx, &base_tree_sha, &have_base);
-    if (so != OK) { u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx); return so; }
+    if (so != OK) { post_ctx_free(&ctx); return so; }
 
     //  5b. For every file explicitly deleted since last post, unlink
     //      it from disk — otherwise `be delete foo && be post` leaves
@@ -1340,25 +1321,24 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     //      re-add it.  This is the mtime-attribution fix for
     //      BEhistory / the "deleted-file re-added" regression.
     {
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            if (!(ctx.flag[i] & POST_EXPL_DEL)) continue;
-            if (!(ctx.flag[i] & POST_ON_DISK)) continue;
-            u8cs rel = {};
-            if (SNIFFPath(rel, i) != OK) continue;
+        u32 n = post_recs_count(&ctx);
+        for (u32 i = 0; i < n; i++) {
+            post_step_rec *r = post_recs_at(&ctx, i);
+            if (!(r->flag & POST_EXPL_DEL)) continue;
+            if (!(r->flag & POST_ON_DISK)) continue;
             a_path(fp);
-            if (SNIFFFullpath(fp, reporoot, rel) != OK) continue;
+            if (SNIFFFullpath(fp, reporoot, r->path) != OK) continue;
             (void)FILEUnLink($path(fp));
-            ctx.flag[i] &= ~POST_ON_DISK;
+            r->flag &= ~POST_ON_DISK;
         }
     }
 
     //  6. Hash blobs for rewrite entries.
     {
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            ok64 hr = post_hash_one(&ctx, i);
-            if (hr != OK) { u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx); return hr; }
+        u32 n = post_recs_count(&ctx);
+        for (u32 i = 0; i < n; i++) {
+            ok64 hr = post_hash_one(&ctx, post_recs_at(&ctx, i));
+            if (hr != OK) { post_ctx_free(&ctx); return hr; }
         }
     }
 
@@ -1369,15 +1349,11 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     if (!ctx.any_pd) {
         ok64 pp = post_add_patch_parents(&ctx, parents, &nparents,
                                          POST_MAX_PARENTS);
-        if (pp != OK) {
-            u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
-            return pp;
-        }
+        if (pp != OK) { post_ctx_free(&ctx); return pp; }
     }
 
-    //  7. Build trees bottom-up over the lex-sorted intern indices the
-    //     classification merge populated in `ctx.sorted_idx` — no
-    //     separate sort pass.
+    //  7. Build trees bottom-up over the dense lex-sorted recs the
+    //     classification merge populated.
     sha1 root_tree = {};
     b8 have_root = NO;
     Bu8 tree_bodies = {};
@@ -1385,13 +1361,13 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     u32 tree_count = 0;
 
     {
-        u32 n_sorted = u32bDataLen(ctx.sorted_idx);
+        u32 n_recs = post_recs_count(&ctx);
         u8cs no_prefix = {};
-        ok64 bo = post_build_tree(&ctx, 0, n_sorted, no_prefix,
+        ok64 bo = post_build_tree(&ctx, 0, n_recs, no_prefix,
                                   &root_tree, tree_bodies, &tree_count);
         if (bo != OK) {
             u8bFree(tree_bodies);
-            u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
+            post_ctx_free(&ctx);
             return bo;
         }
         have_root = !sha1empty(&root_tree);
@@ -1408,7 +1384,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
                 "sniff: post: no changes since base — refusing empty "
                 "commit\n");
         u8bFree(tree_bodies);
-        u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
+        post_ctx_free(&ctx);
         return SNIFFNOOP;
     }
 
@@ -1489,7 +1465,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     if (fo != OK) {
         KEEPPackClose(k, &p);
         u8bFree(tree_bodies);
-        u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
+        post_ctx_free(&ctx);
         return fo;
     }
 
@@ -1509,7 +1485,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             if (to != OK) {
                 KEEPPackClose(k, &p);
                 u8bFree(tree_bodies);
-                u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
+                post_ctx_free(&ctx);
                 return to;
             }
         }
@@ -1517,14 +1493,12 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
 
     //  13. Feed all new blobs.
     {
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            if (!(ctx.flag[i] & POST_REWRITE)) continue;
-            post_rec *r = &ctx.rec[i];
+        u32 n = post_recs_count(&ctx);
+        for (u32 i = 0; i < n; i++) {
+            post_step_rec *r = post_recs_at(&ctx, i);
+            if (!(r->flag & POST_REWRITE)) continue;
             if (!u8bOK(r->content)) continue;
-            u8cs rel = {};
-            if (SNIFFPath(rel, i) != OK) continue;
-            u8csc bpath = {rel[0], rel[1]};
+            u8csc bpath = {r->path[0], r->path[1]};
             a_dup(u8c, body, u8bData(r->content));
             //  Delta base: when this path was in the baseline tree, the
             //  prior blob sha is the natural OFS/REF_DELTA target —
@@ -1532,7 +1506,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             //  rather than a fresh zlib-of-everything.  No baseline
             //  → no base → KEEPPackFeed stores the full content.
             u64 base_hl = 0;
-            if (ctx.flag[i] & POST_IN_BASE)
+            if (r->flag & POST_IN_BASE)
                 base_hl = WHIFFHashlet60(&r->old_sha);
             sha1 bsha = {};
             ok64 bo = KEEPPackFeed(k, &p, DOG_OBJ_BLOB, body,
@@ -1540,7 +1514,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             if (bo != OK) {
                 KEEPPackClose(k, &p);
                 u8bFree(tree_bodies);
-                u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
+                post_ctx_free(&ctx);
                 return bo;
             }
         }
@@ -1598,16 +1572,14 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     //  Stamp every file that survived into the new commit (rewrites +
     //  keeps on disk) with the post row's timestamp.
     {
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            u8 f = ctx.flag[i];
+        u32 n = post_recs_count(&ctx);
+        for (u32 i = 0; i < n; i++) {
+            post_step_rec *r = post_recs_at(&ctx, i);
+            u8 f = r->flag;
             if (f & POST_DROP) continue;
             if (!(f & POST_ON_DISK)) continue;
-            if (SNIFFIsDir(i)) continue;
-            u8cs rel = {};
-            if (SNIFFPath(rel, i) != OK) continue;
             a_path(fp);
-            if (SNIFFFullpath(fp, reporoot, rel) != OK) continue;
+            if (SNIFFFullpath(fp, reporoot, r->path) != OK) continue;
             (void)SNIFFAtStampPath(fp, ts);
         }
     }
@@ -1620,31 +1592,22 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
         b8 tty = isatty(STDERR_FILENO) ? YES : NO;
         char const *on  = tty ? "\033[90m" : "";
         char const *off = tty ? "\033[0m"  : "";
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            u8 f = ctx.flag[i];
-            if (SNIFFIsDir(i)) continue;
+        u32 n = post_recs_count(&ctx);
+        for (u32 i = 0; i < n; i++) {
+            post_step_rec *r = post_recs_at(&ctx, i);
+            u8 f = r->flag;
             char code = 0;
             if (f & POST_DROP)         code = 'D';
             else if (f & POST_REWRITE) code = (f & POST_IN_BASE) ? 'M' : 'A';
             if (code == 0) continue;
-            u8cs rel = {};
-            if (SNIFFPath(rel, i) != OK) continue;
             fprintf(stderr, "%s%c %.*s%s\n",
-                    on, code, (int)$len(rel), (char *)rel[0], off);
+                    on, code, (int)$len(r->path), (char *)r->path[0], off);
         }
     }
 
     //  17. Clean up.
-    {
-        u32 n_now = SNIFFCount();
-        for (u32 i = 0; i < n_now && i < cap; i++) {
-            if (u8bOK(ctx.rec[i].content)) u8bFree(ctx.rec[i].content);
-        }
-    }
     u8bFree(tree_bodies);
-    u8bFree(rec_buf); u8bFree(flag_buf); u32bFree(ctx.sorted_idx);
-
+    post_ctx_free(&ctx);
     fprintf(stderr, "sniff: commit %.*s\n",
             (int)u8bDataLen(out_hex), (char *)u8bDataHead(out_hex));
     done;
