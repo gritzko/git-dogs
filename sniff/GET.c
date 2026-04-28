@@ -141,123 +141,147 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     return o;
 }
 
-// --- Pre-flight classifier via baseline ↔ target N-way merge.
+// --- Pre-flight classifier via baseline ↔ target ULOG-row merge.
 //
-//  Materialise both trees as sorted (path, meta) pairs (meta = 21-byte
-//  records {kind, sha[20]}), then drain via KEEPu8ssDrain.  Per path:
-//    * both sides + identical {kind,sha} → no-op overlay: WRITE skips
+//  Materialise both trees as ULOG-shaped row buffers (KEEPTreeULog),
+//  then heap-walk via SNIFFMergeWalk.  Per distinct path the step
+//  callback sees a tie group of 1-2 records (one per side).  Decisions:
+//    * both sides + identical mode/sha → no-op overlay: WRITE skips
 //      so dirty user content survives.  Appended to `noop_out`.
-//    * either side is SUB                → gitlink (submodule) entry:
-//      sniff doesn't manage it.  Ignored — neither write nor unlink.
-//    * real change / add / delete        → lstat; if mtime ∉ stamp-set,
+//    * either side is mode 160000 (gitlink) → submodule, ignored.
+//    * real change / add / delete  → lstat; if mtime ∉ stamp-set,
 //      conflict.  For deletes (baseline-only) where the file is clean
-//      and present on disk, append to `unlink_out` so the post-WRITE
-//      step can drop it.
+//      and present on disk, append to `unlink_out`.
 //
 //  Returns SNIFFOVRL when conflicts > 0 (printing up to 5 paths and a
 //  summary line).  `noop_out` and `unlink_out` are reset on entry; on
 //  success each carries newline-separated lex-sorted paths.
-//
-//  `base_tree` may be NULL — first-checkout / no-baseline case.  Then
-//  every drained path has mask 0b10 (target only) and is treated as
-//  incoming; both output lists end up empty.
+
+typedef struct {
+    u8cs   reporoot;
+    u8bp   noop_out;
+    u8bp   unlink_out;
+    ron60  v_base;
+    ron60  v_tgt;
+    u32    conflicts;
+} get_overlap_ctx;
+
+//  Compare two ULOG-row uri.query (mode) and uri.fragment (hex sha)
+//  by content.  YES iff both mode and sha bytes are equal.
+static b8 get_leaf_eq(ulogreccp a, ulogreccp b) {
+    if (u8csLen(a->uri.query) != u8csLen(b->uri.query)) return NO;
+    if (u8csLen(a->uri.fragment) != u8csLen(b->uri.fragment)) return NO;
+    if (memcmp(a->uri.query[0],    b->uri.query[0],
+               u8csLen(a->uri.query)) != 0) return NO;
+    return memcmp(a->uri.fragment[0], b->uri.fragment[0],
+                  u8csLen(a->uri.fragment)) == 0;
+}
+
+static b8 get_is_sub(ulogreccp r) {
+    static u8c const sub[6] = "160000";
+    return u8csLen(r->uri.query) == 6 &&
+           memcmp(r->uri.query[0], sub, 6) == 0;
+}
+
+static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
+    get_overlap_ctx *c = (get_overlap_ctx *)vctx;
+    ulogreccp base = NULL;
+    ulogreccp tgt  = NULL;
+    for (u32 i = 0; i < n; i++) {
+        if (recs[i].verb == c->v_base) base = &recs[i];
+        if (recs[i].verb == c->v_tgt)  tgt  = &recs[i];
+    }
+    if (!base && !tgt) return OK;
+
+    //  Path is identical in the tie group — peek from whichever side.
+    u8cs path = {};
+    u8csMv(path, (base ? base->uri.path : tgt->uri.path));
+
+    b8 is_sub = (base && get_is_sub(base)) || (tgt && get_is_sub(tgt));
+    if (is_sub) return OK;        //  gitlink — sniff doesn't manage
+
+    b8 changed = !base || !tgt || !get_leaf_eq(base, tgt);
+
+    if (!changed && tgt) {
+        u8bFeed(c->noop_out, path);
+        u8bFeed1(c->noop_out, '\n');
+        return OK;
+    }
+    if (!changed) return OK;
+
+    //  changed && !sub: lstat + stamp-set check.
+    a_path(fp);
+    if (SNIFFFullpath(fp, c->reporoot, path) != OK) return OK;
+    struct stat sb = {};
+    if (lstat((char *)u8bDataHead(fp), &sb) != 0) return OK;
+    struct timespec mts = {.tv_sec  = sb.st_mtim.tv_sec,
+                           .tv_nsec = sb.st_mtim.tv_nsec};
+    ron60 mr = SNIFFAtOfTimespec(mts);
+    if (!SNIFFAtKnown(mr)) {
+        if (c->conflicts < 5)
+            fprintf(stderr, "sniff: dirty overlap %.*s\n",
+                    (int)$len(path), (char *)path[0]);
+        c->conflicts++;
+        return OK;
+    }
+    if (base && !tgt) {
+        //  Clean delete: schedule unlink.
+        u8bFeed(c->unlink_out, path);
+        u8bFeed1(c->unlink_out, '\n');
+    }
+    return OK;
+}
+
+//  `base_tree` may be NULL — first-checkout / no-baseline case.  Every
+//  walked path then comes from the target side only; both output lists
+//  end up empty.
 static ok64 get_overlap_check(keeper *k, u8cs reporoot,
                               u8cp base_tree, u8cp tgt_tree,
                               u8bp noop_out, u8bp unlink_out) {
     sane(k && tgt_tree && noop_out && unlink_out);
     u8bReset(noop_out);
     u8bReset(unlink_out);
-    Bu8 bp = {}, bm = {}, tp = {}, tm = {};
-    call(u8bAllocate, bp, 1UL << 20);
-    call(u8bAllocate, bm, 1UL << 20);
-    call(u8bAllocate, tp, 1UL << 20);
-    call(u8bAllocate, tm, 1UL << 20);
+
+    a_cstr(s_base, "base"); a_dup(u8c, db, s_base);
+    a_cstr(s_tgt,  "tgt");  a_dup(u8c, dt, s_tgt);
+    ron60 v_base = 0, v_tgt = 0;
+    call(RONutf8sDrain, &v_base, db);
+    call(RONutf8sDrain, &v_tgt,  dt);
+
+    Bu8 bu = {}, tu = {};
+    call(u8bAllocate, bu, 1UL << 20);
+    call(u8bAllocate, tu, 1UL << 20);
 
     ok64 r = OK;
-    if (base_tree) r = KEEPTreeListLeaves(k, base_tree, bp, bm);
-    if (r == OK)   r = KEEPTreeListLeaves(k, tgt_tree, tp, tm);
-    if (r != OK) {
-        u8bFree(bp); u8bFree(bm); u8bFree(tp); u8bFree(tm);
-        return r;
-    }
+    if (base_tree) r = KEEPTreeULog(k, base_tree, 0, v_base, bu);
+    if (r == OK)   r = KEEPTreeULog(k, tgt_tree,  0, v_tgt,  tu);
+    if (r != OK) { u8bFree(bu); u8bFree(tu); return r; }
 
-    a_dup(u8c, view_b, u8bData(bp));
-    a_dup(u8c, view_t, u8bData(tp));
+    a_dup(u8c, view_b, u8bData(bu));
+    a_dup(u8c, view_t, u8bData(tu));
     a_pad(u8cs, ins, 2);
     u8cssFeed1(ins_idle, view_b);
     u8cssFeed1(ins_idle, view_t);
-    a_dup(u8cs, view, u8csbData(ins));
+    a_dup(u8cs, cursors, u8csbData(ins));
 
-    u8 const *bm_base = u8bDataHead(bm);
-    u8 const *tm_base = u8bDataHead(tm);
-    size_t b_idx = 0, t_idx = 0;
-    u32 conflicts = 0;
+    get_overlap_ctx ctx = {
+        .noop_out   = noop_out,
+        .unlink_out = unlink_out,
+        .v_base     = v_base,
+        .v_tgt      = v_tgt,
+        .conflicts  = 0,
+    };
+    u8csMv(ctx.reporoot, reporoot);
 
-    for (;;) {
-        u8cs path = {};
-        u64 mask = 0;
-        ok64 dr = KEEPu8ssDrain(view, path, &mask);
-        if (dr != OK) break;
+    ok64 mr = SNIFFMergeWalk(cursors, get_overlap_step, &ctx);
+    u8bFree(bu); u8bFree(tu);
+    if (mr != OK) return mr;
 
-        b8 in_base = (mask & 1) != 0;
-        b8 in_tgt  = (mask & 2) != 0;
-        u8cs br = {};
-        u8cs tr = {};
-        if (in_base) {
-            br[0] = bm_base + b_idx * 21;
-            br[1] = bm_base + (b_idx + 1) * 21;
-        }
-        if (in_tgt) {
-            tr[0] = tm_base + t_idx * 21;
-            tr[1] = tm_base + (t_idx + 1) * 21;
-        }
-        u8 b_kind = in_base ? br[0][0] : 0;
-        u8 t_kind = in_tgt  ? tr[0][0] : 0;
-
-        b8 changed = !in_base || !in_tgt
-                  || u8cscmp(&br, &tr) != 0;
-        b8 is_sub  = (b_kind == WALK_KIND_SUB) || (t_kind == WALK_KIND_SUB);
-
-        if (!changed && in_tgt && !is_sub) {
-            //  No-op overlay: WRITE pass skips it.
-            u8bFeed(noop_out, path);
-            u8bFeed1(noop_out, '\n');
-        } else if (changed && !is_sub) {
-            a_path(fp);
-            ok64 fo = SNIFFFullpath(fp, reporoot, path);
-            if (fo == OK) {
-                struct stat sb = {};
-                if (lstat((char *)u8bDataHead(fp), &sb) == 0) {
-                    struct timespec mts = {.tv_sec = sb.st_mtim.tv_sec,
-                                           .tv_nsec = sb.st_mtim.tv_nsec};
-                    ron60 mr = SNIFFAtOfTimespec(mts);
-                    if (!SNIFFAtKnown(mr)) {
-                        if (conflicts < 5)
-                            fprintf(stderr,
-                                    "sniff: dirty overlap %.*s\n",
-                                    (int)$len(path),
-                                    (char *)path[0]);
-                        conflicts++;
-                    } else if (in_base && !in_tgt) {
-                        //  Clean delete: schedule unlink.
-                        u8bFeed(unlink_out, path);
-                        u8bFeed1(unlink_out, '\n');
-                    }
-                }
-            }
-        }
-
-        if (in_base) b_idx++;
-        if (in_tgt)  t_idx++;
-    }
-
-    u8bFree(bp); u8bFree(bm); u8bFree(tp); u8bFree(tm);
-
-    if (conflicts > 0) {
+    if (ctx.conflicts > 0) {
         fprintf(stderr,
                 "sniff: GET refused — %u dirty file(s) overlap with "
                 "incoming changes; commit, stash, or reset before "
-                "checkout\n", conflicts);
+                "checkout\n", ctx.conflicts);
         return SNIFFOVRL;
     }
     done;

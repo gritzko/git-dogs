@@ -66,8 +66,6 @@ typedef struct {
     Bu8    content;     // blob content for rewrites (freed at end)
 } post_rec;
 
-#define POST_MAX_DIR_ROWS 64
-
 typedef struct {
     keeper     *k;
     u8cs        reporoot;
@@ -79,12 +77,6 @@ typedef struct {
     b8          has_base;   // baseline row exists (any get/post/patch)
     ron60       last_post_ts;
     ok64        error;
-    //  Dir-level put/delete prefixes (trailing '/').  Expanded after
-    //  the wt scan so baseline / on-disk presence is known.
-    u8cs        dir_puts[POST_MAX_DIR_ROWS];
-    u32         n_dir_puts;
-    u8cs        dir_dels[POST_MAX_DIR_ROWS];
-    u32         n_dir_dels;
 } post_ctx;
 
 // --- git mode helpers ---
@@ -111,33 +103,162 @@ static void post_mode_feed(Bu8 tree, u16 mode) {
 
 // --- ULOG scans ---
 
+//  YES iff `p` lives strictly beneath `prefix` (prefix must end '/').
+fun b8 post_path_under(u8cs p, u8cs prefix) {
+    size_t plen = $len(prefix);
+    if (plen == 0) return NO;
+    if ($len(p) <= plen) return NO;
+    return memcmp(p[0], prefix[0], plen) == 0;
+}
+
+//  Walk a sorted ULOG row buffer and, for every row whose URI path
+//  is strictly under `prefix`, emit a fresh ULOG row to `out` with
+//  the same path but `emit_verb`.  `ig` (optional) filters via IGNO.
+//  Returns YES via `*any_out` if at least one row matched (caller
+//  uses it to decide whether to fall back to a different source).
+static ok64 post_expand_under(u8b src, ron60 emit_verb, u8cs prefix,
+                              ignocp ig, u8bp out, b8 *any_out) {
+    sane(src && out);
+    if (any_out) *any_out = NO;
+    if (u8bDataLen(src) == 0) done;
+
+    a_dup(u8c, scan, u8bData(src));
+    while (!u8csEmpty(scan)) {
+        ulogrec rec = {};
+        ok64 dr = ULOGu8sDrain(scan, &rec);
+        if (dr == NODATA) break;
+        if (dr != OK) continue;
+        u8cs path = {rec.uri.path[0], rec.uri.path[1]};
+        if (!post_path_under(path, prefix)) continue;
+        if (ig && IGNOMatch(ig, path, NO)) continue;
+
+        uri u = {};
+        u.path[0] = path[0];
+        u.path[1] = path[1];
+        ulogrec out_rec = {.ts = rec.ts, .verb = emit_verb, .uri = u};
+        ok64 fo = ULOGu8sFeed(u8bIdle(out), &out_rec);
+        if (fo != OK) return fo;
+        if (any_out) *any_out = YES;
+    }
+    done;
+}
+
+//  Per-walk context for `post_pd_cb`.  Holds the two unsorted ULOG
+//  intent buffers plus the baseline / wt cursors needed for in-place
+//  dir-prefix expansion.  3b2 fully absorbed `post_expand_dir_rows`.
+typedef struct {
+    post_ctx *c;
+    u8bp      put_unsorted;
+    u8bp      del_unsorted;
+    u8bp      bu;            // baseline ULOG (KEEPTreeULog) — borrowed
+    u8bp      wu;            // wt ULOG (SNIFFWtULog) — borrowed
+    ignocp    ig;            // wt-root .gitignore
+    ron60     v_put_filter;
+    ron60     v_del_filter;
+    ron60     v_put_emit;
+    ron60     v_del_emit;
+} pd_walk_ctx;
+
 static ok64 post_pd_cb(ron60 verb, u8cs path, ron60 ts, void *vctx) {
     sane(vctx);
-    (void)ts;
-    post_ctx *c = (post_ctx *)vctx;
+    pd_walk_ctx *w = (pd_walk_ctx *)vctx;
+    post_ctx    *c = w->c;
     c->any_pd = YES;
-    u32 idx = SNIFFIntern(path);
-    if (idx >= c->cap) return OK;
-    if (verb == SNIFFAtVerbPut())    c->flag[idx] |= POST_EXPL_PUT;
-    if (verb == SNIFFAtVerbDelete()) c->flag[idx] |= POST_EXPL_DEL;
 
-    //  Trailing-slash paths are dir markers; stash the prefix so the
-    //  expansion pass can walk baseline / wt under it.  Exact-path
-    //  flags above are harmless on dir indices — post_decide skips
-    //  them via SNIFFIsDir.
+    //  Trailing-slash paths are dir prefixes; expand against bu/wu now.
+    //
+    //  Rules (preserved from the legacy post_expand_dir_rows):
+    //    * delete dir/: emit a delete ULOG row for every baseline path
+    //      strictly under the prefix.
+    //    * put dir/, baseline coverage exists: emit a put ULOG row per
+    //      baseline path under the prefix (IGNO doesn't apply to
+    //      tracked files).
+    //    * put dir/, no baseline match: emit a put ULOG row per wt
+    //      path under the prefix (subject to IGNO).
     if (!$empty(path) && *u8csLast(path) == '/') {
-        if (verb == SNIFFAtVerbPut() && c->n_dir_puts < POST_MAX_DIR_ROWS) {
-            c->dir_puts[c->n_dir_puts][0] = path[0];
-            c->dir_puts[c->n_dir_puts][1] = path[1];
-            c->n_dir_puts++;
+        if (verb == w->v_del_filter) {
+            return post_expand_under(w->bu, w->v_del_emit, path,
+                                     NULL, w->del_unsorted, NULL);
         }
-        if (verb == SNIFFAtVerbDelete() && c->n_dir_dels < POST_MAX_DIR_ROWS) {
-            c->dir_dels[c->n_dir_dels][0] = path[0];
-            c->dir_dels[c->n_dir_dels][1] = path[1];
-            c->n_dir_dels++;
+        if (verb == w->v_put_filter) {
+            b8 any_base = NO;
+            ok64 br = post_expand_under(w->bu, w->v_put_emit, path,
+                                        NULL, w->put_unsorted, &any_base);
+            if (br != OK) return br;
+            if (any_base) return OK;
+            return post_expand_under(w->wu, w->v_put_emit, path,
+                                     w->ig, w->put_unsorted, NULL);
         }
+        return OK;
+    }
+
+    //  File-level put/delete row → emit one ULOG line into the
+    //  appropriate intent buffer.  Sort+dedup happens after the walk;
+    //  the merge classifier then dispatches on `verb` to set
+    //  POST_EXPL_PUT / POST_EXPL_DEL.
+    uri u = {};
+    u.path[0] = path[0];
+    u.path[1] = path[1];
+    if (verb == w->v_put_filter) {
+        ulogrec rec = {.ts = ts, .verb = w->v_put_emit, .uri = u};
+        return ULOGu8sFeed(u8bIdle(w->put_unsorted), &rec);
+    }
+    if (verb == w->v_del_filter) {
+        ulogrec rec = {.ts = ts, .verb = w->v_del_emit, .uri = u};
+        return ULOGu8sFeed(u8bIdle(w->del_unsorted), &rec);
     }
     return OK;
+}
+
+//  Sort+dedup an unsorted ULOG intent buffer into `dst` (lex-by-path).
+//  Uses HEAPu8csPopZ over a per-row slice array.  `dst` is reset.
+static ok64 post_sort_dedup_intent(u8b src, u8b dst) {
+    sane(src && dst);
+    u8bReset(dst);
+    if (u8bDataLen(src) == 0) done;
+
+    //  Heap of one-line slices into `src`.  Cap is loose — `src` has
+    //  no zero-length lines so divide by 16-byte minimum row.
+    Bu8cs slices = {};
+    size_t cap = u8bDataLen(src) / 16 + 16;
+    call(u8csbAllocate, slices, cap);
+
+    u8c *base = u8bDataHead(src);
+    u8c *term = base + u8bDataLen(src);
+    for (u8c *p = base; p < term; ) {
+        u8c *line_start = p;
+        while (p < term && *p != '\n') p++;
+        if (p < term) p++;     // include the trailing '\n'
+        u8cs slice = {line_start, p};
+        ok64 fo = u8csbFeedP(slices, &slice);
+        if (fo != OK) { u8csbFree(slices); return fo; }
+    }
+
+    //  Heap-sort via repeated pop.
+    u8cssHeapZ(u8csbData(slices), ULOGu8csZbyUri);
+
+    u8cs prev = {};
+    b8   have_prev = NO;
+    while (u8csbDataLen(slices) > 0) {
+        u8cs cur = {};
+        ok64 po = HEAPu8csPopZ(&cur, slices, ULOGu8csZbyUri);
+        if (po != OK) break;
+
+        //  Dedup: a == b under ULOGu8csZbyUri iff !(a<b) && !(b<a).
+        if (have_prev &&
+            !ULOGu8csZbyUri(&prev, &cur) &&
+            !ULOGu8csZbyUri(&cur, &prev)) {
+            continue;
+        }
+        a_dup(u8c, cur_dup, cur);
+        ok64 fo = u8bFeed(dst, cur_dup);
+        if (fo != OK) { u8csbFree(slices); return fo; }
+        u8csMv(prev, cur);
+        have_prev = YES;
+    }
+
+    u8csbFree(slices);
+    done;
 }
 
 // --- Baseline tree resolution ---
@@ -194,162 +315,95 @@ static ok64 post_resolve_baseline(post_ctx *c, sha1 *root_out, b8 *has_out) {
 
 // --- Baseline ↔ wt classifier via N-way merge ---
 
-//  Drive `flag[idx]` / `rec[idx]` population from a 2-input merge over
-//  the baseline tree's leaf list and the wt's path list.  Replaces the
-//  separate WALKTreeLazy + FILEScan passes.  SUB entries on the
-//  baseline side go through the same POST_KEEP carry-through the old
-//  baseline visitor applied.
-//
-//  `wp_out` is left populated with the wt path list — `post_expand_
-//  dir_rows`'s new-dir-put case prefix-filters it so we don't re-walk
-//  the wt subtree per dir-put row.  Caller owns `wp_out`.
-static ok64 post_classify_via_merge(post_ctx *c, u8cp base_tree,
-                                    b8 has_base, u8bp wp_out) {
-    sane(c && wp_out);
-
-    Bu8 bp = {}, bm = {}, wm = {};
-    call(u8bAllocate, bp, 1UL << 20);
-    call(u8bAllocate, bm, 1UL << 20);
-    call(u8bAllocate, wm, 1UL << 20);
-
-    ok64 r = OK;
-    if (has_base) r = KEEPTreeListLeaves(c->k, base_tree, bp, bm);
-    if (r == OK)  r = SNIFFWtListPaths(c->reporoot, wp_out, wm);
-    if (r != OK) {
-        u8bFree(bp); u8bFree(bm); u8bFree(wm);
-        return r;
+//  Parse an octal-ASCII mode slice ("100644", "40000", …) into a u16.
+static u16 post_parse_octal_mode(u8cs s) {
+    u16 m = 0;
+    for (u8c const *p = s[0]; p < s[1]; p++) {
+        if (*p < '0' || *p > '7') return m;
+        m = (u16)(m * 8 + (*p - '0'));
     }
+    return m;
+}
 
-    a_dup(u8c, view_b, u8bData(bp));
-    a_dup(u8c, view_w, u8bData(wp_out));
-    a_pad(u8cs, ins, 2);
-    u8cssFeed1(ins_idle, view_b);
-    u8cssFeed1(ins_idle, view_w);
-    a_dup(u8cs, view, u8csbData(ins));
+//  Per-step classification context for `post_classify_step`.
+typedef struct {
+    post_ctx *c;
+    ron60     v_base;
+    ron60     v_wt;
+    ron60     v_put;
+    ron60     v_del;
+} post_classify_step_ctx;
 
-    u8 const *bm_base = u8bDataHead(bm);
-    u8 const *wm_base = u8bDataHead(wm);
-    size_t b_idx = 0, w_idx = 0;
+//  SNIFFMergeWalk step callback.  Each `recs[i]` shares the same path
+//  but carries a different verb identifying its source (base / wt /
+//  put / del).
+static ok64 post_classify_step(ulogreccp recs, u32 n, void *vctx) {
+    post_classify_step_ctx *cctx = (post_classify_step_ctx *)vctx;
+    post_ctx *c = cctx->c;
 
-    for (;;) {
-        u8cs path = {};
-        u64 mask = 0;
-        ok64 dr = KEEPu8ssDrain(view, path, &mask);
-        if (dr != OK) break;
+    //  Path is identical across the tie group; intern once.
+    u8cs path = {recs[0].uri.path[0], recs[0].uri.path[1]};
+    u32 idx = SNIFFIntern(path);
+    if (idx >= c->cap) return OK;
 
-        b8 in_base = (mask & 1) != 0;
-        b8 in_wt   = (mask & 2) != 0;
-
-        u32 idx = SNIFFIntern(path);
-        if (idx < c->cap) {
-            if (in_base) {
-                c->flag[idx] |= POST_IN_BASE;
-                u8 b_kind = bm_base[b_idx * 21];
-                u8 const *b_sha = bm_base + b_idx * 21 + 1;
-                memcpy(c->rec[idx].old_sha.data, b_sha, 20);
-                c->rec[idx].old_mode = post_mode_of_kind(b_kind);
-                if (b_kind == WALK_KIND_SUB) {
-                    //  Gitlink: carry through verbatim (see comments on
-                    //  the old post_base_visit).  No on-disk file
-                    //  expected — POST_KEEP short-circuits post_decide.
-                    c->flag[idx] |= POST_KEEP;
-                }
-            }
-            if (in_wt) {
-                c->flag[idx] |= POST_ON_DISK;
-                c->rec[idx].new_mode = post_mode_of_kind(wm_base[w_idx]);
-            }
+    for (u32 i = 0; i < n; i++) {
+        ulogreccp r = &recs[i];
+        if (r->verb == cctx->v_base) {
+            u8cs mode_s = {r->uri.query[0], r->uri.query[1]};
+            u16  mode   = post_parse_octal_mode(mode_s);
+            c->flag[idx]         |= POST_IN_BASE;
+            c->rec[idx].old_mode  = mode;
+            //  Decode the 40-hex fragment into the 20-byte sha slot.
+            u8s bin_s = {c->rec[idx].old_sha.data,
+                         c->rec[idx].old_sha.data + 20};
+            a_dup(u8c, frag_dup, r->uri.fragment);
+            HEXu8sDrainSome(bin_s, frag_dup);
+            //  Gitlink (160000): carry through verbatim — no on-disk
+            //  file expected; POST_KEEP short-circuits post_decide.
+            if (mode == 0160000) c->flag[idx] |= POST_KEEP;
+        } else if (r->verb == cctx->v_wt) {
+            u8cs mode_s = {r->uri.query[0], r->uri.query[1]};
+            c->flag[idx]         |= POST_ON_DISK;
+            c->rec[idx].new_mode  = post_parse_octal_mode(mode_s);
+        } else if (r->verb == cctx->v_put) {
+            c->flag[idx] |= POST_EXPL_PUT;
+        } else if (r->verb == cctx->v_del) {
+            c->flag[idx] |= POST_EXPL_DEL;
         }
-
-        if (in_base) b_idx++;
-        if (in_wt)   w_idx++;
     }
-
-    u8bFree(bp); u8bFree(bm); u8bFree(wm);
-    done;
+    return OK;
 }
 
-// --- Dir-level put/delete expansion ---
-//
-//  `be put dir/` and `be delete dir/` record one ULOG row with a
-//  trailing slash.  The expansion pass turns each such row into a
-//  set of file-level flag updates so post_decide can do its usual
-//  per-path logic.  Runs AFTER baseline load + wt scan so both
-//  sources of truth are available.
-//
-//  Rules (v1):
-//    * delete: flag every baseline path strictly under the prefix as
-//      POST_EXPL_DEL.  POST's unlink loop then drops them from disk.
-//    * put, existing dir (any baseline file under prefix): flag those
-//      baseline paths as POST_EXPL_PUT.  Untracked on-disk siblings
-//      under the same prefix stay unflagged and fall through
-//      post_decide's "selective, no explicit rule, not in base" case
-//      — i.e. ignored.
-//    * put, new dir (no baseline hit): walk the wt under the prefix
-//      and flag each non-ignored file as POST_EXPL_PUT.  IGNO is
-//      loaded once from the wt root (no nested cascade).
-
-//  True iff `p` lives strictly beneath `prefix` (prefix must end '/').
-fun b8 post_path_under(u8cs p, u8cs prefix) {
-    size_t plen = $len(prefix);
-    if (plen == 0) return NO;
-    if ($len(p) <= plen) return NO;
-    return memcmp(p[0], prefix[0], plen) == 0;
-}
-
-static ok64 post_expand_dir_rows(post_ctx *c, ignocp ig, u8cs wp) {
+//  Drive `flag[idx]` / `rec[idx]` population from a 4-way ULOG-row
+//  merge over (baseline tree, wt, sorted ULOG put intents, sorted ULOG
+//  delete intents).  All four buffers are caller-owned — `bu` and `wu`
+//  are also reused by `post_pd_cb` for dir-prefix expansion.  Each
+//  input carries a distinct verb so the step callback can dispatch
+//  per record.
+static ok64 post_classify_via_merge(post_ctx *c,
+                                    u8b bu, u8b wu,
+                                    u8b put_buf, u8b del_buf,
+                                    ron60 v_base, ron60 v_wt,
+                                    ron60 v_put,  ron60 v_del) {
     sane(c);
 
-    //  DELETE: baseline-only.
-    for (u32 di = 0; di < c->n_dir_dels; di++) {
-        a_dup(u8c, pfx, c->dir_dels[di]);
-        u32 n = SNIFFCount();
-        for (u32 i = 0; i < n && i < c->cap; i++) {
-            if (!(c->flag[i] & POST_IN_BASE)) continue;
-            if (SNIFFIsDir(i))                continue;
-            u8cs p = {};
-            if (SNIFFPath(p, i) != OK)        continue;
-            if (!post_path_under(p, pfx))     continue;
-            c->flag[i] |= POST_EXPL_DEL;
-        }
-    }
+    //  Heap-walk all 4 cursors; dispatch per row in `post_classify_step`.
+    a_dup(u8c, view_b, u8bData(bu));
+    a_dup(u8c, view_w, u8bData(wu));
+    a_dup(u8c, view_p, u8bData(put_buf));
+    a_dup(u8c, view_d, u8bData(del_buf));
+    a_pad(u8cs, ins, 4);
+    u8cssFeed1(ins_idle, view_b);
+    u8cssFeed1(ins_idle, view_w);
+    u8cssFeed1(ins_idle, view_p);
+    u8cssFeed1(ins_idle, view_d);
+    a_dup(u8cs, cursors, u8csbData(ins));
 
-    //  PUT: try baseline expansion first; fall through to a wp-cursor
-    //  prefix scan when the prefix names a dir that wasn't tracked yet.
-    //  IGNO still applies — the merge-classifier doesn't filter
-    //  gitignored files (so they show up as POST_ON_DISK), but a
-    //  user-issued `be put dir/` shouldn't auto-stage gitignored
-    //  contents inside `dir/` along with the rest.
-    for (u32 di = 0; di < c->n_dir_puts; di++) {
-        a_dup(u8c, pfx, c->dir_puts[di]);
-        b8 any_base = NO;
-        u32 n = SNIFFCount();
-        for (u32 i = 0; i < n && i < c->cap; i++) {
-            if (!(c->flag[i] & POST_IN_BASE)) continue;
-            if (SNIFFIsDir(i))                continue;
-            u8cs p = {};
-            if (SNIFFPath(p, i) != OK)        continue;
-            if (!post_path_under(p, pfx))     continue;
-            c->flag[i] |= POST_EXPL_PUT;
-            any_base = YES;
-        }
-        if (any_base) continue;
-
-        //  New dir — drain the wp cursor and flag every wt path
-        //  beneath the prefix that survives IGNO.
-        a_dup(u8c, scan, wp);
-        for (;;) {
-            u8cs rel = {};
-            if (u8csDrainLine(scan, rel) != OK) break;
-            if ($empty(rel))               continue;
-            if (!post_path_under(rel, pfx)) continue;
-            if (ig && IGNOMatch(ig, rel, NO)) continue;
-            u32 idx = SNIFFIntern(rel);
-            if (idx >= c->cap) continue;
-            c->flag[idx] |= POST_EXPL_PUT;
-        }
-    }
-    done;
+    post_classify_step_ctx cctx = {
+        .c = c, .v_base = v_base, .v_wt = v_wt,
+        .v_put = v_put, .v_del = v_del,
+    };
+    return SNIFFMergeWalk(cursors, post_classify_step, &cctx);
 }
 
 // --- Change-set resolution ---
@@ -946,31 +1000,93 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
     //  2. Resolve baseline URI → tree sha (no walk yet).
     call(post_resolve_baseline, c, base_tree_sha, have_base);
 
-    //  3. Put/delete scan since last post.
-    call(SNIFFAtScanPutDelete, c->last_post_ts, post_pd_cb, c);
+    //  3. Build the baseline + wt ULOG row buffers up-front.  Both are
+    //     reused by post_pd_cb (dir-prefix expansion) and the merge
+    //     classifier; sharing avoids two scans of the same trees.
+    a_cstr(s_basev, "base"); a_dup(u8c, dbv, s_basev);
+    a_cstr(s_wtv,   "wt");   a_dup(u8c, dwv, s_wtv);
+    a_cstr(s_putv,  "put");  a_dup(u8c, dpv, s_putv);
+    a_cstr(s_delv,  "del");  a_dup(u8c, ddv, s_delv);
+    ron60 v_base = 0, v_wt = 0, v_put_emit = 0, v_del_emit = 0;
+    call(RONutf8sDrain, &v_base,     dbv);
+    call(RONutf8sDrain, &v_wt,       dwv);
+    call(RONutf8sDrain, &v_put_emit, dpv);
+    call(RONutf8sDrain, &v_del_emit, ddv);
 
-    //  4. Classify baseline + wt via N-way merge, populating
-    //     POST_IN_BASE / POST_ON_DISK + per-path metadata.  `wp` is
-    //     the wt path list (newline-separated, lex-sorted) that the
-    //     merge produced; (4b) reuses it for dir-row expansion.
-    Bu8 wp = {};
-    call(u8bAllocate, wp, 1UL << 20);
-    ok64 cr = post_classify_via_merge(c,
-                                      *have_base ? base_tree_sha->data : NULL,
-                                      *have_base, wp);
-    if (cr != OK) { u8bFree(wp); return cr; }
+    Bu8 bu = {}, wu = {};
+    Bu8 put_unsorted = {}, del_unsorted = {};
+    Bu8 put_buf = {}, del_buf = {};
+    call(u8bAllocate, bu,           1UL << 20);
+    call(u8bAllocate, wu,           1UL << 20);
+    call(u8bAllocate, put_unsorted, 1UL << 16);
+    call(u8bAllocate, del_unsorted, 1UL << 16);
+    call(u8bAllocate, put_buf,      1UL << 16);
+    call(u8bAllocate, del_buf,      1UL << 16);
 
-    //  4b. Expand dir-level put/delete rows into file-level flags.
-    //      The wt-root .gitignore is already loaded into SNIFF.ignores
-    //      at SNIFFOpen time, so every op consults the same set.
-    {
-        a_dup(u8c, wp_view, u8bData(wp));
-        ok64 er = post_expand_dir_rows(c, &SNIFF.ignores, wp_view);
-        if (er != OK) { u8bFree(wp); return er; }
+#define PD_FREE_ALL()                                  \
+    do {                                                \
+        u8bFree(bu); u8bFree(wu);                       \
+        u8bFree(put_unsorted); u8bFree(del_unsorted);   \
+        u8bFree(put_buf); u8bFree(del_buf);             \
+    } while (0)
+
+    if (*have_base) {
+        ok64 br = KEEPTreeULog(c->k, base_tree_sha->data, 0, v_base, bu);
+        if (br != OK) { PD_FREE_ALL(); return br; }
     }
-    u8bFree(wp);
+    {
+        ok64 wr = SNIFFWtULog(c->reporoot, v_wt, wu);
+        if (wr != OK) { PD_FREE_ALL(); return wr; }
+    }
 
-    //  5. Decide fate per path.
+    //  4. Put/delete scan since last post.  File-level rows go into
+    //     the unsorted intent buffers; dir-prefix rows are expanded
+    //     in-line against bu / wu via post_expand_under.
+    pd_walk_ctx walk = {
+        .c = c,
+        .put_unsorted = put_unsorted,
+        .del_unsorted = del_unsorted,
+        .bu           = bu,
+        .wu           = wu,
+        .ig           = &SNIFF.ignores,
+        .v_put_filter = SNIFFAtVerbPut(),
+        .v_del_filter = SNIFFAtVerbDelete(),
+        .v_put_emit   = v_put_emit,
+        .v_del_emit   = v_del_emit,
+    };
+    {
+        ok64 sr = SNIFFAtScanPutDelete(c->last_post_ts, post_pd_cb, &walk);
+        if (sr != OK) { PD_FREE_ALL(); return sr; }
+    }
+    {
+        ok64 ps = post_sort_dedup_intent(put_unsorted, put_buf);
+        ok64 ds = ps == OK
+                ? post_sort_dedup_intent(del_unsorted, del_buf)
+                : OK;
+        u8bFree(put_unsorted); u8bFree(del_unsorted);
+        if (ps != OK) {
+            u8bFree(bu); u8bFree(wu);
+            u8bFree(put_buf); u8bFree(del_buf);
+            return ps;
+        }
+        if (ds != OK) {
+            u8bFree(bu); u8bFree(wu);
+            u8bFree(put_buf); u8bFree(del_buf);
+            return ds;
+        }
+    }
+
+    //  5. Classify baseline + wt + put/del intents via 4-way merge,
+    //     populating POST_IN_BASE / POST_ON_DISK / POST_EXPL_PUT /
+    //     POST_EXPL_DEL + per-path metadata.
+    ok64 cr = post_classify_via_merge(c, bu, wu, put_buf, del_buf,
+                                      v_base, v_wt, v_put_emit, v_del_emit);
+    u8bFree(bu); u8bFree(wu);
+    u8bFree(put_buf); u8bFree(del_buf);
+    if (cr != OK) return cr;
+#undef PD_FREE_ALL
+
+    //  6. Decide fate per path.
     u32 n_now = SNIFFCount();
     for (u32 i = 0; i < n_now && i < c->cap; i++) {
         call(post_decide, c, i);
