@@ -24,7 +24,7 @@
 #  Run: BIN=build-debug/bin sh sniff/test/squash.sh
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
@@ -105,13 +105,13 @@ note "?feat -> $FEAT_REF"
 # --- step 3: switch to feat, two turbulent commits --------------------
 echo "=== 3. feat branch: modify a, then add c ==="
 sniff get "?feat" >/dev/null
-sleep 1
+usleep 10000
 echo "a line 1 (feat mod)" > a.txt
 sniff post -m "feat: rewrite a" >/dev/null
 FEAT1=$(head_hex)
 note "feat tip after rewrite=$FEAT1"
 
-sleep 1
+usleep 10000
 echo "c line 1" > c.txt
 #  c.txt is untracked — implicit `sniff post -m` skips strangers
 #  once a baseline exists.  Stage it explicitly.
@@ -129,7 +129,7 @@ sniff get "?" >/dev/null
 [ ! -f c.txt ] || fail "c.txt should be pruned on switch to trunk"
 grep -qF 'a line 1' a.txt || fail "a.txt not base content on trunk"
 
-sleep 1
+usleep 10000
 echo "b line 1 (trunk mod)" > b.txt
 sniff post -m "trunk: rewrite b" >/dev/null
 TRUNK1=$(head_hex)

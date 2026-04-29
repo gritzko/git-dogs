@@ -9,10 +9,10 @@
 set -e
 
 <<<<<<< HEAD
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 =======
-BIN=${BIN:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
+BIN=${DOG_BIN_DIR:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
 >>>>>>> dogs-bro
 export PATH="$BIN:$PATH"
 

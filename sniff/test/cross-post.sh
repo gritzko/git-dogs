@@ -12,7 +12,7 @@
 #  Run: BIN=build-debug/bin sh sniff/test/cross-post.sh
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
@@ -72,7 +72,7 @@ note "trunk base = $TRUNK_BASE"
 #  doesn't exist yet, so this is a create-on-miss path (no ff check).
 #  Idiomatic syntax: URI first, message words follow and fold into
 #  the URI's #fragment.
-sleep 1
+usleep 10000
 echo "x feat" > x.txt
 sniff post "?feat" feat work >/dev/null
 
@@ -116,7 +116,7 @@ FAKE="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 TS=$(awk 'END { print $1 }' .dogs/refs)
 printf '%sz\tpost\t?feat#%s\n' "$TS" "$FAKE" >> .dogs/refs
 
-sleep 1
+usleep 10000
 echo "x v2" > x.txt
 if sniff post "?feat" should fail 2>/tmp/cross.err; then
     cat /tmp/cross.err

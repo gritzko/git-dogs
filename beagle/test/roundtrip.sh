@@ -12,7 +12,7 @@
 #  Requires passwordless ssh to localhost (same as POSTtest did).
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 BE="$BIN/be"
 KEEPER="$BIN/keeper"

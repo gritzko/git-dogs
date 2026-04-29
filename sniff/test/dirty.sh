@@ -13,7 +13,7 @@
 #  Run: BIN=build-debug/bin sh sniff/test/dirty.sh
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
@@ -72,7 +72,7 @@ echo "a v1" > a.txt
 echo "b v1" > b.txt
 sniff post -m "trunk base" >/dev/null
 sniff post "?feat" >/dev/null            # label feat at this tip
-sleep 1
+usleep 10000
 echo "a v1 (uncommitted)" > a.txt        # dirty edit on trunk
 note "edited a.txt without committing"
 
@@ -103,7 +103,7 @@ mkdir -p "$WT"; cd "$WT"
 echo "a v1" > a.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)
-sleep 1
+usleep 10000
 echo "a v2" > a.txt
 sniff post -m "v2" >/dev/null
 T2=$(head_hex)
@@ -113,7 +113,7 @@ note "two trunk tips: T1=$T1 T2=$T2"
 #  User-edit a.txt on top of T2 — file is now dirty (mtime ∉
 #  stamp-set).  Trying to GET T1 (same branch, different tip) must
 #  refuse because a.txt is in T1's tree and would clobber the dirty.
-sleep 1
+usleep 10000
 echo "a uncommitted" > a.txt
 before_tail=$(last_row)
 before_a=$(cat a.txt)
@@ -142,7 +142,7 @@ mkdir -p "$WT"; cd "$WT"
 echo "a v1" > a.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)
-sleep 1
+usleep 10000
 echo "a v2" > a.txt
 sniff post -m "v2" >/dev/null
 T2=$(head_hex)
@@ -150,7 +150,7 @@ T2=$(head_hex)
 #  Drop an untracked, never-stamped file alongside the tracked tree;
 #  GET'ing back to T1 must NOT refuse because untracked.txt isn't in
 #  T1's target tree.
-sleep 1
+usleep 10000
 echo "scratch" > untracked.txt
 sniff get "$T1" >/dev/null \
     || fail "same-branch GET refused despite untracked-only dirt"

@@ -19,7 +19,7 @@
 #
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 SNIFF="$BIN/sniff"
 KEEPER="$BIN/keeper"
 
@@ -128,7 +128,7 @@ note "both files present after get"
 # ------------------------------------------------------------------
 echo "=== 4. implicit all-dirty via bare post ==="
 cd "$D3b"
-sleep 1                                 # force a distinct mtime
+usleep 10000                                 # force a distinct mtime
 echo alpha-two > a.txt                  # modify
 "$SNIFF" put >/dev/null                 # no-op: no args
 #  No new put/delete rows since the last post → POST falls into

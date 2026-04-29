@@ -9,7 +9,7 @@
 #
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"
 #  Resolve `be` once to a fully-qualified path to rule out lookup oddities.

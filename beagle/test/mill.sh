@@ -6,7 +6,7 @@
 #
 set -e
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"
 

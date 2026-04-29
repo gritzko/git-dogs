@@ -34,7 +34,7 @@
 
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 #  Absolute path — `be` gets invoked from several different cwds below.
 BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"

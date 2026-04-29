@@ -24,7 +24,7 @@
 
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"
 export DOG_REMOTE_PATH="$BIN"

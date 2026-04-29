@@ -18,7 +18,7 @@
 
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export DOG_REMOTE_PATH="$BIN"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"

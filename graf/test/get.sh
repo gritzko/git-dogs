@@ -14,7 +14,7 @@
 #
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BE="$BIN/be"
 GRAF="$BIN/graf"
 

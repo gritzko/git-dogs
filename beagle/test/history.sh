@@ -18,7 +18,7 @@ set -eu
 
 #  CMake sets BIN to the current build's bin dir via ENVIRONMENT (see
 #  beagle/test/CMakeLists.txt).  Out-of-ctest default = build-debug.
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 BE="$BIN/be"
 

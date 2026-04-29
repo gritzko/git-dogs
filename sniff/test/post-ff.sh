@@ -7,7 +7,7 @@
 #  Run: BIN=build-debug/bin sh sniff/test/post-ff.sh
 set -eu
 
-BIN=${BIN:-@CMAKE_BINARY_DIR@/bin}
+BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 
@@ -73,7 +73,7 @@ echo "x" > x.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)
 
-sleep 1
+usleep 10000
 echo "x v2" > x.txt
 sniff post -m "v2" >/dev/null
 T2=$(head_hex)
@@ -89,7 +89,7 @@ printf '%sz\tpost\t?#%s\n' "$TS" "$FAKE" >> .dogs/refs
 note "REFS poisoned with unrelated tip $FAKE; wt.base still $T2"
 
 before_tail=$(last_row)
-sleep 1
+usleep 10000
 echo "x v3" > x.txt
 if sniff post -m "should fail" 2>/tmp/postff.err; then
     cat /tmp/postff.err
