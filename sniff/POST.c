@@ -24,6 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 #include "abc/FILE.h"
 #include "abc/HEX.h"
@@ -1165,6 +1166,738 @@ static ok64 post_rebase_emit_cb(void *vctx, u8 obj_type,
     return OK;
 }
 
+// --- Cascade rebase (Stage 2c) ---
+//
+//  When phase-2 rewrites a branch's stack (rebase, not ff), every
+//  descendant branch that forked off the rewritten tip needs its own
+//  stack replayed onto the new tip.  The cascade walker enumerates
+//  direct subdirs of `<store>/<branch>/` with a `refs` file and runs
+//  GRAFRebase on each, depth-first.  All emits land in the open pack
+//  passed by the caller; descendants' new tips are committed via
+//  REFSCompareAndAppend top-down.
+//
+//  Atomicity: this walker stages everything in the pack first; the
+//  REFS writes happen after.  On GRAFCNFL we surface the error and
+//  leave orphan objects in the pack (REFS unchanged ⇒ unreachable).
+//  REFS persistence is best-effort: a CAS race mid-cascade leaves
+//  earlier descendants advanced — documented as a known limitation.
+
+//  Resolve a branch's REFS tip (`?<branch>`) to a 20-byte sha.  Returns
+//  REFSNONE when no row exists, OK when a tip is present and decoded.
+static ok64 post_resolve_branch_tip(sha1 *out, u8cs reporoot, u8cs branch) {
+    sane(out);
+    a_path(keepdir, reporoot, KEEP_DIR_S);
+    a_pad(u8, keybuf, 256);
+    u8bFeed1(keybuf, '?');
+    if (!u8csEmpty(branch)) u8bFeed(keybuf, branch);
+    a_dup(u8c, refkey, u8bData(keybuf));
+
+    a_pad(u8, arena, 1024);
+    uri resolved = {};
+    ok64 ro = REFSResolve(&resolved, arena, $path(keepdir), refkey);
+    if (ro != OK) return ro;
+    if ($empty(resolved.query)) return REFSNONE;
+    u8cs tip_hex = {resolved.query[0], resolved.query[1]};
+    if (!u8csEmpty(tip_hex) && *tip_hex[0] == '?') u8csUsed(tip_hex, 1);
+    if ($len(tip_hex) != 40) return REFSBAD;
+    u8s bin = {out->data, out->data + 20};
+    a_dup(u8c, hx, tip_hex);
+    return HEXu8sDrainSome(bin, hx);
+}
+
+//  Cascade record: one descendant branch awaiting its REFS write.
+typedef struct {
+    u8  branch_buf[256];     // canonical absolute path
+    u32 branch_len;
+    sha1 old_tip;
+    sha1 new_tip;
+} cascade_rec;
+
+#define CASCADE_MAX 64
+
+typedef struct {
+    keeper      *k;
+    keep_pack   *p;
+    u8cs         reporoot;
+    cascade_rec  recs[CASCADE_MAX];
+    u32          n;
+    ok64         err;
+    //  Optional: branch path to skip during the walk (cross-branch
+    //  promote uses this so cur is not double-rebased — auto-sync
+    //  handles cur directly).  NULL/empty disables the filter.
+    u8cs         skip;
+} cascade_ctx;
+
+//  Stage one descendant: compute its old fork point relative to the
+//  parent's old tip, run GRAFRebase onto the parent's new tip, capture
+//  new tip into recs[].  Returns OK on success or a GRAFCNFL/error.
+static ok64 post_cascade_one(cascade_ctx *cc, u8cs branch,
+                             sha1 const *parent_old_tip,
+                             sha1 const *parent_new_tip) {
+    sane(cc);
+    if (cc->n >= CASCADE_MAX) return SNIFFFAIL;
+
+    sha1 child_tip = {};
+    ok64 cr = post_resolve_branch_tip(&child_tip, cc->reporoot, branch);
+    if (cr == REFSNONE) return OK;     //  branch has no REFS tip — skip
+    if (cr != OK) return cr;
+
+    //  Old fork point = LCA(parent_old_tip, child_tip).
+    sha1 fork_old = {};
+    (void)GRAFLca(&fork_old, parent_old_tip, &child_tip);
+
+    //  If the child's tip is already an ancestor of parent_new_tip,
+    //  there is nothing to replay.  Detect: LCA(child_tip,
+    //  parent_new_tip) == child_tip.
+    {
+        sha1 lca2 = {};
+        (void)GRAFLca(&lca2, &child_tip, parent_new_tip);
+        if (sha1eq(&lca2, &child_tip)) {
+            //  Child is already on new spine — point its REFS at the
+            //  matching commit (child_tip itself).  No rebase needed.
+            cascade_rec *r = &cc->recs[cc->n++];
+            size_t bl = u8csLen(branch);
+            if (bl > sizeof(r->branch_buf)) return SNIFFFAIL;
+            memcpy(r->branch_buf, branch[0], bl);
+            r->branch_len = (u32)bl;
+            r->old_tip = child_tip;
+            r->new_tip = child_tip;
+            return OK;
+        }
+    }
+
+    post_rebase_ctx rctx = {.k = cc->k, .p = cc->p};
+    ok64 rb = GRAFRebase(&fork_old, parent_new_tip, &child_tip,
+                         post_rebase_emit_cb, &rctx);
+    if (rb != OK) return rb;
+
+    cascade_rec *r = &cc->recs[cc->n++];
+    size_t bl = u8csLen(branch);
+    if (bl > sizeof(r->branch_buf)) return SNIFFFAIL;
+    memcpy(r->branch_buf, branch[0], bl);
+    r->branch_len = (u32)bl;
+    r->old_tip = child_tip;
+    r->new_tip = rctx.have_last_commit ? rctx.last_commit_sha
+                                       : *parent_new_tip;
+    return OK;
+}
+
+//  Recursive walker.  For each subdir of `<store>/<branch>/` that has
+//  a `refs` file, stage its rebase, then recurse with the child as the
+//  new parent.  `branch_old_tip` and `branch_new_tip` are the stage's
+//  current parent before/after the rewrite.
+static ok64 post_cascade_walk(cascade_ctx *cc, u8cs branch,
+                              sha1 const *branch_old_tip,
+                              sha1 const *branch_new_tip) {
+    sane(cc);
+    a_path(bdir, cc->reporoot, KEEP_DIR_S);
+    if (!u8csEmpty(branch)) {
+        ok64 ar = PATHu8bAdd(bdir, branch);
+        if (ar != OK) return ar;
+    }
+
+    DIR *dp = opendir((char *)u8bDataHead(bdir));
+    if (!dp) return OK;     //  no shard yet — no descendants
+
+    //  Snapshot child names to avoid concurrent-readdir surprises.
+    char names[CASCADE_MAX][128];
+    u32 nfound = 0;
+    struct dirent *e;
+    while ((e = readdir(dp)) != NULL && nfound < CASCADE_MAX) {
+        if (e->d_name[0] == '.') continue;     //  skip ., .., refs, .lock
+        if (strcmp(e->d_name, "refs") == 0) continue;
+        size_t nl = strlen(e->d_name);
+        if (nl >= sizeof(names[0])) continue;
+        //  Confirm it's a directory by stat'ing.
+        a_path(child, $path(bdir));
+        u8cs nm = {(u8cp)e->d_name, (u8cp)e->d_name + nl};
+        if (PATHu8bAdd(child, nm) != OK) continue;
+        struct stat sb = {};
+        if (stat((char const *)u8bDataHead(child), &sb) != 0) continue;
+        if ((sb.st_mode & S_IFMT) != S_IFDIR) continue;
+        memcpy(names[nfound++], e->d_name, nl + 1);
+    }
+    closedir(dp);
+
+    for (u32 i = 0; i < nfound; i++) {
+        size_t nl = strlen(names[i]);
+        //  Build absolute child branch path: <branch>/<name>.
+        a_pad(u8, child_path, 256);
+        if (!u8csEmpty(branch)) {
+            u8bFeed(child_path, branch);
+            u8bFeed1(child_path, '/');
+        }
+        u8cs nm = {(u8cp)names[i], (u8cp)names[i] + nl};
+        u8bFeed(child_path, nm);
+        a_dup(u8c, child_branch, u8bData(child_path));
+
+        //  Capture the child's tip BEFORE the rebase via the global
+        //  REFS lookup.  No tip → not a real branch (could be a stale
+        //  shard dir or a non-branch sibling like `graf`/`spot` at
+        //  trunk level); skip.
+        sha1 child_old = {};
+        ok64 cr = post_resolve_branch_tip(&child_old, cc->reporoot,
+                                          child_branch);
+        if (cr != OK) continue;     //  no row → skip
+
+        //  Skip filter: cross-branch promote handles cur via auto-sync,
+        //  so don't recurse into it from the cascade.
+        if (!u8csEmpty(cc->skip) &&
+            u8csLen(child_branch) == u8csLen(cc->skip) &&
+            memcmp(child_branch[0], cc->skip[0],
+                   u8csLen(child_branch)) == 0) {
+            continue;
+        }
+
+        //  Stage rebase + record.
+        ok64 ro = post_cascade_one(cc, child_branch,
+                                   branch_old_tip, branch_new_tip);
+        if (ro != OK) return ro;
+
+        //  Recurse: this child's old/new tips drive the next level.
+        sha1 child_new = cc->recs[cc->n - 1].new_tip;
+        ok64 rr = post_cascade_walk(cc, child_branch, &child_old,
+                                    &child_new);
+        if (rr != OK) return rr;
+    }
+    return OK;
+}
+
+//  Persist staged cascade REFS writes.  Top-down (parent first ⇒ index
+//  order).  CAS races during persist are surfaced but do not unwind
+//  earlier successes (best-effort, documented).
+static ok64 post_cascade_persist(cascade_ctx *cc) {
+    sane(cc);
+    a_path(keepdir, cc->reporoot, KEEP_DIR_S);
+    for (u32 i = 0; i < cc->n; i++) {
+        cascade_rec *r = &cc->recs[i];
+        a_pad(u8, keybuf, 256);
+        u8bFeed1(keybuf, '?');
+        u8cs br = {r->branch_buf, r->branch_buf + r->branch_len};
+        u8bFeed(keybuf, br);
+        a_dup(u8c, refkey, u8bData(keybuf));
+
+        a_pad(u8, exp_hex, 40);
+        a_rawc(esha, r->old_tip);
+        HEXu8sFeedSome(exp_hex_idle, esha);
+        a_pad(u8, new_hex, 40);
+        a_rawc(nsha, r->new_tip);
+        HEXu8sFeedSome(new_hex_idle, nsha);
+        a_dup(u8c, expected, u8bDataC(exp_hex));
+        a_dup(u8c, val,      u8bDataC(new_hex));
+
+        ok64 cas = REFSCompareAndAppend($path(keepdir), refkey,
+                                        expected, val);
+        if (cas == REFSCAS) {
+            fprintf(stderr,
+                    "sniff: post: cascade REFS race on `?%.*s` — "
+                    "earlier descendants may have advanced\n",
+                    (int)r->branch_len, (char *)r->branch_buf);
+        } else if (cas != OK) {
+            return cas;
+        }
+    }
+    return OK;
+}
+
+// --- Cross-branch promote dispatcher (Stage 2d) ---
+//
+//  `be post ?<X>` (no -m): the URI names a different branch and the
+//  user wants cur's stack moved over.  Four shapes per VERBS.md §POST:
+//
+//    (a) ?..             upstream   target == dirname(cur)
+//    (b) ?./fix          child      target == cur + '/' + name (existing)
+//    (c) ?./newleaf      missing    target under cur, no REFS row → create
+//    (d) ?<absolute>     peer       any other existing branch
+//
+//  Operand mapping (see also docstring on POSTPromote):
+//
+//    (a) base_old=LCA(parent.tip, cur.tip), base_new=parent.tip,
+//        child_tip=cur.tip; cur auto-syncs.
+//    (b) base_old=LCA(cur.tip, fix.tip),    base_new=cur.tip,
+//        child_tip=fix.tip; cur unchanged.
+//    (c) KEEPCreateBranch + REFS row at cur.tip; no rebase.
+//    (d) base_old=LCA(target.tip, cur.tip), base_new=target.tip,
+//        child_tip=cur.tip; cur auto-syncs iff target == dirname(cur).
+//
+//  Cur auto-sync is mechanically a second REFSCompareAndAppend after
+//  the target write succeeds.  A CAS race on cur after target advanced
+//  leaves cur stale (user can `be get ?..` to resync) — best-effort
+//  MWP behaviour, documented inline below.
+
+//  YES iff `s` starts with `prefix`.
+static b8 post_starts_with(u8cs s, u8cs prefix) {
+    size_t pl = u8csLen(prefix);
+    if (pl == 0) return YES;
+    if (u8csLen(s) < pl) return NO;
+    return memcmp(s[0], prefix[0], pl) == 0 ? YES : NO;
+}
+
+//  dirname of an absolute branch path: drop trailing `/segment`.
+//  Empty input (= trunk) yields empty.  Output is a slice into input.
+static void post_dirname(u8cs out, u8cs abs_branch) {
+    out[0] = abs_branch[0];
+    out[1] = abs_branch[0];
+    if ($empty(abs_branch)) return;
+    u8cp last_slash = NULL;
+    $for(u8c, p, abs_branch) {
+        if (*p == '/') last_slash = p;
+    }
+    if (last_slash != NULL) out[1] = last_slash;
+}
+
+//  basename of an absolute branch path: bytes after the last '/'.
+//  Empty input yields empty; no '/' yields the whole input.  Output
+//  is a slice into input.
+static void post_basename(u8cs out, u8cs abs_branch) {
+    out[0] = abs_branch[0];
+    out[1] = abs_branch[1];
+    if ($empty(abs_branch)) return;
+    u8cp last_slash = NULL;
+    $for(u8c, p, abs_branch) {
+        if (*p == '/') last_slash = p;
+    }
+    if (last_slash != NULL) out[0] = last_slash + 1;
+}
+
+ok64 POSTPromote(u8cs reporoot, u8cs target_branch) {
+    sane($ok(reporoot) && $ok(target_branch));
+    keeper *k = &KEEP;
+
+    //  --- 1. Resolve cur (baseline branch + cur tip) ---
+    a_pad(u8, cur_buf, 256);
+    sha1  cur_tip       = {};
+    b8    has_cur_tip   = NO;
+    {
+        ron60 ts = 0, verb = 0;
+        uri u = {};
+        ok64 br = SNIFFAtBaseline(&ts, &verb, &u);
+        if (br == OK) {
+            //  Baseline branch is the first QURY_REF in the row's query.
+            a_dup(u8c, q, u.query);
+            while (!$empty(q)) {
+                qref spec = {};
+                if (QURYu8sDrain(q, &spec) != OK) break;
+                if (spec.type == QURY_NONE) {
+                    if ($empty(q)) break;
+                    continue;
+                }
+                if (spec.type == QURY_REF) {
+                    u8bFeed(cur_buf, spec.body);
+                    break;
+                }
+            }
+            //  Cur tip from row's #fragment / first SHA in query.
+            u8 hex40[40];
+            if (SNIFFAtQueryFirstSha(&u, hex40) == OK) {
+                u8s bin = {cur_tip.data, cur_tip.data + 20};
+                u8cs hx = {hex40, hex40 + 40};
+                if (HEXu8sDrainSome(bin, hx) == OK)
+                    has_cur_tip = YES;
+            }
+        }
+    }
+    a_dup(u8c, cur_branch, u8bData(cur_buf));
+
+    if (!has_cur_tip) {
+        fprintf(stderr,
+                "sniff: post: no cur tip — cannot promote\n");
+        return SNIFFFAIL;
+    }
+
+    //  --- 1b. Trailing-slash arm: `?<absolute>/` reuses cur's basename.
+    //  Spec: `be post ?feat/` from cur on `?fix1` rewrites the target
+    //  to `?feat/fix1`.  When cur is trunk (empty basename) or target
+    //  is exactly "/", refuse: there's no name to copy.  After this,
+    //  target_branch always names a leaf (no trailing slash).
+    a_pad(u8, target_buf, 260);
+    {
+        b8 had_slash = NO;
+        u8cs t_in = {target_branch[0], target_branch[1]};
+        if (!$empty(t_in) && *u8csLast(t_in) == '/') {
+            had_slash = YES;
+            u8csShed1(t_in);   //  drop trailing '/'
+        }
+        if (had_slash) {
+            u8cs base_in = {};
+            post_basename(base_in, cur_branch);
+            if ($empty(base_in)) {
+                fprintf(stderr,
+                        "sniff: post: trailing-slash target needs a "
+                        "non-empty cur basename\n");
+                return SNIFFFAIL;
+            }
+            //  Rebuild target as `<stripped>/<basename(cur)>`.
+            if (!$empty(t_in)) {
+                u8bFeed(target_buf, t_in);
+                u8bFeed1(target_buf, '/');
+            }
+            u8bFeed(target_buf, base_in);
+            //  Rebind target_branch to the rewritten path.
+            target_branch[0] = u8bDataHead(target_buf);
+            target_branch[1] = u8bIdleHead(target_buf);
+        }
+    }
+
+    //  --- 2. Same-branch guard: caller should have routed elsewhere. ---
+    if (u8csLen(target_branch) == u8csLen(cur_branch) &&
+        (u8csLen(target_branch) == 0 ||
+         memcmp(target_branch[0], cur_branch[0],
+                u8csLen(target_branch)) == 0)) {
+        //  Target == cur: not a promote.  The caller (label-only
+        //  legacy path) will fall through to its own POSTSetLabel.
+        return POSTNONE;
+    }
+
+    //  --- 3. Resolve target tip (may be missing → CREATE_ON_MISS). ---
+    sha1 target_tip      = {};
+    b8   target_exists   = NO;
+    {
+        ok64 tr = post_resolve_branch_tip(&target_tip, reporoot,
+                                          target_branch);
+        if (tr == OK) target_exists = YES;
+        else if (tr != REFSNONE) {
+            //  REFSBAD or other read error — surface.
+            return tr;
+        }
+    }
+
+    //  --- 4. Classify shape. ---
+    //  is_child:  target startswith cur+'/'  (or cur empty + target nonempty)
+    //  is_parent: target == dirname(cur)
+    a_pad(u8, cur_with_slash, 260);
+    if (!u8csEmpty(cur_branch)) {
+        u8bFeed(cur_with_slash, cur_branch);
+        u8bFeed1(cur_with_slash, '/');
+    }
+    a_dup(u8c, cur_slash, u8bData(cur_with_slash));
+    b8 is_child = u8csEmpty(cur_branch)
+                    ? !u8csEmpty(target_branch)
+                    : post_starts_with(target_branch, cur_slash);
+    u8cs cur_dir = {};
+    post_dirname(cur_dir, cur_branch);
+    b8 is_parent = NO;
+    if (!u8csEmpty(cur_branch)) {
+        size_t dl = u8csLen(cur_dir);
+        size_t tl = u8csLen(target_branch);
+        if (dl == tl &&
+            (tl == 0 || memcmp(cur_dir[0], target_branch[0], tl) == 0)) {
+            is_parent = YES;
+        }
+    }
+
+    //  --- 5. CREATE_ON_MISS arm: ?./newleaf or ?<absolute>/<newleaf>. ---
+    //  Spec: when the target doesn't exist, two shapes are accepted:
+    //    (a) `?./X` — `is_child` (target under cur).  The new leaf
+    //        sits at cur.tip; cur is unchanged.
+    //    (b) `?<absolute>/<newleaf>` — `dirname(target)` is an existing
+    //        branch.  Create the leaf, then replay cur's stack onto
+    //        `dirname(target).tip` so the new leaf carries cur's
+    //        commits on top of the absolute parent's tip.  Cur stays
+    //        put.  Trailing-slash form (`?feat/`) was rewritten to
+    //        `?feat/<basename(cur)>` in step 1b above and lands here.
+    //
+    //  Other create-on-miss shapes (`?../sib`, etc.) still fall back
+    //  to the legacy POSTSetLabel via POSTNONE.
+    sha1 absolute_parent_tip = {};
+    b8   create_under_absolute = NO;
+    if (!target_exists && !is_child) {
+        //  Try arm (b): dirname(target) is a real branch.
+        u8cs t_dir = {};
+        post_dirname(t_dir, target_branch);
+        if (!$empty(t_dir)) {
+            ok64 dr = post_resolve_branch_tip(&absolute_parent_tip,
+                                              reporoot, t_dir);
+            if (dr == OK) create_under_absolute = YES;
+            else if (dr != REFSNONE) return dr;
+        }
+        if (!create_under_absolute) {
+            //  TODO(spec): sibling-create (`?../sib` from cur on a
+            //  child).  Hand off to legacy POSTSetLabel.
+            return POSTNONE;
+        }
+    }
+    if (!target_exists) {
+        //  Materialise the per-branch shard (idempotent on KEEPDUP).
+        ok64 ko = KEEPCreateBranch(k->h, target_branch);
+        if (ko != OK && ko != KEEPDUP && ko != KEEPTRUNK) return ko;
+
+        //  Compute the new leaf's tip.  Default = cur_tip (arm `?./X`).
+        //  For `?<absolute>/<newleaf>` (and trailing-slash rewrite), we
+        //  rebase cur's stack onto absolute_parent_tip first and use
+        //  the rebased tip.
+        sha1 leaf_tip = cur_tip;
+        if (create_under_absolute) {
+            sha1 lca = {};
+            (void)GRAFLca(&lca, &cur_tip, &absolute_parent_tip);
+            if (sha1eq(&lca, &cur_tip)) {
+                //  Cur already on absolute_parent_tip's spine — leaf
+                //  lands at absolute_parent_tip.
+                leaf_tip = absolute_parent_tip;
+            } else if (sha1eq(&lca, &absolute_parent_tip)) {
+                //  Cur is downstream of absolute parent — fast-forward
+                //  case: leaf = cur_tip (no replay needed).
+                leaf_tip = cur_tip;
+            } else {
+                //  Replay cur's stack onto absolute_parent_tip.
+                keep_pack pp = {};
+                call(KEEPPackOpen, k, &pp);
+                pp.strict_order = NO;
+                post_rebase_ctx rctx = {.k = k, .p = &pp};
+                ok64 rb = GRAFRebase(&lca, &absolute_parent_tip,
+                                     &cur_tip, post_rebase_emit_cb,
+                                     &rctx);
+                ok64 cl = KEEPPackClose(k, &pp);
+                if (rb != OK) {
+                    fprintf(stderr,
+                            "sniff: post: leaf-create rebase aborted "
+                            "(%s)\n",
+                            rb == GRAFCNFL ? "merge conflict" : "error");
+                    return rb;
+                }
+                if (cl != OK) return cl;
+                leaf_tip = rctx.have_last_commit
+                            ? rctx.last_commit_sha
+                            : absolute_parent_tip;
+            }
+        }
+
+        //  REFS row at leaf_tip with empty `expected_old`.
+        a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+        a_pad(u8, refkey_buf, 260);
+        u8bFeed1(refkey_buf, '?');
+        u8bFeed(refkey_buf, target_branch);
+        a_dup(u8c, refkey, u8bData(refkey_buf));
+
+        a_pad(u8, val_hex, 40);
+        a_rawc(vsha, leaf_tip);
+        HEXu8sFeedSome(val_hex_idle, vsha);
+        a_dup(u8c, val, u8bDataC(val_hex));
+        a_cstr(empty_s, "");
+        u8cs expected = {empty_s[0], empty_s[1]};
+
+        ok64 cr = REFSCompareAndAppend($path(keepdir), refkey,
+                                       expected, val);
+        if (cr == REFSCAS) {
+            //  Lost the race: someone else created the branch.  Retry
+            //  as a PROMOTE on the now-existing branch.
+            ok64 tr = post_resolve_branch_tip(&target_tip, reporoot,
+                                              target_branch);
+            if (tr != OK) return cr;
+            target_exists = YES;
+            //  Fall through to PROMOTE arm below.
+        } else if (cr != OK) {
+            return cr;
+        } else {
+            //  Created.  Cur unchanged.  Done.
+            fprintf(stderr,
+                    "sniff: post: created ?%.*s at %.*s\n",
+                    (int)u8csLen(target_branch),
+                    (char *)target_branch[0],
+                    (int)u8bDataLen(val_hex),
+                    (char *)u8bDataHead(val_hex));
+            return OK;
+        }
+    }
+
+    //  --- 6. PROMOTE arm: target_exists is now true. ---
+    //  Operand assignment per shape:
+    sha1 base_old = {}, base_new = {}, child_tip = {};
+    b8   advance_target_branch = YES;        //  always YES in promote
+    b8   auto_sync_cur = NO;
+    if (is_child) {
+        //  ?./fix: replay fix's stack onto cur.tip.
+        (void)GRAFLca(&base_old, &cur_tip, &target_tip);
+        base_new  = cur_tip;
+        child_tip = target_tip;
+        auto_sync_cur = NO;
+    } else {
+        //  ?.. (parent) or ?<absolute> (peer/upstream): replay cur's
+        //  stack onto target.tip.
+        (void)GRAFLca(&base_old, &cur_tip, &target_tip);
+        base_new  = target_tip;
+        child_tip = cur_tip;
+        auto_sync_cur = is_parent ? YES : NO;
+    }
+
+    //  Already in sync? base_old == child_tip means there are no
+    //  commits to replay (child is an ancestor of base_new).
+    b8 nothing_to_replay = sha1eq(&base_old, &child_tip);
+    //  Also, if target already contains child_tip (ff in the other
+    //  direction), nothing to do.
+    if (nothing_to_replay) {
+        sha1 lca2 = {};
+        (void)GRAFLca(&lca2, &child_tip, &base_new);
+        if (sha1eq(&lca2, &child_tip)) {
+            //  child_tip is an ancestor of base_new — no advance.
+            //  But if auto_sync_cur is set, we still want cur to track
+            //  base_new (e.g. `?..` after parent has been advanced
+            //  already with cur's commits — sync cur to parent.tip).
+            if (auto_sync_cur) {
+                a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+                a_pad(u8, ckbuf, 260);
+                u8bFeed1(ckbuf, '?');
+                if (!u8csEmpty(cur_branch)) u8bFeed(ckbuf, cur_branch);
+                a_dup(u8c, crefkey, u8bData(ckbuf));
+
+                a_pad(u8, exp_hex, 40);
+                a_rawc(esha, cur_tip);
+                HEXu8sFeedSome(exp_hex_idle, esha);
+                a_pad(u8, new_hex, 40);
+                a_rawc(nsha, base_new);
+                HEXu8sFeedSome(new_hex_idle, nsha);
+                a_dup(u8c, expected, u8bDataC(exp_hex));
+                a_dup(u8c, val,      u8bDataC(new_hex));
+                ok64 cas = REFSCompareAndAppend($path(keepdir), crefkey,
+                                                expected, val);
+                if (cas == REFSCAS) {
+                    fprintf(stderr,
+                            "sniff: post: cur auto-sync raced on "
+                            "?%.*s — run `be get ?..` to refresh\n",
+                            (int)u8csLen(cur_branch),
+                            (char *)cur_branch[0]);
+                } else if (cas != OK) return cas;
+            }
+            fprintf(stderr,
+                    "sniff: post: nothing to promote (?%.*s already "
+                    "contains cur)\n",
+                    (int)u8csLen(target_branch),
+                    (char *)target_branch[0]);
+            return OK;
+        }
+    }
+
+    //  --- 7. Run GRAFRebase, capture new tip via emit_cb. ---
+    keep_pack pp = {};
+    call(KEEPPackOpen, k, &pp);
+    pp.strict_order = NO;
+    post_rebase_ctx rctx = {.k = k, .p = &pp};
+    ok64 rb = GRAFRebase(&base_old, &base_new, &child_tip,
+                         post_rebase_emit_cb, &rctx);
+    ok64 cl = KEEPPackClose(k, &pp);
+    if (rb != OK) {
+        fprintf(stderr,
+                "sniff: post: cross-branch rebase aborted (%s)\n",
+                rb == GRAFCNFL ? "merge conflict" : "error");
+        return rb;
+    }
+    if (cl != OK) return cl;
+
+    sha1 target_new_tip = rctx.have_last_commit
+                            ? rctx.last_commit_sha
+                            : base_new;
+
+    //  --- 8. Cascade walk on the *target* side. ---
+    //  After target's stack got rewritten (if anything was replayed),
+    //  every descendant of target needs its fork point bumped.  The
+    //  cascade walker is generalised — it takes a starting branch and
+    //  the (old, new) tip pair; we just hand it the target's view.
+    cascade_ctx casc = {};
+    if (rctx.have_last_commit) {
+        keep_pack p3 = {};
+        call(KEEPPackOpen, k, &p3);
+        p3.strict_order = NO;
+        casc.k = k;
+        casc.p = &p3;
+        a_dup(u8c, root_view, u8bDataC(k->h->root));
+        casc.reporoot[0] = root_view[0];
+        casc.reporoot[1] = root_view[1];
+        //  Skip cur during cascade: auto-sync handles it directly.
+        casc.skip[0] = cur_branch[0];
+        casc.skip[1] = cur_branch[1];
+        ok64 cw = post_cascade_walk(&casc, target_branch,
+                                    &target_tip, &target_new_tip);
+        ok64 cl3 = KEEPPackClose(k, &p3);
+        if (cw != OK) {
+            fprintf(stderr,
+                    "sniff: post: cascade aborted (%s)\n",
+                    cw == GRAFCNFL ? "merge conflict in descendant"
+                                   : "error");
+            return cw;
+        }
+        if (cl3 != OK) return cl3;
+    }
+
+    //  --- 9. Advance target's REFS row via CAS on target_tip. ---
+    {
+        a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+        a_pad(u8, refkey_buf, 260);
+        u8bFeed1(refkey_buf, '?');
+        if (!u8csEmpty(target_branch)) u8bFeed(refkey_buf, target_branch);
+        a_dup(u8c, refkey, u8bData(refkey_buf));
+
+        a_pad(u8, exp_hex, 40);
+        a_rawc(esha, target_tip);
+        HEXu8sFeedSome(exp_hex_idle, esha);
+        a_pad(u8, new_hex, 40);
+        a_rawc(nsha, target_new_tip);
+        HEXu8sFeedSome(new_hex_idle, nsha);
+        a_dup(u8c, expected, u8bDataC(exp_hex));
+        a_dup(u8c, val,      u8bDataC(new_hex));
+
+        ok64 cas = REFSCompareAndAppend($path(keepdir), refkey,
+                                        expected, val);
+        if (cas == REFSCAS) {
+            fprintf(stderr,
+                    "sniff: post: REFS for `?%.*s` advanced "
+                    "concurrently — retry\n",
+                    (int)u8csLen(target_branch),
+                    (char *)target_branch[0]);
+            return REFSCAS;
+        }
+        if (cas != OK) return cas;
+    }
+    (void)advance_target_branch;
+
+    //  --- 10. Persist any cascade descendants (best-effort). ---
+    if (casc.n > 0) (void)post_cascade_persist(&casc);
+
+    //  --- 11. Cur auto-sync (?.. and ?<absolute> when target IS cur's
+    //  tree-parent).  Race story: if this CAS loses, target already
+    //  advanced and cur is stale — user can `be get ?..` to resync.
+    //  Documented MWP best-effort behaviour. ---
+    if (auto_sync_cur) {
+        a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+        a_pad(u8, ckbuf, 260);
+        u8bFeed1(ckbuf, '?');
+        if (!u8csEmpty(cur_branch)) u8bFeed(ckbuf, cur_branch);
+        a_dup(u8c, crefkey, u8bData(ckbuf));
+
+        a_pad(u8, exp_hex, 40);
+        a_rawc(esha, cur_tip);
+        HEXu8sFeedSome(exp_hex_idle, esha);
+        a_pad(u8, new_hex, 40);
+        a_rawc(nsha, target_new_tip);
+        HEXu8sFeedSome(new_hex_idle, nsha);
+        a_dup(u8c, expected, u8bDataC(exp_hex));
+        a_dup(u8c, val,      u8bDataC(new_hex));
+        ok64 cas = REFSCompareAndAppend($path(keepdir), crefkey,
+                                        expected, val);
+        if (cas == REFSCAS) {
+            fprintf(stderr,
+                    "sniff: post: cur auto-sync raced on `?%.*s` — "
+                    "run `be get ?..` to refresh\n",
+                    (int)u8csLen(cur_branch), (char *)cur_branch[0]);
+            //  Don't surface — target already advanced; cur staleness
+            //  is recoverable.
+        } else if (cas != OK) return cas;
+    }
+
+    //  Done.  Pretty-print the resulting tip for the user.
+    {
+        a_pad(u8, hex_out, 40);
+        a_rawc(osha, target_new_tip);
+        HEXu8sFeedSome(hex_out_idle, osha);
+        fprintf(stderr,
+                "sniff: post: ?%.*s -> %.*s\n",
+                (int)u8csLen(target_branch),
+                (char *)target_branch[0],
+                (int)u8bDataLen(hex_out),
+                (char *)u8bDataHead(hex_out));
+    }
+    return OK;
+}
+
 // --- Public API ---
 
 ok64 POSTPrintStatus(u8cs reporoot) {
@@ -1548,9 +2281,9 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     call(KEEPPackClose, k, &p);
 
     //  13b. Phase-2 promote: rebase the just-built commit onto the
-    //       live REFS tip when the branch diverged out from under us.
-    //       Same-branch case only — cross-branch rebase + cascade walker
-    //       are TODO(spec) below.
+    //       live REFS tip when the branch diverged out from under us,
+    //       then cascade-rebase every descendant branch onto the new
+    //       tip.  Same-branch case only.
     //
     //       Invariant: on entry needs_rebase ⇒ has_expected_tip and
     //       has_parent (the early pre-flight only sets needs_rebase
@@ -1559,12 +2292,22 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     //       fresh pack.  GRAFCNFL → propagate, leaving orphan objects
     //       in the pack (REFS unchanged ⇒ they are unreachable).
     //
+    //       Cascade: after the same-branch rebase closes its pack, a
+    //       third pack opens for the descendant walk so the just-rebased
+    //       tip is visible to KEEPGetExact.  Each descendant branch is
+    //       replayed via GRAFRebase, the new tips are staged in
+    //       cascade_ctx.recs, and post_cascade_persist commits the
+    //       REFSCompareAndAppend writes after cur's REFS update.
+    //
     //       TODO(spec): cross-branch promote (target_branch != cur's
-    //       baseline branch) and the descendant cascade walker — both
-    //       deferred to a follow-up.  Today cross-branch non-ff still
-    //       reports SNIFFNOFF via the early pre-flight on the OTHER
-    //       branch's REFS row, since needs_rebase is gated by the
-    //       baseline-branch lookup above.
+    //       baseline branch) — `?..` auto-sync, `?<absolute>` sibling/
+    //       cousin promote, create-on-miss leaf, trailing-slash basename
+    //       reuse.  The dispatch table from VERBS.md §POST stays
+    //       deferred.  Today cross-branch non-ff still reports SNIFFNOFF
+    //       via the early pre-flight on the OTHER branch's REFS row,
+    //       since needs_rebase is gated by the baseline-branch lookup
+    //       above.
+    cascade_ctx casc = {};
     if (needs_rebase) {
         keep_pack p2 = {};
         ok64 po2 = KEEPPackOpen(k, &p2);
@@ -1577,7 +2320,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
         post_rebase_ctx rctx = {.k = k, .p = &p2};
         ok64 rb = GRAFRebase(&parent, &expected_tip_sha, sha_out,
                              post_rebase_emit_cb, &rctx);
-        ok64 cl = KEEPPackClose(k, &p2);
+        ok64 cl2 = KEEPPackClose(k, &p2);
         if (rb != OK) {
             fprintf(stderr,
                     "sniff: post: rebase aborted (%s)\n",
@@ -1586,10 +2329,10 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             post_ctx_free(&ctx);
             return rb;
         }
-        if (cl != OK) {
+        if (cl2 != OK) {
             u8bFree(leaves); u8bFree(tree_bodies);
             post_ctx_free(&ctx);
-            return cl;
+            return cl2;
         }
         if (rctx.have_last_commit) {
             *sha_out = rctx.last_commit_sha;
@@ -1597,6 +2340,46 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             //  Trivial rebase fast-path: parent..child was empty, so
             //  the rebased tip is base_new itself.
             *sha_out = expected_tip_sha;
+        }
+
+        //  --- Cascade rebase for descendants of cur's branch ---
+        //  When the same-branch rebase rewrote cur's stack, every
+        //  descendant branch that forked off `expected_tip_sha` (or
+        //  earlier) now has a stale fork point.  Open a third pack for
+        //  the cascade so the just-rebased ?cur tip is visible to
+        //  KEEPGetExact (the rebase commits live in p2, which must be
+        //  closed before they are indexed).
+        a_dup(u8c, branch_view, u8bData(brbuf));
+        sha1 br_new = *sha_out;
+        keep_pack p3 = {};
+        ok64 po3 = KEEPPackOpen(k, &p3);
+        if (po3 != OK) {
+            u8bFree(leaves); u8bFree(tree_bodies);
+            post_ctx_free(&ctx);
+            return po3;
+        }
+        p3.strict_order = NO;
+        casc.k = k;
+        casc.p = &p3;
+        a_dup(u8c, root_view, u8bDataC(k->h->root));
+        casc.reporoot[0] = root_view[0];
+        casc.reporoot[1] = root_view[1];
+        ok64 cw = post_cascade_walk(&casc, branch_view,
+                                    &expected_tip_sha, &br_new);
+        ok64 cl3 = KEEPPackClose(k, &p3);
+        if (cw != OK) {
+            fprintf(stderr,
+                    "sniff: post: cascade aborted (%s)\n",
+                    cw == GRAFCNFL ? "merge conflict in descendant"
+                                   : "error");
+            u8bFree(leaves); u8bFree(tree_bodies);
+            post_ctx_free(&ctx);
+            return cw;
+        }
+        if (cl3 != OK) {
+            u8bFree(leaves); u8bFree(tree_bodies);
+            post_ctx_free(&ctx);
+            return cl3;
         }
     }
 
@@ -1641,6 +2424,11 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             return REFSCAS;
         }
     }
+
+    //  Cascade REFS persistence: write descendant branches' new tips
+    //  AFTER cur's REFS update succeeded.  Best-effort on individual
+    //  CAS races (logged inside post_cascade_persist).
+    if (casc.n > 0) (void)post_cascade_persist(&casc);
 
     //  15. Append `post` ULOG row with stamp ts; futimens written
     //      files so they become clean under the new stamp.  Canonical

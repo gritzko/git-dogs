@@ -690,28 +690,44 @@ ok64 SNIFFExec(cli *c) {
                     HEXu8sFeedSome(hex_idle, rs);
                 }
             } else if (label_uri != NULL) {
-                //  No commit_msg + label_uri = pure label op: point
-                //  the URI's branch at the wt's current baseline sha.
-                ron60 bts = 0, bverb = 0;
-                uri bu = {};
-                ret = SNIFFAtBaseline(&bts, &bverb, &bu);
-                u8 hex40[40];
-                if (ret == OK &&
-                    SNIFFAtQueryFirstSha(&bu, hex40) == OK) {
-                    u8cs h40 = {hex40, hex40 + 40};
-                    u8bFeed(hex, h40);
-                    a_dup(u8c, hex_in, u8bData(hex));
-                    a_dup(u8c, ref_uri, label_uri->data);
-                    ret = POSTSetLabel(ref_uri, hex_in);
-                    if (ret == OK)
-                        fprintf(stderr,
-                                "sniff: label %.*s -> %.*s\n",
-                                (int)u8csLen(ref_uri),
-                                (char *)ref_uri[0],
-                                (int)u8bDataLen(hex),
-                                (char *)u8bDataHead(hex));
-                } else {
-                    ret = SNIFFFAIL;
+                //  No commit_msg + label_uri = either:
+                //    (a) cross-branch promote (`?..`, `?./fix`,
+                //        `?<absolute>`, `?./newleaf`) per VERBS.md
+                //        §POST — runs through POSTPromote;
+                //    (b) legacy label-only op (target == cur) — point
+                //        the URI's branch at the wt's current baseline
+                //        sha via POSTSetLabel.
+                //
+                //  The dispatcher returns POSTNONE when the target IS
+                //  cur, so we fall through to the legacy path then.
+                u8cs target = {};
+                target[0] = label_uri->query[0];
+                target[1] = label_uri->query[1];
+                ret = POSTPromote(reporoot, target);
+                if (ret == POSTNONE) {
+                    //  target == cur → legacy label-only behaviour.
+                    ret = OK;
+                    ron60 bts = 0, bverb = 0;
+                    uri bu = {};
+                    ret = SNIFFAtBaseline(&bts, &bverb, &bu);
+                    u8 hex40[40];
+                    if (ret == OK &&
+                        SNIFFAtQueryFirstSha(&bu, hex40) == OK) {
+                        u8cs h40 = {hex40, hex40 + 40};
+                        u8bFeed(hex, h40);
+                        a_dup(u8c, hex_in, u8bData(hex));
+                        a_dup(u8c, ref_uri, label_uri->data);
+                        ret = POSTSetLabel(ref_uri, hex_in);
+                        if (ret == OK)
+                            fprintf(stderr,
+                                    "sniff: label %.*s -> %.*s\n",
+                                    (int)u8csLen(ref_uri),
+                                    (char *)ref_uri[0],
+                                    (int)u8bDataLen(hex),
+                                    (char *)u8bDataHead(hex));
+                    } else {
+                        ret = SNIFFFAIL;
+                    }
                 }
             }
         }

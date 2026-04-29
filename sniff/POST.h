@@ -47,4 +47,23 @@ ok64 POSTPrintStatus(u8cs reporoot);
 //  `sha_hex` must be exactly 40 hex chars.
 ok64 POSTSetLabel(u8cs ref_uri, u8cs sha_hex);
 
+//  Cross-branch promote (no-msg `be post ?<X>` shapes per VERBS.md
+//  §POST).  `target_branch` is the absolute branch path the user
+//  named (already absolutised from `?./X`/`?../X`/`?..` by the
+//  caller); empty means trunk.  Decides between four shapes:
+//
+//    target == dirname(cur)           ?..              upstream-promote
+//    target startswith cur+'/'        ?./X (existing)  promote-into-child
+//    target startswith cur+'/' (gap)  ?./newleaf       create-on-miss
+//    other absolute existing branch   ?<absolute>      peer-promote
+//
+//  Operands per shape and cur auto-sync rules: see post_promote
+//  body and the table in VERBS.md.  Returns:
+//    OK          — promote landed (REFS advanced).
+//    POSTNONE    — nothing to do (already in sync).
+//    GRAFCNFL    — three-way merge conflict mid-rebase.
+//    REFSCAS     — concurrent advance of target REFS row.
+//    SNIFFFAIL   — generic dispatcher / resource error.
+ok64 POSTPromote(u8cs reporoot, u8cs target_branch);
+
 #endif
