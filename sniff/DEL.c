@@ -314,6 +314,24 @@ ok64 DELBranch(uri const *u) {
     a_cstr(zeros, DEL_ZERO_HEX);
 
     call(REFSAppendVerb, $path(keepdir), REFSVerbPost(), refkey, zeros);
+
+    //  Drop the per-branch keeper shard if it was materialised by a
+    //  prior `be post ?./X` (POSTSetLabel).  KEEPBranchDrop is the
+    //  inverse of KEEPCreateBranch; KEEPNONE means the dir was never
+    //  created (older REFS-only labels), KEEPTRUNK / KEEPDIRTY are
+    //  guarded above.  Failing here would leave the REFS tombstone
+    //  in place and the dir on disk — log + continue: the REFS state
+    //  is the source of truth.
+    {
+        ok64 do_ = KEEPBranchDrop(k, target);
+        if (do_ != OK && do_ != KEEPNONE && do_ != KEEPTRUNK) {
+            fprintf(stderr,
+                    "sniff: delete: REFS tombstoned but shard dir "
+                    "drop failed (%s)\n",
+                    ok64str(do_));
+        }
+    }
+
     fprintf(stderr, "sniff: deleted ?%.*s\n",
             (int)u8csLen(target), (char *)target[0]);
     done;

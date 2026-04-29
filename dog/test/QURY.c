@@ -13,6 +13,7 @@ typedef struct {
     const char *body;
     u8 anc_type;
     u32 ancestry;
+    b8 trailing_slash;
 } QREFCase;
 
 static const QREFCase QREF_CASES[] = {
@@ -69,6 +70,11 @@ static const QREFCase QREF_CASES[] = {
     {"HEAD^2",            QURY_REF, "HEAD",   '^', 2},
     {"main^",             QURY_REF, "main",   '^', 0},
     {"HEAD^",             QURY_REF, "HEAD",   '^', 0},
+
+    // --- Trailing slash (semantic flag for POST leaf-create) ---
+    {"feat/",             QURY_REF, "feat",     0, 0, YES},
+    {"feat/sub/",         QURY_REF, "feat/sub", 0, 0, YES},
+    {"refs/heads/main/",  QURY_REF, "refs/heads/main", 0, 0, YES},
 };
 
 #define QREF_NCASES (sizeof(QREF_CASES) / sizeof(QREF_CASES[0]))
@@ -135,16 +141,19 @@ typedef struct {
     u8 type;
     const char *body;
     u8 rel;
+    b8 trailing_slash;
 } QREFRelCase;
 
 static const QREFRelCase QREF_REL[] = {
-    {"./fix",           QURY_REF, "fix",     QURY_REL_DOWN},
-    {"./feat/sub",      QURY_REF, "feat/sub", QURY_REL_DOWN},
-    {"../fix",          QURY_REF, "fix",     QURY_REL_UP},
-    {"../sib/leaf",     QURY_REF, "sib/leaf", QURY_REL_UP},
-    {"..",              QURY_REF, NULL,      QURY_REL_UP},
-    {"main",            QURY_REF, "main",    QURY_REL_NONE},
-    {"feat/fix",        QURY_REF, "feat/fix", QURY_REL_NONE},
+    {"./fix",           QURY_REF, "fix",     QURY_REL_DOWN, NO},
+    {"./feat/sub",      QURY_REF, "feat/sub", QURY_REL_DOWN, NO},
+    {"../fix",          QURY_REF, "fix",     QURY_REL_UP, NO},
+    {"../sib/leaf",     QURY_REF, "sib/leaf", QURY_REL_UP, NO},
+    {"..",              QURY_REF, NULL,      QURY_REL_UP, NO},
+    {"main",            QURY_REF, "main",    QURY_REL_NONE, NO},
+    {"feat/fix",        QURY_REF, "feat/fix", QURY_REL_NONE, NO},
+    {"./fix/",          QURY_REF, "fix",     QURY_REL_DOWN, YES},
+    {"../sib/leaf/",    QURY_REF, "sib/leaf", QURY_REL_UP, YES},
 };
 #define QREF_NREL (sizeof(QREF_REL) / sizeof(QREF_REL[0]))
 
@@ -152,7 +161,6 @@ static const QREFRelCase QREF_REL[] = {
 
 static const char *QURY_BAD[] = {
     "",            // empty
-    "a/",          // trailing slash
     "/a",          // leading slash
     "a//b",        // double slash
     "./",          // relative prefix with no body
@@ -209,6 +217,12 @@ ok64 QURYTestSingle() {
         if (q.ancestry != tc->ancestry) {
             fprintf(stderr, "FAIL [%zu] '%s': ancestry got %u want %u\n",
                     i, tc->input, q.ancestry, tc->ancestry);
+            fail(TESTFAIL);
+        }
+
+        if (q.trailing_slash != tc->trailing_slash) {
+            fprintf(stderr, "FAIL [%zu] '%s': trailing_slash got %d want %d\n",
+                    i, tc->input, q.trailing_slash, tc->trailing_slash);
             fail(TESTFAIL);
         }
     }
@@ -396,6 +410,11 @@ ok64 QURYTestRel() {
         if (q.rel != tc->rel) {
             fprintf(stderr, "FAIL rel[%zu] '%s': rel got %d want %d\n",
                     i, tc->input, q.rel, tc->rel);
+            fail(TESTFAIL);
+        }
+        if (q.trailing_slash != tc->trailing_slash) {
+            fprintf(stderr, "FAIL rel[%zu] '%s': trailing_slash got %d want %d\n",
+                    i, tc->input, q.trailing_slash, tc->trailing_slash);
             fail(TESTFAIL);
         }
     }

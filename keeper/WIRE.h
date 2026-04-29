@@ -31,10 +31,12 @@
 //                             count  = sum of pack obj_counts in
 //                                      [watermark .. end) }.
 //
-//  Phase 1c reality: keeper has only the trunk shard (nshards=1), so
-//  the dir chain is always [trunk].  Code is shaped so multi-shard
-//  fan-out is a drop-in once Phase 2 of the keeper roadmap lights up
-//  sibling shards.
+//  Step 2 reality: WIRE still scans only the trunk dir's pack file
+//  (file_id 1).  Multi-branch fan-out — picking up the segment in
+//  the leaf branch dir, walking trunk → leaf to find the right pack
+//  file — is a follow-up.  The keeper-level k->puppies registry now
+//  flattens every dir along the open branch path, so the index-side
+//  scans here are already branch-aware.
 //
 //  WIREServeUpload glues the three pieces:
 //    request --[in_fd]--> wire_req

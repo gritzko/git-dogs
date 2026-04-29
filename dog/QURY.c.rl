@@ -11,10 +11,12 @@
     action anc_digit   { out->ancestry = out->ancestry * 10 + (*p - '0'); }
     action rel_down    { out->rel = QURY_REL_DOWN; }
     action rel_up      { out->rel = QURY_REL_UP; }
+    action slash_set   { out->trailing_slash = YES; }
 
     atom     = alnum | [_\-] ;
     seg      = atom+ ('.' atom+)* ;
-    pathbody = seg ('/' seg)* ;
+    pathcore = seg ('/' seg)* ;
+    pathbody = pathcore >body_start %body_end ('/' %slash_set)? ;
 
     ancestry = ( '~' @anc_tilde | '^' @anc_caret ) ( digit @anc_digit )* ;
 
@@ -24,9 +26,9 @@
     relup    = ( '.' '.' '/' ) %rel_up ;
     relbare  = ( '.' '.' ) %rel_up ;
 
-    spec = ( reldown pathbody >body_start %body_end ancestry? )
-         | ( relup   pathbody >body_start %body_end ancestry? )
-         | ( pathbody >body_start %body_end ancestry? )
+    spec = ( reldown pathbody ancestry? )
+         | ( relup   pathbody ancestry? )
+         | ( pathbody ancestry? )
          | relbare ;
 
     main := spec ;

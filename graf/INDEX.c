@@ -54,10 +54,10 @@ static ok64 graf_collect(keeper *k, u8 want_type,
     if (!buf) return NOROOM;
     size_t n = 0;
 
-    u32 nruns = DOGPupCount(k->shards[0].puppies);
+    u32 nruns = DOGPupCount(k->puppies);
     for (u32 r = 0; r < nruns; r++) {
         u8cs raw = {NULL, NULL};
-        DOGPupData(raw, k->shards[0].puppies, r);
+        DOGPupData(raw, k->puppies, r);
         wh128cp base = (wh128cp)raw[0];
         size_t len = (size_t)((wh128cp)raw[1] - base);
         for (size_t i = 0; i < len; i++) {

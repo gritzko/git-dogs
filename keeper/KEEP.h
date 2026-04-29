@@ -8,14 +8,20 @@
 //    key = keepKeyPack(obj_type, hashlet60)  hashlet60[60] | type[4]
 //    val = wh64Pack(flags, file_id, offset)  offset[40] | file_id[20] | flags[4]
 //
-//  On disk (.dogs/; Phase 1b flat layout, trunk-only):
-//    NNNNN.keeper — append-only pack log (FILEBook'd)
-//    NNNNN.idx    — sorted wh128 run (LSM)
-//    REFS         — URI→URI reflog
+//  On disk (Phase 2 multi-branch layout):
+//    .dogs/                             — trunk dir
+//      NNNNN.keeper                     — append-only pack log (FILEBook'd)
+//      NNNNN.keeper.idx                 — sorted wh128 run (LSM)
+//      REFS                             — URI→URI reflog
+//      <branch>/NNNNN.keeper            — feature-branch pack logs
+//      <branch>/NNNNN.keeper.idx        — feature-branch index runs
+//      <branch>/<sub>/...               — nested branch dirs
 //
-//  `NNNNN` is the 5-hex-char wh64 file_id (20 bits).  Phase 1a keeps
-//  exactly one trunk shard; feature branches land in `<store>/<branch>/`
-//  subdirs in Phase 1c+.
+//  `NNNNN` is the 10-RON64-char seqno (DOG_PUP_SEQNO_W).  Seqnos are
+//  globally unique across the keeper instance, so the keeper-level
+//  packs and puppies registries stay flat (one entry per file, key =
+//  seqno).  KEEPOpenBranch walks trunk → … → leaf, registers every
+//  pack + idx file along the way; writes only land in the leaf dir.
 
 #include "abc/INT.h"
 #include "abc/KV.h"
@@ -36,13 +42,19 @@ con ok64 KEEPOPEN    = 0x50e399619397;
 con ok64 KEEPOPENRO  = 0x50e3996193976d8;
 //  Intra-pack object order violation: commit→tree→blob→tag required.
 con ok64 ORDERBAD    = 0x61b34e6cb28d;
-//  KEEPOpenBranch: branch outside the Phase-0-supported set (trunk only).
+//  KEEPOpenBranch / KEEPCreateBranch: branch path doesn't exist on disk
+//  (parent dir or leaf dir missing).  KEEPOpenBranch returns this when
+//  any prefix dir is missing; KEEPCreateBranch returns it when the
+//  parent dir is missing.
 con ok64 KEEPNOBR  = 0x50e3995d82db;
 //  KEEPBranchDrop: refuses to drop the trunk shard.
 con ok64 KEEPTRUNK = 0x1438e65d6de5d4;
 //  KEEPBranchDrop: refuses a branch that still has descendants
-//  referencing it via REF_DELTA, or a live staging pack.
+//  referencing it via REF_DELTA, or is currently the open leaf.
+//  Also returned for live staging packs.
 con ok64 KEEPDIRTY = 0x1438e64d49b762;
+//  KEEPCreateBranch: leaf dir already exists.
+con ok64 KEEPDUP   = 0x50e3995cea180;
 
 // --- 60-bit hashlet: index key format ---
 //
@@ -95,35 +107,40 @@ fun u32 keepPackBmLen(u64 val)   { return (u32)val; }
 
 #define KEEP_MAX_FILES   256
 #define KEEP_MAX_LEVELS  MSET_MAX_LEVELS
-#define KEEP_MAX_SHARDS  16              // Phase 1a hard-caps usage to 1
 #define KEEP_DIR         ".dogs"
 #define KEEP_PACK_EXT    ".keeper"       // pack logs live next to indexes
 #define KEEP_IDX_EXT     ".keeper.idx"
 #define KEEP_SEQNO_W     DOG_PUP_SEQNO_W // 10-char RON64 (matches DOGPup*)
+#define KEEP_LEAF_BRANCH_MAX 256         // canonical leaf-branch path cap
 
-//  Per-branch object store.  Each shard owns the mmap'd pack log files
-//  and the LSM index runs for one branch-dir.  Phase 1a keeps the on-
-//  disk layout flat (single shard rooted at .dogs/); the branch
-//  slice is always the trunk (empty) until Phase 1b migrates files
-//  into branch subdirs.
+//  Branch-aware object store.  KEEPOpenBranch walks trunk → … → leaf,
+//  populating two flat keeper-level registries from every dir in the
+//  path.  Seqnos are unique across the entire instance, so flat
+//  kv32b registries (key = seqno) work uniformly for every branch.
 typedef struct {
-    u8cs    branch;                     // canonical branch path (slot 0 = trunk)
-    int     lock_fd;                    // flock on <shard>/.lock; -1 = none
-    u8bp    packs[KEEP_MAX_FILES];      // mmap'd log files
-    u32     npacks;
-    Bkv32   puppies;                    // LSM index runs as DOGPup* stack:
-                                        //   key = seqno of <seqno>.keeper.idx
-                                        //   val = fd into FILE_WANT_BUFS
-} keeper_shard;
-
-typedef struct {
-    home         *h;                    // borrowed; owns root/arena/config/rw
-    keeper_shard  shards[KEEP_MAX_SHARDS];
-    u32           nshards;              // Phase 1a: always 1 on open
-    Bu8           buf1;                 // working buffer for KEEPGet base inflate
-    Bu8           buf2;                 // working buffer for KEEPGet delta apply
-    Bu8           buf3;                 // working buffer for keep_resolve base
-    Bu8           buf4;                 // working buffer for keep_resolve delta
+    home   *h;                    // borrowed; owns root/arena/config/rw
+    //  Keeper-level pack registry.  Key = file seqno, val = fd into
+    //  FILE_WANT_BUFS (mmap'd pack bytes are FILE_WANT_BUFS[fd]).
+    //  Populated by walking trunk → … → leaf during KEEPOpenBranch.
+    Bkv32   packs;
+    //  LSM index runs (.keeper.idx files) as DOGPup* stack:
+    //    key = seqno of <seqno>.keeper.idx
+    //    val = fd into FILE_WANT_BUFS
+    //  Walk order: trunk first, then each branch component in order;
+    //  inside each dir, by name (== seqno).  Lookups scan in registry
+    //  order — newer seqnos come last (LSM "newest wins").
+    Bkv32   puppies;
+    //  Active leaf-branch path (canonical form, empty = trunk).
+    //  Owned path-buffer: keeper allocates the backing storage in
+    //  KEEPOpenBranch (heap, KEEP_LEAF_BRANCH_MAX bytes) and frees it
+    //  in KEEPClose.  Readers derive a u8cs view via u8bDataC().
+    path8b  leaf_branch;
+    int     lock_fd;              // flock on <leaf>/.lock; -1 = none
+    u32     next_seqno;           // next seqno for fresh pack creation
+    Bu8     buf1;                 // working buffer for KEEPGet base inflate
+    Bu8     buf2;                 // working buffer for KEEPGet delta apply
+    Bu8     buf3;                 // working buffer for keep_resolve base
+    Bu8     buf4;                 // working buffer for keep_resolve delta
 } keeper;
 
 // Relative ".dogs" slice.  Call sites compose the full dir via
@@ -146,22 +163,38 @@ extern keeper KEEP;
 //    (other)    real error — propagate, no KEEPClose.
 ok64 KEEPOpen(home *h, b8 rw);
 
-//  Branch-aware Open (new Phase-0 surface).  Normalizes `branch` via
-//  DPATHBranchNormFeed and registers it on the home singleton via
-//  HOMEOpenBranch before delegating to KEEPOpen.  Phase 0 accepts
-//  only the trunk (canonical form = empty); other branches return
-//  KEEPNOBR.  Same return semantics as KEEPOpen on trunk inputs.
+//  Branch-aware Open.  Walks trunk → … → leaf and registers every
+//  `.keeper` and `.keeper.idx` file along the path on the keeper-level
+//  packs / puppies registries.  `branch` is normalized via
+//  DPATHBranchNormFeed (empty = trunk).  Each prefix dir must already
+//  exist on disk — missing dirs return KEEPNONE; use KEEPCreateBranch
+//  to materialise a new leaf first.  In rw mode, flock(LOCK_EX) on
+//  `<store>/<leaf>/.lock` (or `<store>/.lock` for trunk).  Returns:
+//    OK         I opened it; caller must pair with KEEPClose.
+//    KEEPOPEN   already open, compatible mode; use &KEEP, do NOT close.
+//    KEEPOPENRO already open ro but caller asked for rw — real conflict.
+//    KEEPNONE   a dir in the branch path is missing.
 ok64 KEEPOpenBranch(home *h, u8cs branch, b8 rw);
 
-//  Drop a branch-dir and all its files (Phase 1c surface).  `branch`
-//  is normalized via DPATHBranchNormFeed.  Preconditions:
+//  Create a new branch dir under an existing parent.  `branch` is
+//  normalized via DPATHBranchNormFeed.  Returns:
+//    OK        leaf dir created; doesn't open anything (caller follows
+//              up with KEEPOpenBranch if writes are wanted).
+//    KEEPNONE  parent dir doesn't exist — create the parent first.
+//    KEEPDUP   leaf dir already exists.
+//    KEEPTRUNK trunk (empty branch) — already exists by definition.
+ok64 KEEPCreateBranch(home *h, u8cs branch);
+
+//  Drop a branch-dir and all its files.  `branch` is normalized via
+//  DPATHBranchNormFeed.  Preconditions:
 //    * Trunk (empty canonical branch) cannot be dropped — KEEPTRUNK.
-//    * No open shard may name a descendant of `branch` via REF_DELTA
-//      into its subtree — KEEPDIRTY.
-//    * No live staging pack (`stage.sniff`) may sit in the dir.
-//  Phase 1c hard-caps nshards to 1, so any non-trunk branch returns
-//  KEEPNOBR; full semantics light up as Phase 2+ opens sibling
-//  shards.
+//    * Branch must not have descendants (subdirs) on disk — KEEPDIRTY.
+//    * Branch must not currently be the open leaf (`k->leaf_branch`).
+//    * `branch` must exist on disk (else KEEPNONE).
+//  Closes + unlinks every `.keeper` / `.keeper.idx` file in the leaf
+//  dir, evicts each from the keeper-level registries, then rmdir's
+//  the leaf dir.  REF_DELTA descendant ancestry is a follow-up
+//  (Phase 2+).
 ok64 KEEPBranchDrop(keeper *k, u8cs branch);
 
 //  Run one CLI invocation — same effect as `keeper ...`.
@@ -238,9 +271,9 @@ ok64 KEEPImport(keeper *k, u8cs pack_path);
 //  <kdir>/NNNNN.keeper, patches the log's file-level count,
 //  UNPK-indexes just the appended slice, emits one pack bookmark
 //  at the append offset, writes a fresh <NNN>.idx run, and extends
-//  the trunk shard's packs[] / runs[].  An empty pack (count == 0)
+//  the keeper-level packs registry.  An empty pack (count == 0)
 //  is a no-op: zero file changes.  A new NNNNN.keeper file is only
-//  created when npacks == 0 (first-ever ingest in this shard).
+//  created when the registry is empty (first-ever ingest).
 //  Caller holds no resources beyond the `bytes` slice.
 ok64 KEEPIngestFile(keeper *k, u8csc bytes);
 
@@ -278,7 +311,6 @@ typedef struct {
     u64      pack_offset;           // byte offset in log where THIS pack's first object starts
     u8       last_type;             // for commit->tree->blob->tag ordering check
     b8       strict_order;          // enforce commit->tree->blob->tag (ORDERBAD)
-    u32      shard_idx;             // write shard (Phase 1c: always 0 = trunk)
     Bwh128   entries;               // index entries buffer
     Bu8      delta_base;            // scratch: inflated base content
     Bu8      delta_instr;           // scratch: encoded delta instructions

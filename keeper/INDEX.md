@@ -152,39 +152,48 @@ full delete semantics are a follow-up.
 
 ### KEEP.h — branch-aware Open + per-shard state
 
-`KEEPOpenBranch(home *h, u8cs branch, b8 rw)` registers `branch` on
-the home singleton via `HOMEOpenBranch` and delegates to `KEEPOpen`.
-Phase 0 accepts only the trunk (canonical branch = empty slice); a
-non-trunk branch returns `KEEPNOBR`.
+`KEEPOpenBranch(home *h, u8cs branch, b8 rw)` walks trunk → … → leaf
+and registers every `.keeper` (pack log) and `.keeper.idx` (LSM index
+run) file along the path on the keeper-level `packs` and `puppies`
+`Bkv32` registries.  `branch` is normalized via
+`DPATHBranchNormFeed`; missing prefix dirs return `KEEPNONE` (use
+`KEEPCreateBranch` to mkdir the leaf first).  In rw mode, exclusive
+flock lands on `<store>/<leaf>/.lock` (or `<store>/.lock` for trunk).
+`KEEPOpen` is a thin wrapper that passes empty trunk.
 
-Per-shard state is extracted into `keeper_shard`: `branch`,
-`lock_fd`, `packs[KEEP_MAX_FILES]`, `npacks`, `runs[KEEP_MAX_LEVELS]`,
-`run_maps[]`, `nruns`.  The singleton `keeper` carries
-`shards[KEEP_MAX_SHARDS]` + `nshards`, the home pointer, the paths
-registry, and scratch buffers.  Phase 1a opens exactly one trunk
-shard.
+The singleton `keeper` carries:
+  * `home *h` — the borrowed home pointer.
+  * `Bkv32 packs` — `seqno → fd` for every pack file in the open
+    branch path.  Lookups are linear scans; seqnos are globally
+    unique across the keeper instance.
+  * `Bkv32 puppies` — `seqno → fd` for every index run; iterated by
+    LSM lookups (`KEEPLookup` / `KEEPGetExact`).
+  * `path8b leaf_branch` — canonical leaf-branch path (trailing '/';
+    empty for trunk); heap-allocated in `KEEPOpenBranch` so it owns
+    its bytes (no caller-slice borrow).  Read via `u8bDataC()`.
+  * `int lock_fd` — flock on the leaf dir's `.lock`; -1 = ro.
+  * `u32 next_seqno` — `max(seqno) + 1` across both registries.
+  * `Bu8 buf1..buf4` — KEEPGet scratch.
 
-Phase 1b flattens the on-disk layout and drops the `keeper/` subdir
-inside `.dogs/`: trunk pack logs live at `.dogs/NNNNN.keeper` and
-index runs at `.dogs/NNNNN.idx`, where `NNNNN` is the 5-hex-char
-wh64 `file_id` (20 bits).  `KEEP_PACK_EXT` = `.keeper`,
-`KEEP_SEQNO_W` = 5, `KEEP_DIR` = `.dogs`.
+`KEEPCreateBranch(home *h, u8cs branch)` mkdirs a new leaf dir under
+an existing parent.  Returns `KEEPTRUNK` on empty branch, `KEEPNONE`
+on missing parent, `KEEPDUP` if the leaf already exists.  Doesn't
+open anything; caller follows up with `KEEPOpenBranch`.
 
-Phase 1c adds the DAG-invariant scaffolding and the drop-a-dir
-surface:
+`KEEPBranchDrop(keeper *k, u8cs branch)` walks the leaf branch dir,
+evicts every `.keeper` and `.keeper.idx` registry entry, unlinks the
+files, removes the lock, and rmdir's the leaf.  Refuses trunk
+(`KEEPTRUNK`); refuses while branch has subdirs or is the active
+leaf (`KEEPDIRTY`); refuses missing dirs (`KEEPNONE`).
 
-  * `keep_pack` gains `shard_idx` (always 0 in Phase 1c) — tags the
-    write shard on every emitted pack.
-  * `KEEPPackFeed`'s REF_DELTA path consults `keep_shard_visible`
-    before emitting; a base that isn't in the write shard or one of
-    its ancestors silently falls through to raw encoding.  nshards=1
-    keeps the check trivially passing until Phase 2 opens siblings.
-  * `KEEPBranchDrop(keeper *k, u8cs branch)` enforces the top-level
-    preconditions: trunk aliases (`""`, `main`, `master`, `trunk`,
-    plus their `heads/` forms) return `KEEPTRUNK`; unknown branches
-    return `KEEPNOBR`.  The full "refuse on live descendant /
-    live staging pack / live WT" semantics (`KEEPDIRTY`) will
-    light up once Phase 2 can actually open a sibling to drop.
+On-disk layout (Step 2 multi-branch):
+  * `<store>/`              — trunk dir + `REFS` reflog.
+  * `<store>/NNNNN.keeper`  — trunk pack log (10-char RON64 seqno).
+  * `<store>/NNNNN.keeper.idx`  — trunk index run.
+  * `<store>/<branch>/...`  — branch subdir, same file shape.
+  * `<store>/<a>/<b>/...`   — nested branches.
+Writes only ever land in the active leaf dir; reads fan out across
+the whole open path.
 
 ### WALK.h — git object graph traversal
 

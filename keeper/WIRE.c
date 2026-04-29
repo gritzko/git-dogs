@@ -171,8 +171,8 @@ ok64 WIREReadRequest(int in_fd, wire_reqp req) {
 
 //  Compose <root>/.dogs/NNNNN.keeper into `out` (reset first).
 //  Mirrors KEEP.c's static keep_pack_path; replicated here because
-//  that helper isn't exposed and Phase 1c hardwires the trunk-shard
-//  flat layout anyway.
+//  that helper isn't exposed.  `kdir` is the dir prefix (trunk or a
+//  branch subdir) the caller already resolved.
 static ok64 wire_pack_path(path8b out, u8csc kdir, u32 file_id) {
     sane(u8bOK(out) && !u8csEmpty(kdir));
     a_pad(u8, fname, KEEP_SEQNO_W + sizeof(KEEP_PACK_EXT));
@@ -195,7 +195,7 @@ static ok64 wire_find_pack(keeper *k, u32 file_id, u64 log_off,
     u32  best_count = 0;
     u32  best_len  = 0;
     b8   any = NO;
-    for (u32 r = 0, _nr_ = DOGPupCount(k->shards[0].puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->shards[0].puppies, r);
+    for (u32 r = 0, _nr_ = DOGPupCount(k->puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->puppies, r);
         wh128cp base = (wh128cp)_raw_[0];
         wh128cp term = (wh128cp)_raw_[1];
         for (wh128cp e = base; e < term; e++) {
@@ -226,7 +226,7 @@ static ok64 wire_tail_pack(keeper *k, u32 file_id,
     u32  best_count = 0;
     u32  best_len  = 0;
     b8   any = NO;
-    for (u32 r = 0, _nr_ = DOGPupCount(k->shards[0].puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->shards[0].puppies, r);
+    for (u32 r = 0, _nr_ = DOGPupCount(k->puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->puppies, r);
         wh128cp base = (wh128cp)_raw_[0];
         wh128cp term = (wh128cp)_raw_[1];
         for (wh128cp e = base; e < term; e++) {
@@ -251,7 +251,7 @@ static ok64 wire_tail_pack(keeper *k, u32 file_id,
 //  offset is in [from, to).
 static u32 wire_count_in_range(keeper *k, u32 file_id, u64 from, u64 to) {
     u64 total = 0;
-    for (u32 r = 0, _nr_ = DOGPupCount(k->shards[0].puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->shards[0].puppies, r);
+    for (u32 r = 0, _nr_ = DOGPupCount(k->puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->puppies, r);
         wh128cp base = (wh128cp)_raw_[0];
         wh128cp term = (wh128cp)_raw_[1];
         for (wh128cp e = base; e < term; e++) {
@@ -277,7 +277,7 @@ static ok64 wire_locate_sha(keeper *k, sha1 const *sha,
     u64 key_lo = keepKeyPack(KEEP_OBJ_COMMIT, hashlet60);
     u64 key_hi = keepKeyPack(KEEP_OBJ_TAG, hashlet60);
 
-    for (u32 r = 0, _nr_ = DOGPupCount(k->shards[0].puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->shards[0].puppies, r);
+    for (u32 r = 0, _nr_ = DOGPupCount(k->puppies); r < _nr_; r++) { u8cs _raw_ = {NULL,NULL}; DOGPupData(_raw_, k->puppies, r);
         wh128cp base = (wh128cp)_raw_[0];
         size_t  len  = (size_t)((wh128cp)_raw_[1] - base);
         if (len == 0) continue;
@@ -300,7 +300,7 @@ ok64 WIREBuildSegments(keeper *k, refadvcp adv, wire_reqcp req,
                        pstr_seg *out_segs, int *fd_pool,
                        u32 cap, u32 *out_n) {
     sane(k && req && out_segs && fd_pool && out_n);
-    (void)adv;  // tip→dir lookup wired in once nshards > 1.
+    (void)adv;  // tip→dir lookup wired in once multi-branch fan-out lands.
 
     *out_n = 0;
     if (cap == 0) return WIREFAIL;

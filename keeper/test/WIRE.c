@@ -201,7 +201,7 @@ ok64 WIREtest_single_want() {
     u32  fid = 0;
     call(add_blob_pack, &blob_sha, &fid, "hello wire\n");
     want(fid == 1);
-    want(KEEP.shards[0].npacks == 1);
+    want(kv32bDataLen(KEEP.packs) == 1);
 
     refadv adv = {};
     call(REFADVOpen, &adv, &KEEP);

@@ -4,20 +4,21 @@
 #include <string.h>
 
 
-/* #line 33 "QURY.c.rl" */
+/* #line 35 "QURY.c.rl" */
 
 
 
 /* #line 7 "QURY.rl.c" */
 static const char _qury_actions[] = {
 	0, 1, 0, 1, 1, 1, 4, 1, 
-	6, 2, 1, 2, 2, 1, 3, 2, 
-	5, 0, 2, 6, 0
+	6, 1, 7, 2, 1, 2, 2, 1, 
+	3, 2, 5, 0, 2, 6, 0, 2, 
+	7, 2, 2, 7, 3
 };
 
 static const char _qury_key_offsets[] = {
-	0, 0, 9, 17, 19, 27, 35, 47, 
-	49
+	0, 0, 9, 17, 19, 27, 35, 46, 
+	56, 58
 };
 
 static const char _qury_trans_keys[] = {
@@ -25,48 +26,50 @@ static const char _qury_trans_keys[] = {
 	122, 45, 95, 48, 57, 65, 90, 97, 
 	122, 46, 47, 45, 95, 48, 57, 65, 
 	90, 97, 122, 45, 95, 48, 57, 65, 
-	90, 97, 122, 45, 94, 95, 126, 46, 
-	47, 48, 57, 65, 90, 97, 122, 48, 
-	57, 47, 0
+	90, 97, 122, 46, 47, 94, 95, 126, 
+	45, 57, 65, 90, 97, 122, 45, 94, 
+	95, 126, 48, 57, 65, 90, 97, 122, 
+	48, 57, 47, 0
 };
 
 static const char _qury_single_lengths[] = {
-	0, 3, 2, 2, 2, 2, 4, 0, 
-	1
+	0, 3, 2, 2, 2, 2, 5, 4, 
+	0, 1
 };
 
 static const char _qury_range_lengths[] = {
-	0, 3, 3, 0, 3, 3, 4, 1, 
-	0
+	0, 3, 3, 0, 3, 3, 3, 3, 
+	1, 0
 };
 
 static const char _qury_index_offsets[] = {
 	0, 0, 7, 13, 16, 22, 28, 37, 
-	39
+	45, 47
 };
 
 static const char _qury_indicies[] = {
 	0, 2, 0, 0, 0, 0, 1, 3, 
 	3, 3, 3, 3, 1, 4, 5, 1, 
 	6, 6, 6, 6, 6, 1, 7, 7, 
-	7, 7, 7, 1, 3, 9, 3, 10, 
-	8, 3, 3, 3, 1, 11, 1, 12, 
+	7, 7, 7, 1, 8, 9, 10, 3, 
+	11, 3, 3, 3, 1, 3, 12, 3, 
+	13, 3, 3, 3, 1, 14, 1, 15, 
 	1, 0
 };
 
 static const char _qury_trans_targs[] = {
-	6, 0, 3, 6, 8, 5, 6, 6, 
-	2, 7, 7, 7, 4
+	6, 0, 3, 6, 9, 5, 6, 6, 
+	2, 7, 8, 8, 8, 8, 8, 4
 };
 
 static const char _qury_trans_actions[] = {
-	1, 0, 0, 0, 0, 0, 18, 15, 
-	0, 12, 9, 5, 0
+	1, 0, 0, 0, 0, 0, 20, 17, 
+	0, 3, 14, 11, 26, 23, 5, 0
 };
 
 static const char _qury_eof_actions[] = {
-	0, 0, 0, 0, 0, 0, 3, 0, 
-	7
+	0, 0, 0, 0, 0, 0, 3, 9, 
+	0, 7
 };
 
 static const int qury_start = 1;
@@ -74,7 +77,7 @@ static const int qury_start = 1;
 static const int qury_en_main = 1;
 
 
-/* #line 36 "QURY.c.rl" */
+/* #line 38 "QURY.c.rl" */
 
 static b8 qury_is_sha(u8cs s) {
     if ($len(s) < QURY_MIN_SHA) return NO;
@@ -116,14 +119,14 @@ ok64 QURYu8sDrain(u8cs input, qrefp out) {
     int cs = 0;
 
     
-/* #line 111 "QURY.rl.c" */
+/* #line 114 "QURY.rl.c" */
 	{
 	cs = qury_start;
 	}
 
-/* #line 77 "QURY.c.rl" */
+/* #line 79 "QURY.c.rl" */
     
-/* #line 114 "QURY.rl.c" */
+/* #line 117 "QURY.rl.c" */
 	{
 	int _klen;
 	unsigned int _trans;
@@ -225,7 +228,11 @@ _match:
 /* #line 13 "QURY.c.rl" */
 	{ out->rel = QURY_REL_UP; }
 	break;
-/* #line 208 "QURY.rl.c" */
+	case 7:
+/* #line 14 "QURY.c.rl" */
+	{ out->trailing_slash = YES; }
+	break;
+/* #line 214 "QURY.rl.c" */
 		}
 	}
 
@@ -249,7 +256,11 @@ _again:
 /* #line 13 "QURY.c.rl" */
 	{ out->rel = QURY_REL_UP; }
 	break;
-/* #line 229 "QURY.rl.c" */
+	case 7:
+/* #line 14 "QURY.c.rl" */
+	{ out->trailing_slash = YES; }
+	break;
+/* #line 238 "QURY.rl.c" */
 		}
 	}
 	}
@@ -257,7 +268,7 @@ _again:
 	_out: {}
 	}
 
-/* #line 78 "QURY.c.rl" */
+/* #line 80 "QURY.c.rl" */
 
     // Advance input past spec and separator
     input[0] = (specend < input[1]) ? specend + 1 : specend;

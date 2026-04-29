@@ -1687,6 +1687,19 @@ ok64 POSTSetLabel(u8cs ref_uri, u8cs sha_hex) {
     call(DOGCanonURIFeed, keybuf, &u);
     a_dup(u8c, key, u8bData(keybuf));
 
+    //  Materialise the per-branch keeper shard for non-trunk labels
+    //  before recording the REFS row.  KEEPCreateBranch normalises the
+    //  branch (empty = trunk, mapped trunk aliases collapse to trunk
+    //  too) and is idempotent on KEEPDUP — letting two POSTs against
+    //  the same fresh label converge without a separate "branch
+    //  exists" probe.  KEEPTRUNK is silently absorbed (trunk shard
+    //  always exists by construction).
+    if (!$empty(u.query)) {
+        a_dup(u8c, branch, u.query);
+        ok64 ko = KEEPCreateBranch(KEEP.h, branch);
+        if (ko != OK && ko != KEEPDUP && ko != KEEPTRUNK) return ko;
+    }
+
     //  Val is bare 40-hex (canonical).  `post` verb — local ref move.
     return REFSAppendVerb($path(keepdir), REFSVerbPost(), key, sha_hex);
 }

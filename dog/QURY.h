@@ -44,12 +44,14 @@ con ok64 QURYBAD  = 0x1a79b88b28d;
 //   HEAD~3                 REF, anc_type='~', ancestry=3
 //   main^                  REF, anc_type='^', ancestry=0
 //   a1b2c3d4               SHA
+//   feat/sub/              REF, body="feat/sub", trailing_slash=YES
 typedef struct {
-    u8cs body;       // ref path or SHA hex (points into input)
-    u8   type;       // QURY_NONE/REF/SHA
-    u8   rel;        // QURY_REL_NONE/DOWN/UP
-    u8   anc_type;   // '~' or '^' or 0
-    u32  ancestry;   // N value (0 if bare ~/^)
+    u8cs body;            // ref path or SHA hex (points into input)
+    u8   type;            // QURY_NONE/REF/SHA
+    u8   rel;             // QURY_REL_NONE/DOWN/UP
+    u8   anc_type;        // '~' or '^' or 0
+    u32  ancestry;        // N value (0 if bare ~/^)
+    b8   trailing_slash;  // YES if path ended with '/' (e.g. `feat/`)
 } qref;
 
 typedef qref *qrefp;

@@ -190,18 +190,20 @@ per-pack hashlet were removed once `WIRE.md` Phase 10 landed.
 
 ## Current code vs. this spec
 
-As of 2026-04-22, Phases 1a + 1b + 1c have landed: `keeper_shard`
-owns the per-branch pack/index stacks, the on-disk layout is flat at
-`.dogs/NNNNN.keeper` + `.dogs/NNNNN.idx` for trunk (5-hex-char
-`file_id` matching the wh64 val's 20-bit field; no `keeper/`, `log/`,
-or `idx/` subdirs), the REF_DELTA DAG-invariant guard is wired into
-`KEEPPackFeed` (trivial in Phase 1c's single-shard mode), and
-`KEEPBranchDrop` refuses trunk (`KEEPTRUNK`) or unknown branches
-(`KEEPNOBR`).  Feature branches under `.dogs/<branch>/` and the
-`KEEPBRANCHDIRTY` precondition wire up in Phase 2.  `KEEPPackOpen/Close` in `keeper/KEEP.c` still creates one
-file per pack (`p->file_id = k->shards[0].npacks + 1`), writes full
-PACK headers and trailers into each file, and does **not** emit
-pack bookmarks into the index.  Multi-pack-per-file and pack
-bookmark emission remain the next refactor — prerequisite for
-`WIRE.md` (Phase 0) and for sniff's branch-dir staging (see
-`sniff/STAGE.md`).
+As of 2026-04-28, Step 2 multi-branch open/create/drop is live:
+`keeper_shard` is gone — the singleton `keeper` carries flat
+keeper-level `Bkv32 packs` (seqno → fd) and `Bkv32 puppies` (seqno →
+fd) directly, plus `u8cs leaf_branch` and one `int lock_fd` on the
+leaf.  `KEEPOpenBranch(h, "feat/fix", rw)` walks trunk → feat →
+feat/fix, registering every `.keeper` and `.keeper.idx` file along
+the way; missing prefix dirs return `KEEPNONE`.
+`KEEPCreateBranch(h, branch)` mkdirs a leaf under an existing parent
+(`KEEPDUP` on collision, `KEEPNONE` on missing parent).
+`KEEPBranchDrop(k, branch)` evicts + unlinks every file in the leaf
+dir and rmdirs it; refuses trunk (`KEEPTRUNK`), the active leaf, or
+a branch with subdirs (both `KEEPDIRTY`).  Writes (`KEEPPackOpen`,
+`KEEPPackClose`, `KEEPIngestFile`, `KEEPSync`) all land in the leaf
+branch dir; `KEEPCompact` writes its merged run into the leaf dir
+too.  The REF_DELTA visibility check is now structural: every entry
+in `k->packs` is by construction visible to a delta encoded into the
+leaf, since the open walk only loads packs from trunk → … → leaf.

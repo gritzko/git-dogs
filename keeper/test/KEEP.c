@@ -76,8 +76,8 @@ ok64 KEEPempty() {
     call(HOMEOpen, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
-    want(KEEP.shards[0].npacks == 0);
-    want(DOGPupCount(KEEP.shards[0].puppies) == 0);
+    want(kv32bDataLen(KEEP.packs) == 0);
+    want(DOGPupCount(KEEP.puppies) == 0);
 
     a_cstr(_h, "abcdef");
     u64 hashlet = WHIFFHexHashlet60(_h);
@@ -107,7 +107,7 @@ ok64 KEEPput() {
     call(HOMEOpen, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
-    want(KEEP.shards[0].npacks == 0);
+    want(kv32bDataLen(KEEP.packs) == 0);
 
     // Store two blobs
     a_cstr(blob1, "hello world\n");
@@ -122,8 +122,8 @@ ok64 KEEPput() {
     };
 
     call(KEEPPut, &KEEP, objs, wh, 2);
-    want(KEEP.shards[0].npacks == 1);
-    want(DOGPupCount(KEEP.shards[0].puppies) == 1);
+    want(kv32bDataLen(KEEP.packs) == 1);
+    want(DOGPupCount(KEEP.puppies) == 1);
 
     // Both whiffs should have valid types
     want(wh64Type(wh[0]) == DOG_OBJ_BLOB);
@@ -216,8 +216,8 @@ ok64 KEEPpackIncremental() {
     want(memcmp(tree_sha.data, expected_tree_sha, 20) == 0);
 
     call(KEEPPackClose, &KEEP, &p);
-    want(KEEP.shards[0].npacks == 1);
-    want(DOGPupCount(KEEP.shards[0].puppies) == 1);
+    want(kv32bDataLen(KEEP.packs) == 1);
+    want(DOGPupCount(KEEP.puppies) == 1);
 
     // Retrieve blob by 7-char prefix (git default)
     u64 blob_hashlet = WHIFFHashlet60(&blob_sha);
@@ -282,12 +282,13 @@ ok64 KEEPBranchDropTable() {
         {"heads/main",    KEEPTRUNK},
         {"heads/master",  KEEPTRUNK},
         {"heads/trunk",   KEEPTRUNK},
-        //  Phase 1c hard-caps nshards to 1; any non-trunk dir is
-        //  neither opened nor present on disk.
-        {"feature",       KEEPNOBR},
-        {"heads/feature", KEEPNOBR},
-        {"tags/v0.0.1",   KEEPNOBR},
-        {"feature/fix1",  KEEPNOBR},
+        //  Step 2: drop validates against on-disk state.  None of
+        //  these dirs exist in this fresh store, so the answer is
+        //  KEEPNONE.
+        {"feature",       KEEPNONE},
+        {"heads/feature", KEEPNONE},
+        {"tags/v0.0.1",   KEEPNONE},
+        {"feature/fix1",  KEEPNONE},
     };
     for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
         u8cs in = {(u8cp)cases[i].input,
@@ -299,6 +300,118 @@ ok64 KEEPBranchDropTable() {
                     ok64str(got), ok64str(cases[i].expect));
             fail(TESTFAIL);
         }
+    }
+
+    call(KEEPClose);
+    HOMEClose(&h);
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+    system(cmd);
+    done;
+}
+
+// --- Step 2: branch open/create/drop round-trip ---
+
+#include <sys/stat.h>
+
+ok64 KEEPbranchRoundTrip() {
+    sane(1);
+    call(FILEInit);
+
+    char tmpdir[] = "/tmp/keeper-branch-XXXXXX";
+    want(mkdtemp(tmpdir) != NULL);
+
+    a_cstr(root, tmpdir);
+    home h = {};
+    call(HOMEOpen, &h, root, YES);
+
+    //  Phase 1: open trunk first (creates the .dogs dir + lock), then
+    //  use KEEPCreateBranch to materialise nested feat/ → feat/fix.
+    call(KEEPOpen, &h, YES);
+    call(KEEPClose);
+
+    //  Re-open from a fresh home for create — KEEPCreateBranch is a
+    //  pure mkdir over an existing parent.  Trunk is the parent of
+    //  "feat"; "feat" is the parent of "feat/fix".  Order matters.
+    a_cstr(feat,    "feat");
+    a_cstr(featfix, "feat/fix");
+
+    //  Parent missing → KEEPNONE.
+    want(KEEPCreateBranch(&h, featfix) == KEEPNONE);
+
+    //  Materialise "feat" first.
+    want(KEEPCreateBranch(&h, feat) == OK);
+    {
+        a_pad(u8, p, 256);
+        u8bFeed(p, root);
+        a_cstr(rel, "/.dogs/feat");
+        u8bFeed(p, rel);
+        u8bFeed1(p, 0);
+        struct stat st = {};
+        want(stat((char *)u8bDataHead(p), &st) == 0);
+        want((st.st_mode & S_IFMT) == S_IFDIR);
+    }
+
+    //  Re-create same branch → KEEPDUP.
+    want(KEEPCreateBranch(&h, feat) == KEEPDUP);
+
+    //  Now nested.
+    want(KEEPCreateBranch(&h, featfix) == OK);
+
+    //  Open feat/fix.  Trunk + feat + feat/fix all exist on disk.
+    call(KEEPOpenBranch, &h, featfix, YES);
+    //  Canonical leaf_branch carries a trailing '/'.
+    a_cstr(featfix_canon, "feat/fix/");
+    {
+        a_dup(u8c, leaf, u8bDataC(KEEP.leaf_branch));
+        want(u8csLen(leaf) == u8csLen(featfix_canon));
+        want(memcmp(leaf[0], featfix_canon[0],
+                    u8csLen(featfix_canon)) == 0);
+    }
+    want(KEEP.lock_fd >= 0);
+
+    //  Verify leaf lock file exists.
+    {
+        a_pad(u8, p, 256);
+        u8bFeed(p, root);
+        a_cstr(rel, "/.dogs/feat/fix/.lock");
+        u8bFeed(p, rel);
+        u8bFeed1(p, 0);
+        struct stat st = {};
+        want(stat((char *)u8bDataHead(p), &st) == 0);
+    }
+
+    call(KEEPClose);
+
+    //  Reopen on trunk so we can drop feat/fix.
+    call(KEEPOpen, &h, YES);
+
+    //  Refuses dropping while branch has children.
+    want(KEEPBranchDrop(&KEEP, feat) == KEEPDIRTY);
+
+    //  Drop the leaf.  Dir must be gone afterwards.
+    call(KEEPBranchDrop, &KEEP, featfix);
+    {
+        a_pad(u8, p, 256);
+        u8bFeed(p, root);
+        a_cstr(rel, "/.dogs/feat/fix");
+        u8bFeed(p, rel);
+        u8bFeed1(p, 0);
+        struct stat st = {};
+        want(stat((char *)u8bDataHead(p), &st) != 0);
+    }
+
+    //  Now feat is empty leaf — drop succeeds.
+    call(KEEPBranchDrop, &KEEP, feat);
+    {
+        a_pad(u8, p, 256);
+        u8bFeed(p, root);
+        a_cstr(rel, "/.dogs/feat");
+        u8bFeed(p, rel);
+        u8bFeed1(p, 0);
+        struct stat st = {};
+        want(stat((char *)u8bDataHead(p), &st) != 0);
     }
 
     call(KEEPClose);
@@ -324,6 +437,8 @@ ok64 maintest() {
     call(KEEPpackIncremental);
     fprintf(stderr, "KEEPBranchDropTable...\n");
     call(KEEPBranchDropTable);
+    fprintf(stderr, "KEEPbranchRoundTrip...\n");
+    call(KEEPbranchRoundTrip);
     fprintf(stderr, "all passed\n");
     done;
 }

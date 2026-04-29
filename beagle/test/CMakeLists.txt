@@ -16,6 +16,17 @@ add_test(NAME BEworkflow
 set_tests_properties(BEworkflow PROPERTIES
     ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=BEworkflow")
 
+# workflow-branches.sh — branch lifecycle through `be` (increment 1):
+# create child via POST, switch via GET, commit on child, switch back,
+# delete branch.  Squash (PATCH) and rebase (POST cascade) are
+# deferred to follow-up increments.  See the file header for the
+# spec-deviation TODO list.
+add_test(NAME BEworkflowBranches
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/workflow-branches.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(BEworkflowBranches PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=BEworkflowBranches")
+
 # worktree.sh — `be get <localdir>` clones a local primary.
 # Worktree layout: `.dogs` symlink to primary + local `.sniff` file.
 add_test(NAME BEworktree
