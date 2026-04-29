@@ -323,9 +323,6 @@ ok64 KEEPLookup(keeper *k, u64 hashlet60, size_t hexlen, u64p val) {
     u64 shift = 60 - nbits;
     u64 hmask = shift < 60 ? (WHIFF_HASHLET60_MASK >> shift) << shift : WHIFF_HASHLET60_MASK;
     u64 hpre = hashlet60 & hmask;
-    fprintf(stderr, "KEEPLDBG hashlet60=0x%015llx hexlen=%zu hpre=0x%015llx nruns=%u\n",
-            (unsigned long long)hashlet60, hexlen, (unsigned long long)hpre,
-            k->shards[0].nruns);
 
     //  Object lookup: restrict the type range to 1..4.  KEEP_TYPE_PACK
     //  (0xF) bookmarks share the index but must never be returned as
@@ -337,7 +334,6 @@ ok64 KEEPLookup(keeper *k, u64 hashlet60, size_t hexlen, u64p val) {
     for (u32 r = 0; r < k->shards[0].nruns; r++) {
         wh128cp base = k->shards[0].runs[r][0];
         size_t len = (size_t)(k->shards[0].runs[r][1] - base);
-        fprintf(stderr, "KEEPLDBG run %u len=%zu\n", r, len);
         if (len == 0) continue;
         size_t lo = 0, hi = len;
         while (lo < hi) {
@@ -345,14 +341,8 @@ ok64 KEEPLookup(keeper *k, u64 hashlet60, size_t hexlen, u64p val) {
             if (base[mid].key < key_lo) lo = mid + 1;
             else hi = mid;
         }
-        fprintf(stderr, "KEEPLDBG run %u lo=%zu base[lo].key=0x%016llx key_lo=0x%016llx key_hi=0x%016llx\n",
-                r, lo,
-                lo < len ? (unsigned long long)base[lo].key : 0ULL,
-                (unsigned long long)key_lo, (unsigned long long)key_hi);
         if (lo < len && base[lo].key >= key_lo && base[lo].key <= key_hi) {
             *val = base[lo].val;
-            fprintf(stderr, "KEEPLDBG HIT run=%u val=0x%016llx\n",
-                    r, (unsigned long long)base[lo].val);
             done;
         }
     }
