@@ -14,7 +14,6 @@
 #include "abc/LSM.h"     // u8cssHeapZ for SNIFFMergeWalk
 #include "abc/PATH.h"
 #include "abc/PRO.h"
-#include "keeper/PATHS.h"
 
 #include "AT.h"
 
@@ -159,9 +158,6 @@ ok64 SNIFFOpen(home *h, b8 rw) {
     }
     sniff_opened_keep = (kr == OK);
 
-    //  Reserve the root-dir "/" path at its stable index.
-    if (rw) (void)SNIFFRootIdx();
-
     //  Load wt-root .gitignore (single file, no nested cascade) into
     //  `s->ignores`.  Absent file is not an error — IGNOMatch still
     //  rejects .git/.dogs/.sniff unconditionally.
@@ -185,36 +181,6 @@ ok64 SNIFFClose(void) {
         KEEPClose();
     }
     done;
-}
-
-// --- Path registry (delegates to keeper) ---
-
-u32 SNIFFIntern(u8cs path) {
-    return KEEPIntern(&KEEP, path);
-}
-
-u32 SNIFFInternDir(u8cs path) {
-    if ($empty(path)) return SNIFFRootIdx();
-    if (*$last(path) == '/') return SNIFFIntern(path);
-    a_pad(u8, tmp, 2048);
-    u8bFeed(tmp, path);
-    u8bFeed1(tmp, '/');
-    u8cs dp = {u8bDataHead(tmp), tmp[2]};
-    return SNIFFIntern(dp);
-}
-
-u32 SNIFFRootIdx(void) {
-    a_cstr(root, "/");
-    return SNIFFIntern(root);
-}
-
-ok64 SNIFFPath(u8csp out, u32 index) {
-    sane(out);
-    return KEEPPath(&KEEP, index, out);
-}
-
-u32 SNIFFCount(void) {
-    return KEEPPathCount(&KEEP);
 }
 
 // --- Shared wt-scan helpers ---

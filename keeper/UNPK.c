@@ -3,26 +3,18 @@
 #include "UNPK.h"
 
 #include "DELT.h"
-#include "GIT.h"
 #include "PACK.h"
-#include "PATHS.h"
 #include "ZINF.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "abc/PATH.h"
 #include "abc/PRO.h"
 
 // wh128 sort/dedup templates
 #define X(M, name) M##wh128##name
 #include "abc/QSORTx.h"
-#undef X
-
-// kv64 hashtable for sha-prefix -> LS path offset
-#define X(M, name) M##kv64##name
-#include "abc/HASHx.h"
 #undef X
 
 #define UNPK_MAX_CHAIN 64
@@ -61,88 +53,13 @@ static ok64 unpk_emit(Bwh128 out, u32 file_id,
     return wh128bPush(out, &e);
 }
 
-//  Side-map bookkeeping for sha -> path derivation.
-//
-//  Commits: parse `tree <hex>` header, register that tree sha with
-//  path "" (keeper path index 0).  Trees: enumerate entries, build
-//  "self/name" for each, KEEPIntern it, record entry sha -> idx.
-
-static void unpk_note_commit(keeper *k, u8cs content, kv64s sha2idx) {
-    u8 tree_sha[20] = {};
-    a_dup(u8c, body, content);
-    if (GITu8sCommitTree(body, tree_sha) != OK) return;
-    u64 key = 0;
-    memcpy(&key, tree_sha, 8);
-    //  Root tree's path = "" (interned via keeper; whatever index it lands at).
-    a_cstr(empty, "");
-    u32 root_idx = KEEPIntern(k, empty);
-    kv64 e = { .key = key, .val = (u64)root_idx };
-    HASHkv64Put(sha2idx, &e);
-}
-
-static void unpk_note_tree(keeper *k, u8cs content, u32 self_idx,
-                            kv64s sha2idx) {
-    u8cs self_path = {};
-    (void)KEEPPath(k, self_idx, self_path);
-
-    u8cs scan = {};
-    a_dup(u8c, body, content);
-    u8csMv(scan, body);
-    for (;;) {
-        u8cs file = {}, sha = {};
-        if (GITu8sDrainTree(scan, file, sha) != OK) break;
-        //  `file` = "<mode> <name>"; name after the first space.
-        //  Mode determines whether this child is a directory.
-        u8cs mode = {};
-        u8csMv(mode, file);
-        u8cs name = {};
-        u8csMv(name, file);
-        if (u8csFind(name, ' ') != OK) continue;
-        //  Mode slice ends at the space; name starts after.
-        mode[1] = name[0];
-        name[0]++;  // skip the space
-        if ($empty(name)) continue;
-        b8 is_dir = (!$empty(mode) && *mode[0] == '4');  // 40000
-
-        //  Build "<self>/<name>" (or "<name>" at root), "/"-appended for dirs.
-        a_pad(u8, pbuf, 4096);
-        if (u8csLen(self_path) > 0) {
-            u8bFeed(pbuf, self_path);
-            u8bFeed1(pbuf, '/');
-        }
-        u8bFeed(pbuf, name);
-        if (is_dir) u8bFeed1(pbuf, '/');
-        a_dup(u8c, pdata, u8bData(pbuf));
-
-        u32 child_idx = KEEPIntern(k, pdata);
-
-        u64 key = 0;
-        memcpy(&key, sha[0], 8);
-        kv64 e = { .key = key, .val = (u64)child_idx };
-        HASHkv64Put(sha2idx, &e);
-    }
-}
-
-//  Invoke the user callback with the derived path (or empty on miss).
-static void unpk_dispatch(keeper *k, unpk_in const *in, kv64s sha2idx,
-                           u8 type, sha1 const *sha, u8cs content,
-                           unpk_stats *st) {
+//  Fire the per-object emit callback with `(type, sha, content)`.
+//  No path derivation — consumers that need a path parse trees on
+//  their own at Close-pass time.
+static void unpk_dispatch(unpk_in const *in,
+                           u8 type, sha1 const *sha, u8cs content) {
     if (!in->emit) return;
-
-    u64 key = 0;
-    memcpy(&key, sha->data, 8);
-    kv64 probe = { .key = key, .val = 0 };
-    b8 have = (HASHkv64Get(&probe, sha2idx) == OK);
-
-    u8cs path = {};
-    if (have) {
-        (void)KEEPPath(k, (u32)probe.val, path);
-        st->paths_known++;
-    } else {
-        st->paths_empty++;
-    }
-
-    in->emit(in->emit_ctx, type, sha, path, content);
+    in->emit(in->emit_ctx, type, sha, content);
 }
 
 ok64 UNPKIndex(keeper *k, unpk_in const *in,
@@ -159,28 +76,6 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     u32 file_id = in->file_id;
 
     unpk_stats st = {};
-
-    //  Path-tracking: map a resolved object's sha-prefix to its
-    //  keeper-persistent path index.  Built while scanning trees +
-    //  commits; used at dispatch time to look up an event's path.
-    //  Paths themselves live in keeper's paths.log (persistent).
-    kv64 *s2p   = NULL;
-    kv64s sha2idx = {NULL, NULL};
-    b8  with_paths = (in->emit != NULL);
-    if (with_paths) {
-        //  One entry per commit's root-tree, plus one per tree-entry
-        //  (a tree typically holds 5-50 entries) — sized at 8x count
-        //  to keep load factor low.  HASH probes within ABC_HASH_LINE
-        //  (=16) cells, so the allocation length must be a multiple of
-        //  16 or a final-line probe walks past the buffer end (caught
-        //  here by ASan as a heap-buffer-overflow before this fix).
-        u64 tblsz = (u64)count * 8;
-        if (tblsz < 256) tblsz = 256;
-        tblsz = (tblsz + 15) & ~(u64)15;
-        s2p = calloc(tblsz, sizeof(kv64));
-        if (!s2p) with_paths = NO;
-        else { sha2idx[0] = s2p; sha2idx[1] = s2p + tblsz; }
-    }
 
     //  Pre-scan: record (offset, type) per object.  Inflates each
     //  object into k->buf1 purely to advance the read cursor past
@@ -274,20 +169,9 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
         st.base_count++;
         resolved[i + 1] = YES;
 
-        if (with_paths) {
-            u8cs ct = {cs, cs + obj.size};
-            if (types[i] == PACK_OBJ_COMMIT)
-                unpk_note_commit(k, ct, sha2idx);
-            else if (types[i] == PACK_OBJ_TREE) {
-                u32 self_idx = 0;
-                u64 k_ = 0; memcpy(&k_, sha.data, 8);
-                kv64 probe = { .key = k_, .val = 0 };
-                if (HASHkv64Get(&probe, sha2idx) == OK)
-                    self_idx = (u32)probe.val;
-                unpk_note_tree(k, ct, self_idx, sha2idx);
-            }
+        {
             u8cs dct = {cs, cs + obj.size};
-            unpk_dispatch(k, in, sha2idx, types[i], &sha, dct, &st);
+            unpk_dispatch(in, types[i], &sha, dct);
         }
 
         u64 sha_key = 0;
@@ -365,21 +249,9 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
             st.indexed++;
             resolved[child] = YES;
 
-            if (with_paths) {
-                u8cs ct = {rstart, rstart + rsz};
-                if (stk[0].base_type == PACK_OBJ_COMMIT)
-                    unpk_note_commit(k, ct, sha2idx);
-                else if (stk[0].base_type == PACK_OBJ_TREE) {
-                    u32 self_idx = 0;
-                    u64 k_ = 0; memcpy(&k_, sha.data, 8);
-                    kv64 probe = { .key = k_, .val = 0 };
-                    if (HASHkv64Get(&probe, sha2idx) == OK)
-                        self_idx = (u32)probe.val;
-                    unpk_note_tree(k, ct, self_idx, sha2idx);
-                }
+            {
                 u8cs dct = {rstart, rstart + rsz};
-                unpk_dispatch(k, in, sha2idx,
-                              stk[0].base_type, &sha, dct, &st);
+                unpk_dispatch(in, stk[0].base_type, &sha, dct);
             }
 
             u64 sha_key = 0;
@@ -437,20 +309,9 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
         st.cross++;
         resolved[i + 1] = YES;
 
-        if (with_paths) {
-            u8cs ct = {rstart, rstart + rsz};
-            if (base_type == PACK_OBJ_COMMIT)
-                unpk_note_commit(k, ct, sha2idx);
-            else if (base_type == PACK_OBJ_TREE) {
-                u32 self_idx = 0;
-                u64 k_ = 0; memcpy(&k_, sha.data, 8);
-                kv64 probe = { .key = k_, .val = 0 };
-                if (HASHkv64Get(&probe, sha2idx) == OK)
-                    self_idx = (u32)probe.val;
-                unpk_note_tree(k, ct, self_idx, sha2idx);
-            }
+        {
             u8cs dct = {rstart, rstart + rsz};
-            unpk_dispatch(k, in, sha2idx, base_type, &sha, dct, &st);
+            unpk_dispatch(in, base_type, &sha, dct);
         }
     }
 
@@ -459,7 +320,6 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     free(nodes);
     free(offsets);
     free(types);
-    if (with_paths) free(s2p);
 
     if (stats) *stats = st;
     done;

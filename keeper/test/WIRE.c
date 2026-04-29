@@ -177,8 +177,7 @@ static ok64 add_blob_pack(sha1 *out_sha, u32 *out_file_id,
     call(KEEPPackOpen, &KEEP, &p);
     a_cstr(blob_s, content);
     sha1 sha = {};
-    u8csc nopath = {NULL, NULL};
-    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_s, nopath, 0, &sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_s, 0, &sha);
     *out_sha     = sha;
     *out_file_id = p.file_id;
     call(KEEPPackClose, &KEEP, &p);

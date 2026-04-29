@@ -2,7 +2,9 @@
 #define LIBRDX_CAPO_H
 
 #include <stdio.h>
+#include <string.h>
 #include "abc/INT.h"
+#include "abc/KV.h"
 #include "abc/PATH.h"
 #include "abc/RON.h"
 #include "abc/RAP.h"
@@ -46,6 +48,9 @@ extern b8 CAPO_TERM;   // stderr is a terminal
 //  size (anonymous mmap) — generously oversized vs the trigger.
 #define CAPO_SCRATCH_LEN (1UL << 27)  // 128M u64 entries = 1GB
 #define CAPO_FLUSH_AT    (1UL << 20)  // 1M entries (~8MB)
+#define CAPO_BLOB_STAGE_LEN     (2UL << 30)   // 2 GB anonymous mmap cap
+#define CAPO_BLOB_OFFSETS_CAP   (1u << 20)    // 1M blob slots
+#define CAPO_PENDING_COMMITS_LEN (1u << 20)   // 1MB → 52k commits
 
 #define CAPOTriChar(c) (RON64_REV[(u8)(c)] != 0xff)
 
@@ -121,13 +126,19 @@ ok64 CAPOResolveDir(path8b out, u8csc reporoot);
 // Check if extension is known to tok/ tokenizers
 b8 CAPOKnownExt(u8csc ext);
 
-// --- Symbol index entries ---
+// --- Index entry kinds ---
+//
+// Every spot index entry is one u64 with the same shape:
+//   [2 bits type | 30 bits key | 32 bits path_hash].
+// The low 32 bits always carry CAPOPathHash(path) so all four kinds
+// cluster together in the LSM by path.
 
 typedef u64 idx64;    // index entry
 
 #define IDX64_TRI  0  // text trigram
 #define IDX64_MEN  1  // S token — symbol mention
 #define IDX64_DEF  2  // N token — symbol definition
+#define IDX64_PAIR 3  // (blob_hashlet30, path_hash) — already-tokenised marker
 
 fun u64 idx64Type(idx64 e)     { return e >> 62; }
 fun u32 idx64Key(idx64 e)      { return (u32)(e >> 32) & 0x3FFFFFFF; }
@@ -140,6 +151,22 @@ fun u64 CAPOSymKey(u8cs name) {
 
 fun idx64 CAPOSymEntry(u64 type, u8cs name, u8cs path) {
     return (type << 62) | CAPOSymKey(name) | (u64)CAPOPathHash(path);
+}
+
+// Low 30 bits of the SHA-1's first 8 bytes (matches keeper's hashlet60
+// keyed lookups truncated by 30 bits).  Ambiguity at the prefix is
+// rare and tolerated — the Close-pass treats a hit as "candidate seen".
+fun u32 CAPOBlobHashlet30(sha1 const *sha) {
+    u64 hl = 0;
+    memcpy(&hl, sha->data, 8);
+    return (u32)(hl & 0x3FFFFFFF);
+}
+
+// Tag-3 pair posting: same shape as TRI/MEN/DEF.
+fun idx64 CAPOPairEntry(u32 blob_hashlet30, u32 path_hash) {
+    return ((u64)IDX64_PAIR << 62) |
+           ((u64)(blob_hashlet30 & 0x3FFFFFFF) << 32) |
+           (u64)path_hash;
 }
 
 // --- DOG control struct (DOG.md rule 8) ---
@@ -168,6 +195,18 @@ typedef struct {
     //  flushed to a new .idx run when len >= CAPO_FLUSH_AT or on close.
     Bu64     entries;
     u64      seqno;                 // next run seqno
+
+    //  Blob staging (rw only).  SPOTUpdate(BLOB) appends decompressed
+    //  bytes here keyed on hashlet32, so the Close-pass tree walk can
+    //  zero-copy tokenise them without re-decompressing via KEEPGet.
+    //  Blobs that don't fit in the arena are skipped here and re-read
+    //  via KEEPGetExact at Close time.
+    Bu8      blob_stage;            // anonymous mmap, decompressed bytes
+    Bkv64    blob_offsets;          // hashlet32 → (off:32 | len:32)
+
+    //  Pending commit shas, one per SPOTUpdate(COMMIT) seen this run.
+    //  Drained by the Close-pass tree walk.
+    Bu8      pending_commits;       // 20-byte sha1 records, packed
 
     b8 color;
     b8 term;
@@ -199,15 +238,15 @@ ok64 SPOTOpenBranch(home *h, u8cs branch, b8 rw);
 //  Run one CLI invocation.
 ok64 SPOTExec(cli *c);
 
-//  Feed a single git object into spot's trigram/symbol index.
-//  obj_type uses DOG_OBJ_* (== git pack types).  For BLOB, `path`
-//  picks the tokenizer via extension and provides the path_hash
-//  used as the posting key.  COMMIT/TREE/TAG are no-ops: keeper
-//  resolves tree → path on its side and streams each blob through
-//  UNPKIndex's emit hook with its live path.  `sha` is the caller's
-//  pre-computed git-object SHA-1 (may be NULL; currently unused by
-//  spot but carried through for parity with graf/sniff).
-ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path);
+//  Feed a single git object into spot during pack ingest.  Spot
+//  cannot tokenize at this point (no path/ext yet — keeper does not
+//  parse trees), so this entry only stages: BLOB content goes into
+//  s->blob_stage keyed on hashlet32 to avoid a second decompress at
+//  Close-pass time, COMMIT shas are recorded for the Close-pass tree
+//  walk, TREE/TAG are no-ops.  Tokenization happens in SPOTClose's
+//  tree walk (CAPOClosePass) once paths are known.  `sha` is the
+//  caller's pre-computed git-object SHA-1.
+ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
 
 void SPOTClose(void);
 

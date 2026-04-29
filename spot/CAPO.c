@@ -34,6 +34,11 @@ static void capo_abrt_handler(int sig) {
 #include "keeper/WALK.h"
 #include "spot/SPOT.h"
 
+// kv64 hashtable for blob staging (hashlet32 → off+len)
+#define X(M, name) M##kv64##name
+#include "abc/HASHx.h"
+#undef X
+
 // --- Language detection via tok/ ---
 
 b8 CAPOKnownExt(u8csc ext) {
@@ -1318,6 +1323,14 @@ ok64 SPOTOpen(home *h, b8 rw) {
     //  opened rw — read-only spot never writes to the index stack.
     if (rw) {
         call(u64bMap, s->entries, CAPO_SCRATCH_LEN);
+        call(u8bMap,  s->blob_stage, CAPO_BLOB_STAGE_LEN);
+        call(kv64bAllocate, s->blob_offsets, CAPO_BLOB_OFFSETS_CAP);
+        memset(s->blob_offsets[0], 0,
+               (size_t)(s->blob_offsets[3] - s->blob_offsets[0])
+                   * sizeof(kv64));
+        s->blob_offsets[1] = s->blob_offsets[0];
+        s->blob_offsets[2] = s->blob_offsets[3];
+        call(u8bMap, s->pending_commits, CAPO_PENDING_COMMITS_LEN);
         a_path(capodir);
         a_dup(u8c, root_s, u8bDataC(h->root));
         call(CAPOResolveDir, capodir, root_s);
@@ -1344,10 +1357,106 @@ static ok64 CAPOFlushRun(u64bp entries, u8csc dirslice, u64p seqno) {
     done;
 }
 
+// --- Close-pass tree walk: tokenize new commits' blobs ---
+//
+// Drains s->pending_commits (recorded by SPOTUpdate(COMMIT)) and walks
+// each tree via KEEPLsFiles.  Per leaf with a known extension, fetches
+// the blob's bytes from s->blob_stage (zero-copy if hashlet32 hit) or
+// from KEEPGetExact (cold fallback for blobs ingested in earlier
+// packs), runs CAPOIndexFile to emit trigram/MEN/DEF postings, then
+// emits the tag-3 pair record (blob_hashlet30, path_hash) so the LSM's
+// row-dedup absorbs unchanged-file-at-unchanged-path repeats.
+
+typedef struct {
+    spot   *s;
+    keeper *k;
+} capo_close_ctx;
+
+static ok64 capo_close_visit(u8cs path, u8 kind, u8cp esha,
+                              u8cs blob_unused, void0p ctx) {
+    (void)blob_unused;
+    capo_close_ctx *cx = (capo_close_ctx *)ctx;
+    if (kind != WALK_KIND_REG && kind != WALK_KIND_EXE) return OK;
+    if ($empty(path)) return OK;
+
+    u8cs ext = {};
+    PATHu8sExt(ext, path);
+    if ($empty(ext) || !CAPOKnownExt(ext)) return OK;
+
+    spot *s = cx->s;
+
+    //  Try staged bytes first (zero-copy view into blob_stage).
+    u32 hashlet32 = 0;
+    memcpy(&hashlet32, esha, sizeof(u32));
+    u8cs source = {};
+    Bu8 fetched = {};
+    {
+        kv64s tbl = {s->blob_offsets[0], s->blob_offsets[3]};
+        kv64 probe = {.key = (u64)hashlet32, .val = 0};
+        if (HASHkv64Get(&probe, tbl) == OK) {
+            u32 off = (u32)(probe.val >> 32);
+            u32 len = (u32)(probe.val & 0xFFFFFFFFUL);
+            u8cp base = u8bDataHead(s->blob_stage);
+            source[0] = base + off;
+            source[1] = base + off + len;
+        }
+    }
+    if ($empty(source)) {
+        //  Cold path: blob lives in an earlier pack — pay the inflate.
+        sha1 bsha = {};
+        memcpy(bsha.data, esha, 20);
+        if (u8bAllocate(fetched, 1UL << 22) != OK) return OK;
+        u8 btype = 0;
+        if (KEEPGetExact(cx->k, &bsha, fetched, &btype) != OK ||
+            btype != DOG_OBJ_BLOB) {
+            u8bFree(fetched);
+            return OK;
+        }
+        source[0] = u8bDataHead(fetched);
+        source[1] = u8bIdleHead(fetched);
+    }
+
+    //  Tokenise + emit trigram/MEN/DEF postings.
+    (void)CAPOIndexFile(s->entries, source, ext, path);
+
+    //  Emit pair record for LSM-level dedup of repeat (blob, path).
+    u32 phash = CAPOPathHash(path);
+    u32 hl30 = hashlet32 & 0x3FFFFFFFu;
+    idx64 pair = CAPOPairEntry(hl30, phash);
+    (void)u64bPush(s->entries, &pair);
+
+    if (!BNULL(fetched)) u8bFree(fetched);
+    return OK;
+}
+
+static ok64 capo_close_pass(spot *s) {
+    sane(s);
+    if (BNULL(s->pending_commits)) done;
+    a_dup(u8c, commits, u8bData(s->pending_commits));
+    if ($empty(commits)) done;
+
+    capo_close_ctx cx = {s, &KEEP};
+    for (u8cp p = commits[0]; p + 20 <= commits[1]; p += 20) {
+        a_pad(u8, hexbuf, 41);
+        u8s hs = {u8bIdleHead(hexbuf), u8bTerm(hexbuf)};
+        u8cs raw = {p, p + 20};
+        HEXu8sFeedSome(hs, raw);
+        u8bFed(hexbuf, 40);
+        a_dup(u8c, hex, u8bData(hexbuf));
+
+        uri u = {};
+        u.fragment[0] = hex[0];
+        u.fragment[1] = hex[1];
+        (void)KEEPLsFiles(&KEEP, &u, capo_close_visit, &cx);
+    }
+    done;
+}
+
 void SPOTClose(void) {
     if (!spot_is_open()) return;
     spot *s = &SPOT;
     if (s->rw && s->entries[0]) {
+        (void)capo_close_pass(s);
         a_dup(u8c, root_s, u8bDataC(s->h->root));
         a_path(capodir);
         if (CAPOResolveDir(capodir, root_s) == OK) {
@@ -1360,6 +1469,9 @@ void SPOTClose(void) {
             CAPOCompact(dirslice);
         }
         u64bUnMap(s->entries);
+        if (!BNULL(s->blob_stage))      u8bUnMap(s->blob_stage);
+        if (!BNULL(s->blob_offsets))    kv64bFree(s->blob_offsets);
+        if (!BNULL(s->pending_commits)) u8bUnMap(s->pending_commits);
     }
     for (u32 i = 0; i < s->nmaps; i++) {
         if (s->toks[i][0] != NULL) u32bUnMap(s->toks[i]);

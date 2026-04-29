@@ -846,10 +846,9 @@ static ok64 dag_finish(dag_ingest *g) {
 // state->ing to lazily allocate the ingest context.  Forward-decl
 // of struct graf comes from GRAF.h include above.
 
-ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path) {
+ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
     sane(1);
     graf *state = &GRAF;
-    (void)path;  // graf derives paths from trees
 
     // Lazy allocate ingest state on first call.
     if (!state->ing) {
@@ -931,11 +930,7 @@ ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path) {
     }
 
     case DOG_OBJ_BLOB: {
-        //  Path is unused here — the finish-time tree walk recovers
-        //  every leaf's real path from its parent tree entries.  We
-        //  only need the blob's hashlet to mark it fresh so that the
-        //  walk emits PATH_VER for any leaf pointing at it.
-        (void)path;
+        //  Path is recovered later by the finish-time tree walk.
         u64 blob_h = dag_obj_hashlet(DOG_OBJ_BLOB, sha, blob);
         return dag_ingest_blob(g, blob_h);
     }

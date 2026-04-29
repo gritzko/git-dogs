@@ -23,11 +23,10 @@
 #include "spot/CAPO.h"
 
 static void sniff_indexer_fanout(void *ctx, u8 type,
-                                  sha1 const *sha, u8csc path,
-                                  u8cs content) {
+                                  sha1 const *sha, u8cs content) {
     (void)ctx;
-    GRAFUpdate(type, sha, content, path);
-    SPOTUpdate(type, sha, content, path);
+    GRAFUpdate(type, sha, content);
+    SPOTUpdate(type, sha, content);
 }
 
 ok64 sniffcli() {

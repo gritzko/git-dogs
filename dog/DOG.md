@@ -22,11 +22,15 @@
            execute a parsed CLI (verb + flags + URIs) against
            the open state; equivalent to invoking `name ...` as
            a process
-      - `ok64 DOGUpdate(name* state, u8 obj_type, u8cs blob, u8csc path)`
+      - `ok64 DOGUpdate(name* state, u8 obj_type, sha1 const *sha, u8cs blob)`
            feed a single git object (type + raw blob) into the
            dog's index; payload-ingestion path used by fetch and
-           checkout.  Updates always land in `HOMEWriteBranch()` —
-           the branch that won slot 0 at the first rw open.
+           checkout.  Path is not delivered here — consumers that
+           need a path (e.g. spot) parse trees themselves at
+           Close-pass time, since keeper no longer derives paths
+           during pack ingestion.  Updates always land in
+           `HOMEWriteBranch()` — the branch that won slot 0 at the
+           first rw open.
       - `ok64 DOGClose(name* state)`
            close every shard opened by this dog.
  9. `be` links every dog's static lib directly — no subprocess

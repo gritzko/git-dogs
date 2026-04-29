@@ -62,7 +62,7 @@ scan; no new ULOG verb required.
 
 | Header | Role |
 |--------|------|
-| SNIFF.h | Singleton state (open/close, ULOG handle, per-process sorted path index), path-registry wrappers over keeper (`SNIFFIntern` / `SNIFFPath` / `SNIFFCount` / `SNIFFRootIdx` / `SNIFFInternDir` / `SNIFFIsDir` / `SNIFFFullpath` / `SNIFFSort`). |
+| SNIFF.h | Singleton state (open/close, ULOG handle), `SNIFFFullpath` path joiner. |
 | AT.h | ULOG façade: verb constants (`SNIFFAtVerbGet/Post/Patch/Put/Delete`), append (`SNIFFAtAppend`, `SNIFFAtAppendAt`), baseline/post-ts/scan lookups (`SNIFFAtBaseline`, `SNIFFAtLastPostTs`, `SNIFFAtScanPutDelete`), stamp I/O (`SNIFFAtNow`, `SNIFFAtStampPath`, `SNIFFAtOfTimespec`, `SNIFFAtKnown`).  Wt path enumeration: `SNIFFWtListPaths` (sorted via `FILEScanSorted` + `FILEentryZ`, mirrors `KEEPTreeListLeaves` shape — `(paths, kinds)` ready to feed `KEEPu8ssDrain`). |
 | GET.h | Checkout: resolve baseline tree from latest get/post/patch row, run a 2-input merge (`KEEPTreeListLeaves` + `KEEPu8ssDrain`) against the target tree to classify each path as no-op overlay / real change / add / delete; refuse on dirty ∩ real-change.  Then walk target via keeper → materialise files (skipping no-op overlays so dirty wt content is preserved), futimens every write to a shared ts.  Prune: drain the merge's clean-baseline-only list, unlinking each entry — no wt scan, no path-bitmap.  Finally append one `get` row. |
 | PUT.h | `put <path>` — one row per URI, no pack I/O, no tree work. |
@@ -104,7 +104,6 @@ C (`test/SNIFF.c`):
 
 | Test | What |
 |------|------|
-| `SNIFFInternPath` | Intern + path round-trip, dedup (root `/` reserved at idx 0). |
 | `SNIFFAtHelpers` | Verb constants are distinct; empty-log invariants; seeded-log baseline pick (most recent get/post/patch with multi-hash fragment recognised); stamp-set membership; last-post-ts lookup; `SNIFFAtScanPutDelete` forward-scan across different floors. |
 | `SNIFFCheckoutCommit` | Hand-built initial commit → `GETCheckout` → modify file → `POSTCommit` produces a new commit object keeper can retrieve (verifies the full GET + POST integration on the ULOG-only path). |
 

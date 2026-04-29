@@ -239,7 +239,7 @@ ok64 SNIFFCheckoutCommit() {
     // Blob: "hello\n"
     a_cstr(blob_data, "hello\n");
     sha1 blob_sha = {};
-    u8csc nopath_b = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_data, nopath_b, 0, &blob_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_data, 0, &blob_sha);
 
     // Tree: one entry "100644 test.txt\0<sha>"
     a_pad(u8, tree_buf, 256);
@@ -251,7 +251,7 @@ ok64 SNIFFCheckoutCommit() {
     a_dup(u8c, tree_content, u8bData(tree_buf));
 
     sha1 tree_sha = {};
-    u8csc nopath_t = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, tree_content, nopath_t, 0, &tree_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, tree_content, 0, &tree_sha);
 
     // Commit
     a_pad(u8, cbuf, 512);
@@ -267,7 +267,7 @@ ok64 SNIFFCheckoutCommit() {
     a_dup(u8c, commit_content, u8bData(cbuf));
 
     sha1 commit_sha = {};
-    u8csc nopath_c = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_COMMIT, commit_content, nopath_c, 0, &commit_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_COMMIT, commit_content, 0, &commit_sha);
     call(KEEPPackClose, &KEEP, &p);
 
     // Hex of commit SHA for CLI
@@ -296,7 +296,6 @@ ok64 SNIFFCheckoutCommit() {
     //    * the file materialised on disk (done above), and
     //    * a subsequent POSTCommit can still chain a commit behind the
     //      baseline captured in the ULOG's `get` row.
-    want(SNIFFCount() >= 1);
 
     // Modify file — no SNIFFRecord call anymore; POST in Step 4 will
     // detect change via mtime ∉ stamp-set.
@@ -454,7 +453,7 @@ static ok64 make_commit(sha1 *commit_out, keeper *k,
     for (u32 i = 0; i < nfiles; i++) {
         a_cstr(blob, files[i].data);
         sha1 bsha = {};
-        u8csc nopath_b = {NULL,NULL}; call(KEEPPackFeed, k, &p, DOG_OBJ_BLOB, blob, nopath_b, 0, &bsha);
+        call(KEEPPackFeed, k, &p, DOG_OBJ_BLOB, blob, 0, &bsha);
         a_cstr(mode, "100644 ");
         u8bFeed(tree_buf, mode);
         a_cstr(name, files[i].name);
@@ -466,7 +465,7 @@ static ok64 make_commit(sha1 *commit_out, keeper *k,
 
     sha1 tree_sha = {};
     a_dup(u8c, tc, u8bData(tree_buf));
-    u8csc nopath_t = {NULL,NULL}; call(KEEPPackFeed, k, &p, DOG_OBJ_TREE, tc, nopath_t, 0, &tree_sha);
+    call(KEEPPackFeed, k, &p, DOG_OBJ_TREE, tc, 0, &tree_sha);
 
     // Commit object
     a_pad(u8, cbuf, 1024);
@@ -493,7 +492,7 @@ static ok64 make_commit(sha1 *commit_out, keeper *k,
     u8bFeed(cbuf, hdr);
 
     a_dup(u8c, cc, u8bData(cbuf));
-    u8csc nopath_c = {NULL,NULL}; call(KEEPPackFeed, k, &p, DOG_OBJ_COMMIT, cc, nopath_c, 0, commit_out);
+    call(KEEPPackFeed, k, &p, DOG_OBJ_COMMIT, cc, 0, commit_out);
     call(KEEPPackClose, k, &p);
     done;
 }

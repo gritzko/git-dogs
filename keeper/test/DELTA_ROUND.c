@@ -116,14 +116,13 @@ ok64 DELTARoundTrip() {
         keep_pack p = {};
         call(KEEPPackOpen, &KEEP, &p);
         p.strict_order = NO;
-        u8csc nopath = {NULL, NULL};
         u8csc c0 = {(u8cp)versions[0],
                     (u8cp)versions[0] + strlen(versions[0])};
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c0, nopath, 0,
+        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c0, 0,
              &shas[0]);
         u8csc c1 = {(u8cp)versions[1],
                     (u8cp)versions[1] + strlen(versions[1])};
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c1, nopath,
+        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c1,
              WHIFFHashlet60(&shas[0]), &shas[1]);
         call(KEEPPackClose, &KEEP, &p);
     }
@@ -131,10 +130,9 @@ ok64 DELTARoundTrip() {
         keep_pack p = {};
         call(KEEPPackOpen, &KEEP, &p);
         p.strict_order = NO;
-        u8csc nopath = {NULL, NULL};
         u8csc c = {(u8cp)versions[i],
                    (u8cp)versions[i] + strlen(versions[i])};
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c, nopath,
+        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c,
              WHIFFHashlet60(&shas[i-1]), &shas[i]);
         call(KEEPPackClose, &KEEP, &p);
     }

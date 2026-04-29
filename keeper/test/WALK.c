@@ -109,14 +109,14 @@ static ok64 build_leaf_tree(keeper *k, keep_pack *p,
                              sha1 *tree_out) {
     sane(k && p && tree_out);
     sha1 bsha = {};
-    u8csc nopath_b = {NULL,NULL}; call(KEEPPackFeed, k, p, DOG_OBJ_BLOB, content, nopath_b, 0, &bsha);
+    call(KEEPPackFeed, k, p, DOG_OBJ_BLOB, content, 0, &bsha);
     a_pad(u8, tb, 256);
     call(u8bFeed, tb, mode_name);
     u8bFeed1(tb, 0);
     a_rawc(ss, bsha);
     call(u8bFeed, tb, ss);
     a_dup(u8c, tc, u8bData(tb));
-    u8csc nopath_t = {NULL,NULL}; call(KEEPPackFeed, k, p, DOG_OBJ_TREE, tc, nopath_t, 0, tree_out);
+    call(KEEPPackFeed, k, p, DOG_OBJ_TREE, tc, 0, tree_out);
     done;
 }
 
@@ -142,11 +142,11 @@ ok64 WALKtest2() {
     // Leaf blobs.
     a_cstr(hi_content, "hi\n");
     sha1 hi_sha = {};
-    u8csc nopath_h = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, hi_content, nopath_h, 0, &hi_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, hi_content, 0, &hi_sha);
 
     a_cstr(run_content, "#!/bin/sh\n");
     sha1 run_sha = {};
-    u8csc nopath_r = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, run_content, nopath_r, 0, &run_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, run_content, 0, &run_sha);
 
     // Inner "sub" tree.
     a_cstr(nested_mn, "100644 nested.txt");
@@ -176,7 +176,7 @@ ok64 WALKtest2() {
 
     a_dup(u8c, rtc, u8bData(rtb));
     sha1 root_sha = {};
-    u8csc nopath_rt = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, rtc, nopath_rt, 0, &root_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, rtc, 0, &root_sha);
 
     call(KEEPPackClose, &KEEP, &p);
 
@@ -248,14 +248,12 @@ ok64 WALKtest4() {
 
     a_cstr(hi_content, "hi\n");
     sha1 hi_sha = {};
-    u8csc nopath_h = {NULL,NULL};
-    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, hi_content, nopath_h, 0,
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, hi_content, 0,
          &hi_sha);
 
     a_cstr(run_content, "#!/bin/sh\n");
     sha1 run_sha = {};
-    u8csc nopath_r = {NULL,NULL};
-    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, run_content, nopath_r, 0,
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, run_content, 0,
          &run_sha);
 
     a_cstr(nested_mn, "100644 nested.txt");
@@ -264,8 +262,7 @@ ok64 WALKtest4() {
     call(build_leaf_tree, &KEEP, &p, nested_mn, nested_content, &sub_sha);
 
     sha1 nested_blob_sha = {};
-    u8csc nopath_n = {NULL,NULL};
-    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, nested_content, nopath_n, 0,
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, nested_content, 0,
          &nested_blob_sha);
 
     a_pad(u8, rtb, 512);
@@ -278,8 +275,7 @@ ok64 WALKtest4() {
 
     a_dup(u8c, rtc, u8bData(rtb));
     sha1 root_sha = {};
-    u8csc nopath_rt = {NULL,NULL};
-    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, rtc, nopath_rt, 0,
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, rtc, 0,
          &root_sha);
 
     call(KEEPPackClose, &KEEP, &p);

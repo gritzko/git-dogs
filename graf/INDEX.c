@@ -93,11 +93,10 @@ static ok64 graf_feed_type(keeper *k, u8 type, b8 sort_by_val, Bu8 body) {
         if (o != OK) continue;
         if (ot != type) continue;    //  hashlet collision — skip
         u8cs bs = {u8bDataHead(body), u8bIdleHead(body)};
-        u8csc nopath = {};
         //  No pre-computed sha here; GRAFUpdate falls back to
         //  hashing `bs` itself.  This is the manual reindex path, not
         //  the hot clone path.
-        o = GRAFUpdate(ot, NULL, bs, nopath);
+        o = GRAFUpdate(ot, NULL, bs);
         if (o != OK) { rc = o; break; }
     }
 

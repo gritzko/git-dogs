@@ -1,6 +1,9 @@
 #ifndef DOG_DOG_H
 #define DOG_DOG_H
 
+#include "abc/PATH.h"
+#include "abc/RAP.h"
+#include "abc/RON.h"
 #include "abc/URI.h"
 
 // Git object types (from packfile format)
@@ -8,6 +11,27 @@
 #define DOG_OBJ_TREE   2
 #define DOG_OBJ_BLOB   3
 #define DOG_OBJ_TAG    4
+
+// --- Path hash ---
+//
+// A 64-bit positional identifier for a tree node.  The root hash is
+// the ron60 encoding of the literal "ROOT"; every child's hash is
+// RAPHashSeed(name, parent_hash), where `name` is just the leaf
+// segment — no slashes, no parent prefix.  
+con ok64 ROOT	= 0x6d861d;
+
+// One step: child of `parent` named `name` (leaf, no slashes).
+fun u64 DOGChildPathHash(u8csc name, u64 parent) {
+    return RAPHashSeed(name, parent);
+}
+
+// Whole path: walk non-empty segments from the root, folding each
+// one through DOGChildPathHash.  Empty path returns ROOT.
+fun u64 DOGPathHash(path8s path) {
+    u64 h = ROOT;
+    $eachseg(seg, path) h = DOGChildPathHash(seg, h);
+    return h;
+}
 
 // Shared error code for branch-scoped Open entry points that receive
 // a branch path outside the supported set.  Phase 0 accepts only the

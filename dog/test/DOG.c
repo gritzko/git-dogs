@@ -225,10 +225,42 @@ ok64 DOGTestCanonical() {
     done;
 }
 
+// Folding leaves through DOGChildPathHash from ROOT must match
+// DOGPathHash on the joined path.
+ok64 DOGTestPathHash() {
+    sane(1);
+    a_cstr(a, "a");
+    a_cstr(b, "b");
+    a_cstr(c, "c");
+    u64 step = DOGChildPathHash(a, ROOT);
+    step = DOGChildPathHash(b, step);
+    step = DOGChildPathHash(c, step);
+
+    a_cstr(abc, "a/b/c");
+    u64 whole = DOGPathHash(abc);
+    if (step != whole) {
+        fprintf(stderr, "FAIL hash(a/b/c)=%llx step=%llx\n",
+                (unsigned long long)whole, (unsigned long long)step);
+        fail(TESTFAIL);
+    }
+
+    // Empty path (and "/") must equal ROOT.
+    a_cstr(empty, "");
+    if (DOGPathHash(empty) != ROOT) fail(TESTFAIL);
+    a_cstr(slash, "/");
+    if (DOGPathHash(slash) != ROOT) fail(TESTFAIL);
+
+    // Repeated/leading/trailing slashes must not change the hash.
+    a_cstr(messy, "/a//b/c/");
+    if (DOGPathHash(messy) != whole) fail(TESTFAIL);
+    done;
+}
+
 ok64 DOGtest() {
     sane(1);
     call(DOGTestDOGParseURI);
     call(DOGTestCanonical);
+    call(DOGTestPathHash);
     done;
 }
 

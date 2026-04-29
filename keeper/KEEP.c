@@ -4,7 +4,6 @@
 //  in LSM sorted runs of wh128 entries.
 //
 #include "KEEP.h"
-#include "PATHS.h"
 #include "REFS.h"
 
 #include "DELT.h"
@@ -229,11 +228,6 @@ ok64 KEEPOpen(home *h, b8 rw) {
     call(u8bMap, k->buf3, KEEP_BUFSZ);
     call(u8bMap, k->buf4, KEEP_BUFSZ);
 
-    // Path registry (.dogs/paths.log); tolerant on open failure
-    // so existing stores without the file keep working read-only.
-    ok64 po = KEEPPathsOpen(k, rw);
-    if (po != OK && rw) return po;
-
     done;
 }
 
@@ -242,13 +236,13 @@ ok64 KEEPOpen(home *h, b8 rw) {
 // Convenience single-object path over KEEPPackOpen/Feed/Close.
 // Opens a fresh pack log, writes one object, closes. For bulk
 // ingestion prefer KEEPPackOpen/KEEPPackFeed/KEEPPackClose.
-ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob, u8csc path) {
+ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob) {
     sane(k && $ok(blob));
     keep_pack p = {};
     call(KEEPPackOpen, k, &p);
     u8csc content = {blob[0], blob[1]};
     sha1 sha = {};
-    ok64 o = KEEPPackFeed(k, &p, obj_type, content, path, 0, &sha);
+    ok64 o = KEEPPackFeed(k, &p, obj_type, content, 0, &sha);
     KEEPPackClose(k, &p);
     return o;
 }
@@ -267,7 +261,6 @@ ok64 KEEPClose(void) {
     if (k->buf2[0]) u8bUnMap(k->buf2);
     if (k->buf3[0]) u8bUnMap(k->buf3);
     if (k->buf4[0]) u8bUnMap(k->buf4);
-    KEEPPathsClose(k);
     if (k->shards[0].lock_fd >= 0) FILEClose(&k->shards[0].lock_fd);
     zerop(k);
     keep_is_rw = NO;
@@ -993,7 +986,7 @@ static b8 keep_find_raw_in_pack(keep_pack *p, u64 base_hashlet60,
 
 ok64 KEEPPackFeed(keeper *k, keep_pack *p,
                   u8 type, u8csc content,
-                  u8csc path, u64 base_hashlet60,
+                  u64 base_hashlet60,
                   sha1 *sha_out) {
     sane(k && p && p->log && type >= 1 && type <= 4);
 
@@ -1125,10 +1118,8 @@ ok64 KEEPPackFeed(keeper *k, keep_pack *p,
     p->nobjs++;
 
     //  Indexer fan-out: same hook UNPKIndex uses on the fetch path.
-    //  Caller passes `path` for blobs (sniff knows it from the staged
-    //  tree entry) and an empty slice for trees/commits/tags.
     if (keep_indexer_emit)
-        keep_indexer_emit(keep_indexer_ctx, type, sha_out, path, content);
+        keep_indexer_emit(keep_indexer_ctx, type, sha_out, content);
 
     done;
 }
@@ -1245,11 +1236,10 @@ ok64 KEEPPut(keeper *k, u8csc *objects, wh64 *whiffs, u32 nobjs) {
     keep_pack p = {};
     call(KEEPPackOpen, k, &p);
 
-    u8csc nopath = {NULL, NULL};
     for (u32 i = 0; i < nobjs; i++) {
         u8 type = wh64Type(whiffs[i]);
         sha1 sha = {};
-        ok64 o = KEEPPackFeed(k, &p, type, objects[i], nopath, 0, &sha);
+        ok64 o = KEEPPackFeed(k, &p, type, objects[i], 0, &sha);
         if (o != OK) {
             if (p.log) FILEUnBook(p.log);
             wh128bFree(p.entries);

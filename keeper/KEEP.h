@@ -12,7 +12,6 @@
 //    NNNNN.keeper — append-only pack log (FILEBook'd)
 //    NNNNN.idx    — sorted wh128 run (LSM)
 //    REFS         — URI→URI reflog
-//    paths.log    — store-wide path registry
 //
 //  `NNNNN` is the 5-hex-char wh64 file_id (20 bits).  Phase 1a keeps
 //  exactly one trunk shard; feature branches land in `<store>/<branch>/`
@@ -125,12 +124,6 @@ typedef struct {
     Bu8           buf2;                 // working buffer for KEEPGet delta apply
     Bu8           buf3;                 // working buffer for keep_resolve base
     Bu8           buf4;                 // working buffer for keep_resolve delta
-    //  Path registry: .dogs/paths.log (newline-separated),
-    //  offsets[i] → start-byte of path i, hash(path) → i for dedup.
-    //  Dir paths end with '/'.  Index 0 is reserved for the empty path.
-    u8bp   paths_log;
-    Bu32   paths_offs;
-    Bkv64  paths_hash;
 } keeper;
 
 // Relative ".dogs" slice.  Call sites compose the full dir via
@@ -176,9 +169,8 @@ ok64 KEEPExec(keeper *k, cli *c);
 
 //  Feed a single git object (type + raw uncompressed content) into
 //  the store.  Appends to the current pack log + records an index
-//  entry.  obj_type uses KEEP_OBJ_* below.  `path` is informational
-//  (repo-relative path for blobs, empty for trees/commits/tags).
-ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob, u8csc path);
+//  entry.  obj_type uses KEEP_OBJ_* below.
+ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob);
 
 //  Close and unmap everything.
 ok64 KEEPClose(void);
@@ -304,7 +296,7 @@ ok64 KEEPPackOpen(keeper *k, keep_pack *p);
 //  entry always records the resolved object type.
 ok64 KEEPPackFeed(keeper *k, keep_pack *p,
                   u8 type, u8csc content,
-                  u8csc path, u64 base_hashlet60,
+                  u64 base_hashlet60,
                   sha1 *sha_out);
 
 ok64 KEEPPackClose(keeper *k, keep_pack *p);
@@ -330,8 +322,5 @@ ok64 KEEPGetByURI(keeper *k, uricp target, u8bp out);
 ok64 KEEPResolveTree(keeper *k, uricp target, sha1 *tree_out);
 
 //  KEEPLsFiles is declared in keeper/WALK.h (takes a walk_tree_fn).
-//  Path registry (KEEPIntern / KEEPPath / KEEPPathCount) is declared
-//  in keeper/PATHS.h.  Its backing fields (paths_log, paths_offs,
-//  paths_hash) live on the `keeper` struct above.
 
 #endif

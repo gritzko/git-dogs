@@ -427,4 +427,31 @@ a_bytes_after=$(cat a.txt)
     || fail "a.txt bytes changed across post"
 note "untouched a.txt: mtime + bytes preserved across post"
 
+# ------------------------------------------------------------------
+# Scenario 14: rename keeps the file searchable by content.
+#
+#   spot's posting list is keyed by (trigram, path_hash).  A rename
+#   produces a new (blob, path) pair — the Close-pass tree walk must
+#   tokenise the blob under the new path so its trigrams gain
+#   postings under the new path's hash.  Searching for a content
+#   substring after the rename must find the file at its new name.
+# ------------------------------------------------------------------
+echo "=== 14. rename keeps content searchable at the new path ==="
+D14="$TMP/r14"; mkdir -p "$D14"; cd "$D14"
+printf 'int rendezvous_alpha(void) { return 42; }\n' > old_name.c
+"$BE" post seed >/dev/null
+mv old_name.c new_name.c
+#  Sniff's PUT refuses a content-unchanged-but-renamed file, so
+#  perturb the byte-stream slightly to force a fresh commit.  The
+#  symbol we search for is unchanged, which is the point.
+printf 'int rendezvous_alpha(void) { return 43; }\n' > new_name.c
+"$BE" put new_name.c >/dev/null
+"$BE" post rename >/dev/null
+
+# spot finds the symbol; output must mention the new path.
+hits=$("$BE" '#rendezvous_alpha' 2>/dev/null || true)
+echo "$hits" | grep -q new_name.c \
+    || fail "rename: spot did not locate rendezvous_alpha at new_name.c (got: $hits)"
+note "rename: rendezvous_alpha found at new_name.c"
+
 echo "=== all be-dispatch scenarios passed ==="

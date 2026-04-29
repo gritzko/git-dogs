@@ -32,7 +32,7 @@ typedef struct {
 extern graf GRAF;
 
 // --- Internal helpers used by GRAFUpdate (implemented in DAG.c) ---
-ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path);
+ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
 ok64 GRAFDagFinish(void);
 
 // --- Error / sentinel codes ---
@@ -60,15 +60,12 @@ ok64 GRAFOpenBranch(home *h, u8cs branch, b8 rw);
 ok64 GRAFExec(cli *c);
 
 //  Feed a single object (commit/tree/blob) into graf's DAG index.
-//  obj_type uses KEEP_OBJ_* constants; `path` is repo-relative
-//  (blobs only; trees/commits pass an empty path).
-//
-//  `sha` is the git-object SHA-1 of the object.  May be NULL when
-//  the caller does not have it pre-computed (e.g. the manual reindex
-//  path); graf then falls back to hashing `blob` itself.  On the hot
-//  UNPKIndex → keeper_indexer_fanout path, UNPK passes its already-
-//  resolved SHA, skipping a full SHA1DC pass per object.
-ok64 GRAFUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path);
+//  obj_type uses KEEP_OBJ_* constants.  `sha` is the git-object SHA-1.
+//  May be NULL when the caller does not have it pre-computed (e.g.
+//  the manual reindex path); graf then falls back to hashing `blob`
+//  itself.  On the hot UNPKIndex → keeper_indexer_fanout path, UNPK
+//  passes its already-resolved SHA, skipping a full SHA1DC pass.
+ok64 GRAFUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
 
 //  Close singleton; idempotent.
 ok64 GRAFClose(void);

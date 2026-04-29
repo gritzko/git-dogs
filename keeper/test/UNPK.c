@@ -137,52 +137,21 @@ static int has_hashlet(u64 const *sorted, u32 n, u64 h) {
 
 // --- emit-callback test helpers -----------------------------------
 
-// Collect (sha_hex40, path) pairs emitted for blobs into a flat text buffer,
-// one "sha40 path\n" line per blob.
+// Count emitted objects per type.  Path derivation is no longer
+// performed by UNPK — naming is owned by spot's Close-pass tree walk.
 typedef struct {
-    Bu8 buf;
     u32 nblobs;
     u32 ntrees;
     u32 ncommits;
-    u32 nempty_path;  // blobs where path was empty (fallback)
 } emit_collect;
 
 static void emit_cb(void *ctx, u8 type, sha1 const *sha,
-                     u8csc path, u8cs content) {
-    (void)content;
+                     u8cs content) {
+    (void)sha; (void)content;
     emit_collect *c = (emit_collect *)ctx;
-    if (type == PACK_OBJ_COMMIT) { c->ncommits++; return; }
-    if (type == PACK_OBJ_TREE)   { c->ntrees++;   return; }
-    if (type != PACK_OBJ_BLOB)   return;
-
-    c->nblobs++;
-    if ($empty(path)) c->nempty_path++;
-
-    u8 hex[40];
-    u8s hs = {hex, hex + 40};
-    u8cs sb = {sha->data, sha->data + 20};
-    HEXu8sFeedSome(hs, sb);
-
-    u8cs hline = {hex, hex + 40};
-    u8bFeed(c->buf, hline);
-    u8bFeed1(c->buf, ' ');
-    if (!$empty(path)) u8bFeed(c->buf, path);
-    u8bFeed1(c->buf, '\n');
-}
-
-// True if `line` (form "sha path") appears anywhere in `haystack`.
-static int has_line(u8cs haystack, u8cs line) {
-    u8cp h = haystack[0];
-    size_t hlen = u8csLen(haystack);
-    size_t llen = u8csLen(line);
-    for (size_t i = 0; i + llen <= hlen; i++) {
-        if (memcmp(h + i, line[0], llen) == 0) {
-            if (i + llen == hlen || h[i + llen] == '\n') {
-                if (i == 0 || h[i - 1] == '\n') return 1;
-            }
-        }
-    }
-    return 0;
+    if (type == PACK_OBJ_COMMIT) c->ncommits++;
+    else if (type == PACK_OBJ_TREE) c->ntrees++;
+    else if (type == PACK_OBJ_BLOB) c->nblobs++;
 }
 
 // Common setup: mkdtemp for both toy repo and keeper root.
@@ -233,9 +202,8 @@ static ok64 run_toy(char const *recipe) {
     
     call(KEEPOpen, &h, YES);
 
-    //  Emit callback: collect "sha40 path" lines for every blob.
+    //  Emit callback: count objects per type.
     emit_collect ec = {};
-    call(u8bMap, ec.buf, 1 << 20);
 
     // Run UNPKIndex against the whole pack (log_off == pack_off, file_id arbitrary).
     unpk_in in = {
@@ -254,38 +222,7 @@ static ok64 run_toy(char const *recipe) {
     call(UNPKIndex, &KEEP, &in, entries, &st);
 
     //  Per-event sanity: emit counts match object types in the pack.
-    //  Paths: verify that when a path WAS derived for a blob, it
-    //  matches what `git ls-tree -r HEAD` reports for that sha.  A
-    //  missing path (empty-path fallback) is acceptable — documented
-    //  contract when the blob precedes its tree in pack order (small
-    //  packs) or the tree is outside the pack (thin/optimized packs).
     want(ec.nblobs + ec.ntrees + ec.ncommits <= hdr.count);
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 GIT_UNSET "cd %s && git ls-tree -r HEAD "
-                 "| awk '{print $3 \" \" $4}'", repo);
-        FILE *p = popen(cmd, "r");
-        want(p != NULL);
-        a_dup(u8c, collected, u8bData(ec.buf));
-        char line[1024];
-        u32 checked = 0, matched = 0;
-        while (fgets(line, sizeof(line), p)) {
-            size_t ln = strlen(line);
-            while (ln > 0 && (line[ln - 1] == '\n' || line[ln - 1] == '\r'))
-                line[--ln] = 0;
-            if (ln < 42) continue;
-            u8cs probe = {(u8cp)line, (u8cp)line + ln};
-            if (has_line(collected, probe)) matched++;
-            checked++;
-        }
-        pclose(p);
-        //  At least SOME emitted events must have correct (sha, path)
-        //  — if zero, something is fundamentally broken in the path
-        //  derivation; if less than total, packs put blobs before trees.
-        want(checked > 0);
-        (void)matched;
-    }
 
     // Compare to git's object list.
     u32 expected_n = 0;
@@ -319,7 +256,6 @@ static ok64 run_toy(char const *recipe) {
     free(expected);
     free(shas);
     wh128bFree(entries);
-    u8bUnMap(ec.buf);
     KEEPClose();
     HOMEClose(&h);
     FILEUnMap(pack_map);

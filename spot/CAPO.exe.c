@@ -21,8 +21,15 @@
 #include "dog/HOME.h"
 #include "dog/HUNK.h"
 #include "dog/SHA1.h"
+#include "keeper/KEEP.h"
+#include "keeper/WALK.h"
 #include "spot/CAPOi.h"
 #include "spot/LESS.h"
+
+// kv64 hashtable for hashlet32 → (off:32 | len:32)
+#define X(M, name) M##kv64##name
+#include "abc/HASHx.h"
+#undef X
 
 // --- Verb / flag tables ---
 
@@ -350,54 +357,45 @@ ok64 SPOTExec(cli *c) {
     return ret;
 }
 
-// --- Update: feed a single git object into spot's index ---
+// --- Update: stage a single git object during pack ingest ---
 //
-// Driven by keeper's UNPK emit hook (UNPK.h unpk_emit_fn) — one call
-// per resolved object, in commit-tree-blob order, with each blob
-// arriving alongside its live path (derived from the enclosing tree
-// by UNPK's side-map).  All indexing happens here; there is no
-// worktree walk.  Read-only opens silently drop all updates.
-//   COMMIT / TREE / TAG: no-op.
-//   BLOB: pick tokenizer from `path`'s extension, tokenize, append
-//         trigram + symbol postings to the in-memory scratch; flush
-//         to a new `.idx` run when the run fills up.
-ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob, u8csc path) {
+// Driven by keeper's UNPK emit hook.  Spot cannot tokenize at this
+// point — paths are unknown until the Close-pass tree walk parses
+// commits/trees.  So:
+//   COMMIT: append the 20-byte sha to s->pending_commits for the
+//           Close-pass walk to drain.
+//   BLOB:   stash decompressed bytes in s->blob_stage keyed by
+//           hashlet32, so the Close-pass walk can zero-copy tokenize
+//           without re-decompressing via KEEPGetExact.  When the
+//           stage is full, skip — the Close-pass will fall through
+//           to KEEPGetExact for missing blobs.
+//   TREE / TAG: no-op (KEEPGetExact serves them at Close-pass time).
+ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
     sane(1);
-    (void)sha;  // not used yet; carried for parity with graf/sniff.
     spotp s = &SPOT;
     if (!s->rw) done;
-    if (obj_type != DOG_OBJ_BLOB) done;
 
-    if ($empty(path)) done;  // no ext → no tokenizer
-    size_t plen = (size_t)$len(path);
-    u8cs ext = {};
-    CAPOFindExt(ext, path[0], plen);
-    if ($empty(ext) || !CAPOKnownExt(ext)) done;
-
-    u8cs source = {blob[0], blob[1]};
-    call(CAPOIndexFile, s->entries, source, ext, path);
-
-    //  Flush when the scratch run hits CAPO_FLUSH_AT.  Dedup halves
-    //  the run often enough that early flushing wastes I/O; follow
-    //  the existing reindex policy (CAPO.c:486-503).  sDedup moves
-    //  the buffer's idle pointer back in place, so a delayed flush
-    //  leaves the scratch compacted.
-    size_t pending = u64bDataLen(s->entries);
-    if (pending >= CAPO_FLUSH_AT) {
-        u64sp data = u64bData(s->entries);
-        u64sSort(data);
-        u64sDedup(data);
-        size_t unique = $len(data);
-        if (unique * 2 > pending) {
-            a_dup(u8c, root_s, u8bDataC(s->h->root));
-            a_path(capodir);
-            call(CAPOResolveDir, capodir, root_s);
-            a_dup(u8c, dirslice, u8bDataC(capodir));
-            u64cs run = {(u64cp)data[0], (u64cp)data[1]};
-            call(CAPOIndexWrite, dirslice, run, s->seqno);
-            s->seqno++;
-            u64bReset(s->entries);
-        }
+    if (obj_type == DOG_OBJ_COMMIT) {
+        if (!sha || BNULL(s->pending_commits)) done;
+        u8cs sb = {(u8cp)sha->data, (u8cp)sha->data + 20};
+        if (u8bIdleLen(s->pending_commits) < 20) done;
+        u8bFeed(s->pending_commits, sb);
+        done;
     }
+    if (obj_type != DOG_OBJ_BLOB) done;
+    if (BNULL(s->blob_stage) || BNULL(s->blob_offsets)) done;
+
+    u64 blen = u8csLen(blob);
+    if (blen == 0 || blen > u8bIdleLen(s->blob_stage)) done;
+
+    u32 off = (u32)u8bDataLen(s->blob_stage);
+    u8bFeed(s->blob_stage, blob);
+
+    u32 hashlet32 = 0;
+    if (sha) memcpy(&hashlet32, sha->data, sizeof(u32));
+    kv64 e = {.key = (u64)hashlet32,
+              .val = ((u64)off << 32) | (blen & 0xFFFFFFFFUL)};
+    kv64s tbl = {s->blob_offsets[0], s->blob_offsets[3]};
+    HASHkv64Put(tbl, &e);
     done;
 }

@@ -14,10 +14,6 @@
 //  — the baseline tree is re-walked on demand (POST/PATCH) through
 //  the URI abstraction (keeper for single-hash, graf for merge URIs),
 //  and the change-set is computed from the ULOG alone.
-//
-//  The path index is owned by keeper (`<store>/.dogs/paths.log`,
-//  shared across sniff/graf/spot).  SNIFFIntern / SNIFFPath / SNIFFCount
-//  are thin wrappers over KEEP's registry.
 
 #include "abc/BUF.h"
 #include "abc/INT.h"
@@ -67,20 +63,6 @@ ok64 SNIFFExec(cli *c);
 //  Verb + value-flag tables for CLIParse.
 extern char const *const SNIFF_VERBS[];
 extern char const SNIFF_VAL_FLAGS[];
-
-// --- Path registry (delegates to keeper) ---
-
-u32  SNIFFIntern(u8cs path);
-u32  SNIFFInternDir(u8cs path);
-ok64 SNIFFPath(u8csp out, u32 index);
-u32  SNIFFCount(void);
-u32  SNIFFRootIdx(void);
-
-fun b8 SNIFFIsDir(u32 index) {
-    u8cs p = {};
-    if (SNIFFPath(p, index) != OK) return NO;
-    return (!$empty(p) && *$last(p) == '/');
-}
 
 fun ok64 SNIFFFullpath(path8b out, u8cs reporoot, u8cs rel) {
     a_cstr(sep, "/");

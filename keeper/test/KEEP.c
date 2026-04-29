@@ -204,9 +204,9 @@ ok64 KEEPpackIncremental() {
     a_dup(u8c, tree_content, u8bData(tree_buf));
     sha1 tree_sha = {};
     //  Feed tree first (type 2), then blob (type 3) — monotone order.
-    u8csc nopath_t = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, tree_content, nopath_t, 0, &tree_sha);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_TREE, tree_content, 0, &tree_sha);
     sha1 blob_sha2 = {};
-    u8csc nopath_b = {NULL,NULL}; call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_content, nopath_b, 0, &blob_sha2);
+    call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, blob_content, 0, &blob_sha2);
     want(memcmp(blob_sha.data, blob_sha2.data, 20) == 0);
 
     // Verify tree SHA matches git: 68aba62e560c0ebc3396e8ae9335232cd93a3f60

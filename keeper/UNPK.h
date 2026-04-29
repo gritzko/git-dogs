@@ -36,15 +36,12 @@ con ok64 UNPKBADFMT  = 0x7976542ca34f59d;
 con ok64 UNPKNOROOM  = 0x7976545d86d8616;
 
 //  Per-object event delivered during UNPKIndex if `emit` is non-NULL.
-//  `path` is derived from tree walks within the pack: for a blob, the
-//  path at which its containing tree named it; for a tree, the path
-//  of the tree itself (prefix used for its children); for a commit,
-//  empty.  When a path cannot be derived (e.g., non-standard pack
-//  ordering, blob whose tree is not in this pack), `path` is empty.
 //  `content` points into keeper's scratch (k->buf1) and is valid only
-//  for the duration of the callback.
+//  for the duration of the callback.  Paths are not derived here —
+//  consumers that need a path (e.g. spot) parse trees themselves at
+//  Close-pass time.
 typedef void (*unpk_emit_fn)(void *ctx, u8 type, sha1 const *sha,
-                              u8csc path, u8cs content);
+                              u8cs content);
 
 typedef struct {
     u8cs pack;        // log-mapped pack bytes ([pack[0]..pack[1]))
@@ -63,8 +60,6 @@ typedef struct {
     u32  skipped;     // inflate / delta-apply / chain-depth failures
     u32  cross;       // resolved via thin-pack fallback
     u32  base_count;  // non-delta objects
-    u32  paths_known; // objects for which the path map yielded a path
-    u32  paths_empty; // objects emitted with an empty path fallback
 } unpk_stats;
 
 //  Index one pack.  Entries appended to `out` (unsorted, undeduped).

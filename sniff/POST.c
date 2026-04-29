@@ -766,8 +766,7 @@ static ok64 post_build_tree(u8b leaves, u32 lo, u32 hi, u8cs prefix,
 
 static ok64 post_feed_empty_tree(keeper *k, keep_pack *p, sha1 *out) {
     u8cs empty = {};
-    u8csc nopath = {NULL, NULL};
-    return KEEPPackFeed(k, p, DOG_OBJ_TREE, empty, nopath, 0, out);
+    return KEEPPackFeed(k, p, DOG_OBJ_TREE, empty, 0, out);
 }
 
 // --- Resolve parent commit sha for the commit body ---
@@ -1500,9 +1499,8 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
     u8bFeed1(com, '\n');
 
     //  11. Feed pack: commit first.
-    u8csc nopath = {NULL, NULL};
     a_dup(u8c, com_data, u8bData(com));
-    ok64 fo = KEEPPackFeed(k, &p, DOG_OBJ_COMMIT, com_data, nopath, 0, sha_out);
+    ok64 fo = KEEPPackFeed(k, &p, DOG_OBJ_COMMIT, com_data, 0, sha_out);
     u8bFree(com);
     if (fo != OK) {
         KEEPPackClose(k, &p);
@@ -1522,7 +1520,7 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
             u8cs tbody = {walk, walk + tlen};
             sha1 tsha_dummy = {};
             ok64 to = KEEPPackFeed(k, &p, DOG_OBJ_TREE, tbody,
-                                   nopath, 0, &tsha_dummy);
+                                   0, &tsha_dummy);
             walk += tlen;
             if (to != OK) {
                 KEEPPackClose(k, &p);
@@ -1581,11 +1579,10 @@ ok64 POSTCommit(u8cs reporoot, u8cs target_branch,
                 body[1] = u8bIdleHead(mapped);
             }
 
-            u8csc bpath = {path[0], path[1]};
             u64 base_hl = has_old ? WHIFFHashlet60(&old_sha) : 0;
             sha1 bsha = {};
             ok64 bo = KEEPPackFeed(k, &p, DOG_OBJ_BLOB, body,
-                                   bpath, base_hl, &bsha);
+                                   base_hl, &bsha);
             if (mapped) FILEUnMap(mapped);
             if (u8bOK(body_buf)) u8bFree(body_buf);
             if (bo != OK) {
