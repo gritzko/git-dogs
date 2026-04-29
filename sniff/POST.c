@@ -512,7 +512,14 @@ static ok64 post_classify_step(ulogreccp recs, u32 n, void *vctx) {
 
     //  mtime unknown.
     if (src_base) {
-        //  Tracked + dirty: hash to determine real change.
+        //  Tracked + dirty.  In selective mode (any explicit put/delete
+        //  in scope) we ignore — only files named by a put row land in
+        //  the commit, plus deletes drop their targets.  Implicit mode
+        //  (commit-all): hash and rewrite.
+        if (c->any_pd) {
+            return post_emit_decision(c, c->v_keep, path, base_mode,
+                                      NULL, &base_sha);
+        }
         sha1 disk_sha = {};
         if (post_hash_path(c->reporoot, path, wt_mode, &disk_sha) != OK)
             return OK;
