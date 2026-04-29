@@ -12,7 +12,7 @@
 #  Requires passwordless ssh to localhost (same as POSTtest did).
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 BE="$BIN/be"
 KEEPER="$BIN/keeper"

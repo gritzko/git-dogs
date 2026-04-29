@@ -12,7 +12,7 @@
 #
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 BE="$BIN/be"
 export PATH="$BIN:$PATH"

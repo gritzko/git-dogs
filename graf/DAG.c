@@ -65,7 +65,7 @@ static u64 dag_obj_hashlet(u8 obj_type, sha1 const *sha, u8cs body) {
 // Bx.h already instantiated via dog/WHIFF.h.
 #define X(M, name) M##wh128##name
 #include "abc/QSORTx.h"
-#include "abc/MSETx.h"
+#include "abc/HITx.h"
 #include "abc/HASHx.h"
 #undef X
 
@@ -430,7 +430,7 @@ static ok64 dag_compact(u8cs dagdir) {
     if (st.n < 2) { dag_stack_close(&st); done; }
 
     wh128css stack = {st.runs, st.runs + st.n};
-    if (MSETwh128IsCompact(stack)) { dag_stack_close(&st); done; }
+    if (HITwh128IsCompact(stack)) { dag_stack_close(&st); done; }
 
     size_t total = 0;
     for (u32 i = 0; i < st.n; i++)
@@ -439,32 +439,24 @@ static ok64 dag_compact(u8cs dagdir) {
     Bwh128 cbuf = {};
     call(wh128bAllocate, cbuf, total);
 
-    size_t n = st.n;
-    size_t m = 1;
-    size_t mtotal = (size_t)(st.runs[n - 1][1] - st.runs[n - 1][0]);
-    while (m < n && mtotal * 8 > (size_t)(st.runs[n - 1 - m][1] - st.runs[n - 1 - m][0])) {
-        mtotal += (size_t)(st.runs[n - 1 - m][1] - st.runs[n - 1 - m][0]);
-        m++;
-    }
+    //  HITCompact merges the youngest violators in-place against the
+    //  stack, advancing `into` past the new run.  We need the merged
+    //  slice for the .idx write; capture `into[0]` before the call so
+    //  the [base, into[0]) range identifies the merged run after.
+    wh128 *base = cbuf[0];
+    wh128s into = {cbuf[0], cbuf[3]};
+    size_t before_len = $len(stack);
+    call(HITwh128Compact, stack, into);
+    size_t m = before_len - $len(stack) + 1;
     if (m < 2) {
         wh128bFree(cbuf);
         dag_stack_close(&st);
         done;
     }
 
-    wh128cs subruns[MSET_MAX_LEVELS];
-    for (size_t i = 0; i < m; i++) {
-        subruns[i][0] = st.runs[n - m + i][0];
-        subruns[i][1] = st.runs[n - m + i][1];
-    }
-    wh128css sub = {subruns, subruns + m};
-    MSETwh128Start(sub);
-    wh128s out = {cbuf[0], cbuf[3]};
-    MSETwh128Merge(out, sub);
-
     u64 seqno = 0;
     call(dag_next_seqno, &seqno, dagdir);
-    wh128cs merged = {(wh128cp)cbuf[0], (wh128cp)(out[0])};
+    wh128cs merged = {(wh128cp)base, (wh128cp)(into[0])};
     call(dag_index_write, dagdir, merged, seqno);
 
     // Collect and unlink the old files (skip the one we just wrote).

@@ -37,6 +37,7 @@ void        *keep_indexer_ctx  = NULL;
 // wh128 templates for LSM index runs and waiter buffers
 #define X(M, name) M##wh128##name
 #include "abc/QSORTx.h"
+#include "abc/HITx.h"
 #undef X
 
 // kv64 templates used by the upload-pack negotiation below:
@@ -68,10 +69,31 @@ static ok64 keep_resolve_dir(path8b out, home *h) {
     done;
 }
 
-// --- Scan helper: find and mmap files matching extension ---
+//  Parse the leading KEEP_SEQNO_W hex chars of a filename into a u32.
+//  Returns 0 on bad input — files we wrote always have valid hex
+//  prefixes since keep_leaf_name produces them.
+static u32 keep_parse_seqno(char const *name) {
+    u32 v = 0;
+    for (u32 i = 0; i < KEEP_SEQNO_W; i++) {
+        u8 c = (u8)name[i];
+        u32 d;
+        if      (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return 0;
+        v = (v << 4) | d;
+    }
+    return v;
+}
 
+// --- Scan helper: find and mmap files matching extension ---
+//
+// `seqnos` is optional: when non-NULL, parsed seqnos are appended in
+// the same order as `maps` so callers can correlate run i with the
+// `<seqno>.idx` filename it came from without re-listing the dir.
 static ok64 keep_scan_dir(u8csc dir, char const *ext,
-                          u8bp *maps, u32 *count, u32 max) {
+                          u8bp *maps, u32 *count, u32 max,
+                          u32 *seqnos) {
     a_path(dpat);
     PATHu8bFeed(dpat, dir);
     DIR *dp = opendir((char *)u8bDataHead(dpat));
@@ -106,6 +128,7 @@ static ok64 keep_scan_dir(u8csc dir, char const *ext,
         u8bp mapped = NULL;
         if (FILEMapRO(&mapped, $path(fpath)) == OK) {
             maps[*count] = mapped;
+            if (seqnos) seqnos[*count] = keep_parse_seqno(names[i]);
             (*count)++;
         }
     }
@@ -113,6 +136,7 @@ static ok64 keep_scan_dir(u8csc dir, char const *ext,
 }
 
 static ok64 keep_scan_packs(keeper *k, u8csc keepdir) {
+    sane(k);
     //  Lockless-reader invariant: scan idx BEFORE packs.  Writer
     //  publishes bytes-first then idx: any idx entry observed here
     //  points into a pack file that existed before we listed packs,
@@ -122,10 +146,13 @@ static ok64 keep_scan_packs(keeper *k, u8csc keepdir) {
     //  our mapping.
 
     u8bp idx_maps[KEEP_MAX_LEVELS] = {};
+    u32  idx_seqnos[KEEP_MAX_LEVELS] = {};
     u32 nidx = 0;
-    keep_scan_dir(keepdir, KEEP_IDX_EXT, idx_maps, &nidx, KEEP_MAX_LEVELS);
+    keep_scan_dir(keepdir, KEEP_IDX_EXT, idx_maps, &nidx, KEEP_MAX_LEVELS,
+                  idx_seqnos);
     keep_scan_dir(keepdir, KEEP_PACK_EXT,
-                  k->shards[0].packs, &k->shards[0].npacks, KEEP_MAX_FILES);
+                  k->shards[0].packs, &k->shards[0].npacks, KEEP_MAX_FILES,
+                  NULL);
 
     for (u32 i = 0; i < nidx && k->shards[0].nruns < KEEP_MAX_LEVELS; i++) {
         wh128cp base = (wh128cp)u8bDataHead(idx_maps[i]);
@@ -133,9 +160,11 @@ static ok64 keep_scan_packs(keeper *k, u8csc keepdir) {
         k->shards[0].runs[k->shards[0].nruns][0] = base;
         k->shards[0].runs[k->shards[0].nruns][1] = base + n;
         k->shards[0].run_maps[k->shards[0].nruns] = idx_maps[i];
+        u32 sq = idx_seqnos[i];
+        call(u32bPush, k->shards[0].run_seqnos, &sq);
         k->shards[0].nruns++;
     }
-    return OK;
+    done;
 }
 
 // --- Singleton ---
@@ -190,6 +219,7 @@ ok64 KEEPOpen(home *h, b8 rw) {
     //  feature-branch subdirs.
     k->nshards = 1;
     k->shards[0].lock_fd = -1;
+    call(u32bAllocate, k->shards[0].run_seqnos, KEEP_MAX_LEVELS);
     keep_is_rw = rw;
 
     a_path(dir);
@@ -249,10 +279,115 @@ ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob) {
 
 // --- Close ---
 
+static ok64 keep_idx_path(path8b out, u8csc kdir, u32 seqno);
+
+// --- Compaction: merge youngest LSM runs into one (1/8 size-tiered) ---
+//
+// Mirrors spot's CAPOCompact / graf's dag_compact, using HITwh128 as
+// the merge primitive.  Drains the merged content into a fresh
+// `<seqno>.idx` (atomic tmp→rename), unlinks the consumed source
+// files (identified by the parallel `run_seqnos` Bu32, no rescan),
+// swaps their mmaps for the new one in `shard.run_maps[]`.  No-op
+// when the stack already satisfies the 1/8 invariant.
+ok64 KEEPCompact(keeper *k) {
+    sane(k);
+    if (!keep_is_rw) done;
+    keeper_shard *sh = &k->shards[0];
+    if (sh->nruns < 2) done;
+
+    wh128css stack = {sh->runs, sh->runs + sh->nruns};
+    if (HITwh128IsCompact(stack)) done;
+
+    size_t total = 0;
+    for (u32 i = 0; i < sh->nruns; i++)
+        total += (size_t)(sh->runs[i][1] - sh->runs[i][0]);
+
+    Bwh128 cbuf = {};
+    call(wh128bAllocate, cbuf, total);
+
+    wh128 *base = cbuf[0];
+    wh128s into = {cbuf[0], cbuf[3]};
+    u32 before_n = sh->nruns;
+    call(HITwh128Compact, stack, into);
+    u32 after_n = (u32)$len(stack);
+    u32 m = before_n - after_n + 1;
+    if (m < 2) {
+        wh128bFree(cbuf);
+        done;
+    }
+
+    //  New seqno: 1 + max existing run seqno.  Don't reuse a value
+    //  still on disk even if we're about to unlink it, since live
+    //  readers may hold an open mapping under that inode.
+    u32 new_seqno = 1;
+    {
+        u32cp sb = (u32cp)sh->run_seqnos[1];
+        u32cp se = (u32cp)sh->run_seqnos[2];
+        for (u32cp p = sb; p < se; p++)
+            if (*p >= new_seqno) new_seqno = *p + 1;
+    }
+
+    a_path(kdir, u8bDataC(k->h->root), KEEP_DIR_S);
+
+    //  Write merged run atomically (tmp → rename).
+    a_pad(u8, idxpath, FILE_PATH_MAX_LEN);
+    call(keep_idx_path, idxpath, $path(kdir), new_seqno);
+    a_pad(u8, idxtmppath, FILE_PATH_MAX_LEN);
+    call(u8bFeed, idxtmppath, u8bDataC(idxpath));
+    a_cstr(tmpsuf, ".tmp");
+    call(u8bFeed, idxtmppath, tmpsuf);
+    call(PATHu8bTerm, idxtmppath);
+
+    {
+        int ifd = -1;
+        call(FILECreate, &ifd, $path(idxtmppath));
+        u8cs raw = {(u8cp)base, (u8cp)(into[0])};
+        call(FILEFeedAll, ifd, raw);
+        close(ifd);
+        call(FILERename, $path(idxtmppath), $path(idxpath));
+    }
+    wh128bFree(cbuf);
+
+    //  mmap the new file RO and swap in.
+    u8bp idx_map = NULL;
+    call(FILEMapRO, &idx_map, $path(idxpath));
+    wh128cp newbase = (wh128cp)u8bDataHead(idx_map);
+    u32 newlen = (u32)(u8bDataLen(idx_map) / sizeof(wh128));
+
+    //  Unmap the old m runs and unlink their .idx files (seqnos
+    //  recorded at scan / append time — no directory rescan).
+    u32cp seq_base = (u32cp)sh->run_seqnos[1];
+    for (u32 i = before_n - m; i < before_n; i++) {
+        if (sh->run_maps[i]) FILEUnMap(sh->run_maps[i]);
+        u32 sq = seq_base[i];
+        a_pad(u8, ulpath, FILE_PATH_MAX_LEN);
+        keep_idx_path(ulpath, $path(kdir), sq);
+        unlink((char *)u8bDataHead(ulpath));
+    }
+
+    //  Splice: position (before_n - m) carries the new merged run.
+    u32 slot = before_n - m;
+    sh->runs[slot][0] = newbase;
+    sh->runs[slot][1] = newbase + newlen;
+    sh->run_maps[slot] = idx_map;
+    for (u32 i = slot + 1; i < before_n; i++) {
+        memset(sh->runs[i], 0, sizeof(sh->runs[i]));
+        sh->run_maps[i] = NULL;
+    }
+    sh->nruns = slot + 1;
+
+    //  Trim the parallel seqnos buffer: replace the tail-m entries
+    //  with the single new seqno.
+    sh->run_seqnos[1][slot] = new_seqno;
+    sh->run_seqnos[2] = sh->run_seqnos[1] + slot + 1;
+    done;
+}
+
 ok64 KEEPClose(void) {
     sane(1);
     if (!keep_is_open()) return OK;
     keeper *k = &KEEP;
+    if (keep_is_rw) (void)KEEPCompact(k);
     for (u32 i = 0; i < k->shards[0].npacks; i++)
         if (k->shards[0].packs[i]) FILEUnMap(k->shards[0].packs[i]);
     for (u32 i = 0; i < k->shards[0].nruns; i++)
@@ -261,6 +396,7 @@ ok64 KEEPClose(void) {
     if (k->buf2[0]) u8bUnMap(k->buf2);
     if (k->buf3[0]) u8bUnMap(k->buf3);
     if (k->buf4[0]) u8bUnMap(k->buf4);
+    if (!BNULL(k->shards[0].run_seqnos)) u32bFree(k->shards[0].run_seqnos);
     if (k->shards[0].lock_fd >= 0) FILEClose(&k->shards[0].lock_fd);
     zerop(k);
     keep_is_rw = NO;
@@ -1172,11 +1308,16 @@ ok64 KEEPPackClose(keeper *k, keep_pack *p) {
     a_dup(wh128, sorted, wh128bData(p->entries));
     wh128sSort(sorted);
 
-    //  Index seqno is the per-close run counter, not file_id —
-    //  multiple packs appended to the same log file each get their
-    //  own .idx run (LSM).  Old runs remain mapped; the LSM reader
-    //  searches all of them.
-    u32 idx_seq = k->shards[0].nruns + 1;
+    //  Index seqno: 1 + max existing run seqno (gaps from prior
+    //  compactions are fine — we never reuse a value that's still
+    //  on disk, even if it's been unlinked, since live readers may
+    //  hold a mapping under the old inode).
+    u32 idx_seq = 1;
+    {
+        u32cp sb = (u32cp)k->shards[0].run_seqnos[1];
+        u32cp se = (u32cp)k->shards[0].run_seqnos[2];
+        for (u32cp p = sb; p < se; p++) if (*p >= idx_seq) idx_seq = *p + 1;
+    }
     a_pad(u8, idxpath, FILE_PATH_MAX_LEN);
     call(keep_idx_path, idxpath, $path(kdir), idx_seq);
 
@@ -1209,6 +1350,7 @@ ok64 KEEPPackClose(keeper *k, keep_pack *p) {
         k->shards[0].runs[k->shards[0].nruns][0] = base;
         k->shards[0].runs[k->shards[0].nruns][1] = base + n;
         k->shards[0].run_maps[k->shards[0].nruns] = imapped;
+        call(u32bPush, k->shards[0].run_seqnos, &idx_seq);
         k->shards[0].nruns++;
     }
 
@@ -1665,7 +1807,12 @@ ok64 KEEPIngestFile(keeper *k, u8csc bytes) {
     wh128sDedup(sorted);
     u64 nent = wh128sLen(sorted);
 
-    u32 idx_seq = k->shards[0].nruns + 1;
+    u32 idx_seq = 1;
+    {
+        u32cp sb = (u32cp)k->shards[0].run_seqnos[1];
+        u32cp se = (u32cp)k->shards[0].run_seqnos[2];
+        for (u32cp p = sb; p < se; p++) if (*p >= idx_seq) idx_seq = *p + 1;
+    }
     a_pad(u8, idxpath, FILE_PATH_MAX_LEN);
     call(keep_idx_path, idxpath, $path(kdir), idx_seq);
 
@@ -1693,6 +1840,7 @@ ok64 KEEPIngestFile(keeper *k, u8csc bytes) {
     k->shards[0].runs[k->shards[0].nruns][0] = base;
     k->shards[0].runs[k->shards[0].nruns][1] = base + n;
     k->shards[0].run_maps[k->shards[0].nruns] = idx_map;
+    call(u32bPush, k->shards[0].run_seqnos, &idx_seq);
     k->shards[0].nruns++;
 
     done;
@@ -2533,7 +2681,13 @@ got_pack:
             u32 nfinal = (u32)(sorted[1] - sorted[0]);
 
             a_path(kdir, u8bDataC(k->h->root), KEEP_DIR_S);
-            u32 idx_id = k->shards[0].nruns + 1;
+            u32 idx_id = 1;
+            {
+                u32cp sb = (u32cp)k->shards[0].run_seqnos[1];
+                u32cp se = (u32cp)k->shards[0].run_seqnos[2];
+                for (u32cp pp = sb; pp < se; pp++)
+                    if (*pp >= idx_id) idx_id = *pp + 1;
+            }
             a_pad(u8, idxpath, 1024);
             ok64 kpo = keep_idx_path(idxpath, $path(kdir), idx_id);
             if (kpo != OK) goto sync_fail;
@@ -2558,10 +2712,9 @@ got_pack:
                 k->shards[0].runs[k->shards[0].nruns][0] = base;
                 k->shards[0].runs[k->shards[0].nruns][1] = base + n;
                 k->shards[0].run_maps[k->shards[0].nruns] = mapped;
+                call(u32bPush, k->shards[0].run_seqnos, &idx_id);
                 k->shards[0].nruns++;
             }
-
-            // TODO: compact LSM if 1/8 invariant violated
         }
 
         wh128bFree(entries);

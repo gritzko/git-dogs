@@ -113,6 +113,7 @@ typedef struct {
     u32     npacks;
     wh128cs runs[KEEP_MAX_LEVELS];      // LSM index runs
     u8bp    run_maps[KEEP_MAX_LEVELS];
+    Bu32    run_seqnos;                 // `<seqno>.idx` per run, parallels runs[]
     u32     nruns;
 } keeper_shard;
 
@@ -171,6 +172,14 @@ ok64 KEEPExec(keeper *k, cli *c);
 //  the store.  Appends to the current pack log + records an index
 //  entry.  obj_type uses KEEP_OBJ_* below.
 ok64 KEEPUpdate(keeper *k, u8 obj_type, u8cs blob);
+
+//  Compact the LSM run stack to satisfy the 1/8 invariant — merges
+//  the youngest violators into one run, writes the merged `.idx`
+//  atomically, unlinks the consumed source files, swaps mmaps in
+//  the shard's `runs[]` / `run_maps[]`.  Invoked automatically from
+//  KEEPClose; safe no-op when the stack is already compact or open
+//  is read-only.
+ok64 KEEPCompact(keeper *k);
 
 //  Close and unmap everything.
 ok64 KEEPClose(void);

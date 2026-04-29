@@ -9,10 +9,10 @@
 set -e
 
 <<<<<<< HEAD
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 =======
-BIN=${DOG_BIN_DIR:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 >>>>>>> dogs-bro
 export PATH="$BIN:$PATH"
 

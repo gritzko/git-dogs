@@ -1,9 +1,14 @@
 #include "DOG.h"
 
+#include <dirent.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "abc/B.h"
+#include "abc/FILE.h"
 #include "abc/PRO.h"
+
+// kv32 buffer ops via Bx (instantiated in abc/KV.h).
 
 //  Known view-projector schemes (VERBS.md §"View projectors") with
 //  the dog that implements each.  Shared source of truth: DOGParseURI
@@ -295,4 +300,160 @@ ok64 DOGCanonURIFeed(u8bp out, urip u) {
         if (!u8csEmpty(u->fragment)) u8bFeed(out, u->fragment);
     }
     done;
+}
+
+// =============================================================
+// --- Puppies: stack of <seqno>.<ext> files ---
+// =============================================================
+
+//  Compose `<dir>/<10-RON64-seqno><ext>` into `out` (reset first).
+static ok64 dog_pup_path(path8b out, path8s dir, u32 seqno, u8cs ext) {
+    sane(u8bOK(out));
+    call(PATHu8bDup, out, dir);
+    a_pad(u8, name, DOG_PUP_SEQNO_W + 32);
+    call(RONu8sFeedPad, u8bIdle(name), (ok64)seqno, DOG_PUP_SEQNO_W);
+    ((u8 **)name)[2] += DOG_PUP_SEQNO_W;
+    call(u8bFeed, name, ext);
+    call(PATHu8bPush, out, u8bDataC(name));
+    done;
+}
+
+//  Parse "<10-RON64><ext>" filename → seqno; 0 on bad fmt.
+static u32 dog_pup_parse_seqno(char const *name, size_t nlen, u8cs ext) {
+    size_t elen = (size_t)$len(ext);
+    if (nlen != DOG_PUP_SEQNO_W + elen) return 0;
+    if (memcmp(name + DOG_PUP_SEQNO_W, ext[0], elen) != 0) return 0;
+    u8c const *p = (u8c const *)name;
+    ok64 v = 0;
+    if (RONutf8sDrain(&v, &p) != OK) return 0;
+    return (u32)v;
+}
+
+ok64 DOGPupOpenAll(kv32b pups, path8s dir, u8cs ext) {
+    sane(pups != NULL && $ok(dir) && $ok(ext));
+
+    a_path(dpat);
+    PATHu8bFeed(dpat, dir);
+    DIR *d = opendir((char *)u8bDataHead(dpat));
+    if (!d) done;  // empty stack — dir not yet created
+
+    char names[FILE_MAX_OPEN][DOG_PUP_SEQNO_W + 64];
+    u32 nfound = 0;
+    size_t elen = (size_t)$len(ext);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && nfound < FILE_MAX_OPEN) {
+        size_t nlen = strlen(e->d_name);
+        if (nlen != DOG_PUP_SEQNO_W + elen) continue;
+        if (memcmp(e->d_name + DOG_PUP_SEQNO_W, ext[0], elen) != 0) continue;
+        memcpy(names[nfound], e->d_name, nlen + 1);
+        nfound++;
+    }
+    closedir(d);
+
+    //  Sort lexicographically — name order matches seqno order since
+    //  `<seqno>` is fixed-width zero-padded RON64.
+    for (u32 i = 0; i + 1 < nfound; i++)
+        for (u32 j = i + 1; j < nfound; j++)
+            if (strcmp(names[i], names[j]) > 0) {
+                char t[DOG_PUP_SEQNO_W + 64];
+                memcpy(t, names[i], sizeof(t));
+                memcpy(names[i], names[j], sizeof(t));
+                memcpy(names[j], t, sizeof(t));
+            }
+
+    for (u32 i = 0; i < nfound; i++) {
+        u32 sq = dog_pup_parse_seqno(names[i], strlen(names[i]), ext);
+        u8cs fn = {(u8cp)names[i], (u8cp)names[i] + strlen(names[i])};
+        a_path(fpath, dir);
+        if (PATHu8bPush(fpath, fn) != OK) continue;
+        u8bp buf = NULL;
+        if (FILEMapRO(&buf, $path(fpath)) != OK) continue;
+        int fd = FILEBookedFD(buf);
+        if (fd < 0) { FILEUnMap(buf); continue; }
+        kv32 kv = {.key = sq, .val = (u32)fd};
+        call(kv32bPush, pups, &kv);
+    }
+    done;
+}
+
+ok64 DOGPupCreate(kv32b pups, path8s dir, u8cs ext, u8cs bytes) {
+    sane(pups != NULL && $ok(dir) && $ok(ext));
+
+    //  new_seqno = 1 + max(existing seqnos), default 1 for empty stack.
+    u32 new_seqno = 1;
+    {
+        kv32 const *db = (kv32 const *)kv32bDataHead(pups);
+        kv32 const *de = (kv32 const *)kv32bIdleHead(pups);
+        for (kv32 const *p = db; p < de; p++)
+            if (p->key >= new_seqno) new_seqno = p->key + 1;
+    }
+
+    a_path(idxpath);
+    call(dog_pup_path, idxpath, dir, new_seqno, ext);
+    a_path(tmppath);
+    call(dog_pup_path, tmppath, dir, new_seqno, ext);
+    a_cstr(tmpsuf, ".tmp");
+    call(u8bFeed, tmppath, tmpsuf);
+    call(PATHu8bTerm, tmppath);
+
+    int wfd = -1;
+    call(FILECreate, &wfd, $path(tmppath));
+    if (wfd >= 0) {
+        FILEFeedAll(wfd, bytes);
+        close(wfd);
+    }
+    call(FILERename, $path(tmppath), $path(idxpath));
+
+    u8bp buf = NULL;
+    call(FILEMapRO, &buf, $path(idxpath));
+    int fd = FILEBookedFD(buf);
+    if (fd < 0) { FILEUnMap(buf); return DOGPUPFAIL; }
+    kv32 kv = {.key = new_seqno, .val = (u32)fd};
+    call(kv32bPush, pups, &kv);
+    done;
+}
+
+ok64 DOGPupThinTail(kv32b pups, path8s dir, u8cs ext, u32 m) {
+    sane(pups != NULL && $ok(dir) && $ok(ext));
+    u32 n = (u32)kv32bDataLen(pups);
+    if (m > n) m = n;
+    if (m == 0) done;
+    kv32 *base = (kv32 *)kv32bDataHead(pups);
+    for (u32 i = n - m; i < n; i++) {
+        u32 fd = base[i].val;
+        u32 sq = base[i].key;
+        u8bp slot = FILE_WANT_BUFS[fd];
+        if (slot && slot[0]) FILEUnMap(slot);
+        a_path(ulpath);
+        dog_pup_path(ulpath, dir, sq, ext);
+        unlink((char *)u8bDataHead(ulpath));
+    }
+    //  Trim data end back by m records.  pups[2] is data end.
+    ((kv32 **)pups)[2] = base + (n - m);
+    done;
+}
+
+ok64 DOGPupClose(kv32b pups) {
+    sane(pups != NULL);
+    if (BNULL(pups)) done;
+    kv32 *base = (kv32 *)kv32bDataHead(pups);
+    u32 n = (u32)kv32bDataLen(pups);
+    for (u32 i = 0; i < n; i++) {
+        u32 fd = base[i].val;
+        u8bp slot = FILE_WANT_BUFS[fd];
+        if (slot && slot[0]) FILEUnMap(slot);
+    }
+    kv32bFree(pups);
+    done;
+}
+
+void DOGPupData(u8csp out, kv32b pups, u32 i) {
+    out[0] = NULL; out[1] = NULL;
+    if (i >= kv32bDataLen(pups)) return;
+    kv32 *base = (kv32 *)kv32bDataHead(pups);
+    u32 fd = base[i].val;
+    u8bp slot = FILE_WANT_BUFS[fd];
+    if (!slot || !slot[0]) return;
+    out[0] = slot[0];
+    out[1] = slot[2];
 }

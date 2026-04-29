@@ -63,6 +63,14 @@ fun b8 wh128Z(wh128 const *a, wh128 const *b) {
 #include "abc/Bx.h"
 #undef X
 
+//  Slice-swap for wh128cs (= wh128 const *[2]).  Required by HITx.h;
+//  array-typed slices can't go through Sx.h's generic Swap.
+fun void wh128csSwap(wh128cs *a, wh128cs *b) {
+    wh128c *t0 = (*a)[0], *t1 = (*a)[1];
+    (*a)[0] = (*b)[0]; (*a)[1] = (*b)[1];
+    (*b)[0] = t0;      (*b)[1] = t1;
+}
+
 // --- SHA-1 hashlet helpers ---
 //
 // Two widths:

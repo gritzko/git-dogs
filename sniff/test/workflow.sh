@@ -19,7 +19,7 @@
 #
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 SNIFF="$BIN/sniff"
 KEEPER="$BIN/keeper"
 

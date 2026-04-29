@@ -9,7 +9,7 @@
 #
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 BIN=$(cd "$BIN" && pwd)
 export PATH="$BIN:$PATH"
 #  Resolve `be` once to a fully-qualified path to rule out lookup oddities.

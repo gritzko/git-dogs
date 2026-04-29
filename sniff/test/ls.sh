@@ -5,7 +5,7 @@
 #  fall through to a destructive sniff-get checkout.
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(dirname "$(command -v be)")}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=0"
 

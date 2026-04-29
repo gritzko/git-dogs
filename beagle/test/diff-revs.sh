@@ -16,7 +16,7 @@
 #
 set -eu
 
-BIN=${DOG_BIN_DIR:-$(cd "$(dirname "$0")/../../build-debug/bin" && pwd)}
+BIN=${BIN:-$(dirname "$(command -v be)")}
 export PATH="$BIN:$PATH"
 
 TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}

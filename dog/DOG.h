@@ -1,6 +1,7 @@
 #ifndef DOG_DOG_H
 #define DOG_DOG_H
 
+#include "abc/KV.h"
 #include "abc/PATH.h"
 #include "abc/RAP.h"
 #include "abc/RON.h"
@@ -128,6 +129,56 @@ ok64 DOGCanonURI(urip u);
 // round-trip.  This is the single entry point every ULOG/REFS
 // writer goes through.
 ok64 DOGCanonURIFeed(u8bp out, urip u);
+
+// --- Puppies: stack of `<seqno>.<ext>` files ---
+//
+// A "puppy" is one git-pack-style file (mmap'd, contents are bytes
+// of fixed-size sorted records — wh128, u64, etc.).  Keeper's pack
+// indexes, graf's DAG runs, and spot's posting runs are all stacks
+// of puppies under their respective `.dogs/<dog>/` dirs, named
+// `<seqno>.<ext>` where `<seqno>` is a 10-char zero-padded RON64
+// integer and `<ext>` is dog-specific (`.keeper.idx`, `.graf.idx`,
+// `.spot.idx`, `.keeper` for raw pack data).
+//
+// State is one `kv32b`: each entry is `(key=seqno, val=fd)` with the
+// mmap'd bytes living in `FILE_WANT_BUFS[fd]`.  Path and ext are
+// caller-owned and re-passed per call so the same primitive serves
+// multiple stacks per dog (keeper has both `.keeper` packs and
+// `.keeper.idx` runs).  The typed merge during compaction stays
+// caller-side (HIT*Compact); this API only does fs-level housekeeping.
+#define DOG_PUP_SEQNO_W 10
+
+con ok64 DOGPUPFAIL = 0xd680e3ca495;
+
+// Scan `dir` for files matching `<10-RON64><ext>`, sort by seqno,
+// FILEMapRO each, push (seqno, fd) into `pups`.  Empty dir → OK with
+// pups left empty.  Caller must have allocated `pups` first.
+ok64 DOGPupOpenAll(kv32b pups, path8s dir, u8cs ext);
+
+// Atomically write `bytes` to `<max(seqno)+1>.<ext>` (tmp+rename),
+// FILEMapRO, push (new_seqno, fd) onto `pups`.
+ok64 DOGPupCreate(kv32b pups, path8s dir, u8cs ext, u8cs bytes);
+
+// Unmap and unlink the youngest `m` puppies; trim `pups` by `m`.
+ok64 DOGPupThinTail(kv32b pups, path8s dir, u8cs ext, u32 m);
+
+// Unmap every puppy and free `pups` itself.
+ok64 DOGPupClose(kv32b pups);
+
+// Number of live puppies in the stack.
+fun u32 DOGPupCount(kv32b pups) { return (u32)kv32bDataLen(pups); }
+
+// Byte slice of the i-th puppy's contents (lookup via FILE_WANT_BUFS).
+// Writes [data_start, data_end) into `out`; out becomes empty when
+// `i` is out-of-range or the file's mapping has been released.
+void DOGPupData(u8csp out, kv32b pups, u32 i);
+
+// Seqno of the i-th puppy.  Returns 0 when out-of-range.
+fun u32 DOGPupSeqno(kv32b pups, u32 i) {
+    if (i >= kv32bDataLen(pups)) return 0;
+    kv32 const *base = (kv32 const *)kv32bDataHead(pups);
+    return base[i].key;
+}
 
 // Classify a CLI arg: parse it as a URI, and when the parse is
 // degenerate (bare token, no structure), back-fill the URI's `query`

@@ -368,12 +368,7 @@ ok64 CAPOCompact(u8csc dir) {
     call(CAPOStackOpen, stack, mmaps, &nfiles, dir);
     stack[1] = stack[0] + nfiles;
 
-    // Check 1/8 LSM invariant
-    b8 is_compact = YES;
-    for (u32 i = 0; i + 1 < nfiles; i++) {
-        if ($len(runs[i + 1]) * 8 > $len(runs[i])) { is_compact = NO; break; }
-    }
-    if (nfiles < 2 || is_compact) {
+    if (nfiles < 2 || HITu64IsCompact(stack)) {
         CAPOStackClose(mmaps, nfiles);
         done;
     }
@@ -383,33 +378,20 @@ ok64 CAPOCompact(u8csc dir) {
 
     Bu64 cbuf = {};
     call(u64bAlloc, cbuf, total);
+    u64 *base = cbuf[0];
     u64s into = {cbuf[0], cbuf[3]};
-
-    size_t n = $len(stack);
-    size_t m = 1;
-    size_t mtotal = $len(stack[0][n - 1]);
-    while (m < n && mtotal * 8 > $len(stack[0][n - 1 - m])) {
-        mtotal += $len(stack[0][n - 1 - m]);
-        m++;
-    }
+    size_t before_len = $len(stack);
+    call(HITu64Compact, stack, into);
+    size_t m = before_len - $len(stack) + 1;
     if (m < 2) {
         u64bFree(cbuf);
         CAPOStackClose(mmaps, nfiles);
         done;
     }
 
-    // Merge youngest m runs using HIT
-    {
-        u64css sub = {stack[0] + (n - m), stack[0] + n};
-        HITu64Start(sub);
-        u64p out = into[0];
-        HITu64Merge(sub, &out);
-        into[0] = out;
-    }
-
     u64 seqno = 0;
     call(CAPONextSeqno, &seqno, dir);
-    u64cs merged = {(u64cp)cbuf[0], (u64cp)(into[0])};
+    u64cs merged = {(u64cp)base, (u64cp)(into[0])};
     call(CAPOIndexWrite, dir, merged, seqno);
 
     char fnames[CAPO_MAX_LEVELS][64];
