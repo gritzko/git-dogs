@@ -184,11 +184,21 @@ static ok64 keeper_remote_uri(keeper *k, uri *g, u8b out, u8b rarena_out) {
     if (!u8csEmpty(g->authority)) {
         uri resolved = {};
         a_dup(u8c, in_uri, g->data);
-        if (REFSResolve(&resolved, rarena_out, $path(keepdir), in_uri) == OK
-            && !u8csEmpty(resolved.host)) {
+        ok64 rr = REFSResolve(&resolved, rarena_out, $path(keepdir), in_uri);
+        if (rr == OK && !u8csEmpty(resolved.host)) {
             if (!u8csEmpty(resolved.scheme)) u8csMv(rscheme, resolved.scheme);
             u8csMv(rhost, resolved.host);
             if (!u8csEmpty(resolved.path))   u8csMv(rpath, resolved.path);
+        } else if (u8csEmpty(rscheme) && u8csEmpty(rpath)) {
+            //  Alias miss on a bare `//host` URI with no in-place
+            //  transport — the user named a remote that's not
+            //  registered.  Emit a friendly hint instead of letting
+            //  wcli_spawn bail later with a cryptic ENOENT/empty-path.
+            fprintf(stderr,
+                "keeper: unknown remote //%.*s — register first with "
+                "`be get scheme://host/path?ref`, or pass a full URL\n",
+                (int)$len(rhost), (char const *)rhost[0]);
+            return KEEPNONE;
         }
     }
 

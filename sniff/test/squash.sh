@@ -9,16 +9,18 @@
 #       commits (modify a, add c).
 #    4. Switch back to trunk; make a concurrent commit (modify b).
 #    5. From trunk: `sniff patch ?feat` does a 3-way merge
-#       (ours=trunk tip, theirs=feat tip, lca=initial).
+#       (ours=trunk tip, theirs=feat tip,
+#        base=tree(arg.fork_commit)=LCA(parent_tip, theirs)).
 #    6. `sniff post -m "squash feat"` lands the merged wt as ONE new
 #       commit on trunk whose parent is trunk's concurrent tip.
+#       Per VERBS.md §PATCH and Invariant 2 the commit is single-
+#       parent — provenance from feat is erased.
 #
 #  Verifies:
 #    * The squash commit includes every expected file (a modified by
 #      feat, b modified by trunk, c added by feat).
-#    * The squash commit's parent is master's concurrent tip, not the
-#      base — i.e. trunk history stays linear and we haven't lost the
-#      concurrent work.
+#    * The squash commit has exactly ONE parent (trunk's concurrent
+#      tip) — history-erased absorb, not a multi-parent merge.
 #    * Master's REFS advances to the new squash commit.
 #
 #  Run: BIN=build-debug/bin sh sniff/test/squash.sh
@@ -158,20 +160,18 @@ TRUNK_REF=$(ref_tip "?")
     || fail "trunk not advanced to squash ($TRUNK_REF vs $SQUASH)"
 note "trunk -> $SQUASH"
 
-#  History check: squash's first parent must be trunk's concurrent
-#  tip, and the second parent must be the feat tip the PATCH brought
-#  in (.sniff `patch` row → POST drained).
+#  History check: per VERBS.md §PATCH the squash is single-parent.
+#  Its only parent must be trunk's concurrent tip.  feat's tip
+#  contributed to the merged tree but is NOT recorded as a parent —
+#  provenance is erased at PATCH time.
 SQUASH_PARENTS=$(parents_of "$SQUASH")
 SQUASH_NPAR=$(echo "$SQUASH_PARENTS" | wc -l)
-[ "$SQUASH_NPAR" = "2" ] \
-    || fail "squash has $SQUASH_NPAR parents, expected 2 (PATCH+POST)"
+[ "$SQUASH_NPAR" = "1" ] \
+    || fail "squash has $SQUASH_NPAR parents, expected 1 (single-parent)"
 SQUASH_P1=$(echo "$SQUASH_PARENTS" | sed -n '1p')
-SQUASH_P2=$(echo "$SQUASH_PARENTS" | sed -n '2p')
 [ "$SQUASH_P1" = "$TRUNK1" ] \
-    || fail "squash 1st parent is $SQUASH_P1, expected TRUNK1=$TRUNK1"
-[ "$SQUASH_P2" = "$FEAT2" ] \
-    || fail "squash 2nd parent is $SQUASH_P2, expected FEAT2=$FEAT2"
-note "squash parents = TRUNK1, FEAT2 (multi-parent merge commit)"
+    || fail "squash parent is $SQUASH_P1, expected TRUNK1=$TRUNK1"
+note "squash parent = TRUNK1 (single-parent absorb, history erased)"
 
 #  A fresh checkout of the squash tip should materialise the merged
 #  tree (a=feat, b=trunk, c=feat).

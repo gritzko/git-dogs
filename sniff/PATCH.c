@@ -1,12 +1,21 @@
 //  PATCH: 3-way worktree merge via graf.
 //
 //  See PATCH.h for the public surface.  Implementation walks three
-//  trees (lca, ours, theirs) in tandem by fetching tree bytes via
+//  trees (fork, ours, theirs) in tandem by fetching tree bytes via
 //  graf for each directory level, classifies every leaf path by
-//  the {lca, ours, theirs} sha triple, and applies a worktree
+//  the {fork, ours, theirs} sha triple, and applies a worktree
 //  action.  Merged bytes come from `GRAFGet <path>?<ours>&<theirs>`;
 //  pass-through bytes come from `GRAFGet <path>?<theirs>`.  Sniff
 //  never reads keeper directly here.
+//
+//  Per VERBS.md §PATCH and Invariant 2, PATCH absorbs the target
+//  branch's full (fork_commit..tip) stack into cur's wt as a single
+//  squash with `base = tree(arg.fork_commit)`.  `arg.fork_commit` is
+//  the LCA of the target's parent-branch tip and the target's tip —
+//  the commit on the parent branch where the target was forked.
+//  Provenance is erased: the resulting `patch` row records ours as
+//  the wt's tip and leaves the baseline single-tip; no `&<theirs>`
+//  chain is appended.  The next POST emits a single-parent commit.
 //
 #include "PATCH.h"
 
@@ -19,6 +28,7 @@
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "abc/URI.h"
+#include "dog/QURY.h"
 #include "dog/WHIFF.h"
 #include "graf/GRAF.h"
 #include "keeper/GIT.h"
@@ -267,11 +277,13 @@ static b8 has_conflict_marker(u8cs bytes) {
 // --- Per-level walk ------------------------------------------------
 
 //  Apply the patch recursively.  `dir_path` is the current subtree's
-//  repo-relative path (empty at the root).
+//  repo-relative path (empty at the root).  `fork` is the merge base
+//  — `tree(arg.fork_commit)` per VERBS.md §PATCH, computed by the
+//  caller as `LCA(arg_parent_tip, thr)`.
 static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
-                       sha1 const *lca, sha1 const *our, sha1 const *thr,
+                       sha1 const *fork, sha1 const *our, sha1 const *thr,
                        patch_stats *st) {
-    sane(lca && our && thr && st);
+    sane(fork && our && thr && st);
 
     Bu8 lbuf = {}, obuf = {}, tbuf = {};
     call(u8bAllocate, lbuf, PATCH_TREE_BUF);
@@ -280,7 +292,7 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
 
     //  Missing-at-commit is not fatal — the dir just didn't exist
     //  on that side, we treat its entry set as empty.
-    (void)fetch_tree(lbuf, dir_path, lca);
+    (void)fetch_tree(lbuf, dir_path, fork);
     (void)fetch_tree(obuf, dir_path, our);
     (void)fetch_tree(tbuf, dir_path, thr);
 
@@ -427,7 +439,7 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
             (void)fetch_merge(mbuf, childpath, our, thr);
             a_dup(u8c, bytes, u8bData(mbuf));
             b8 conflict = has_conflict_marker(bytes);
-            //  Write result using theirs' mode when ours == lca mode,
+            //  Write result using theirs' mode when ours == fork mode,
             //  else ours' mode.  MVP: always ours' mode.
             ok64 wo = write_blob(reporoot, childpath,
                                  o->mode, bytes);
@@ -618,6 +630,97 @@ static ok64 resolve_ours(sha1 *out) {
     done;
 }
 
+//  Pull the wt's current absolute branch path from the latest
+//  baseline row.  The query carries `<branch>&<sha>...` per dog/QURY;
+//  the first qref's body (when type==REF) is the branch path.  On
+//  detached / branchless baselines, returns OK with `*out_branch`
+//  empty (= trunk).
+static ok64 resolve_current_branch(u8cs out_branch) {
+    sane(out_branch);
+    out_branch[0] = NULL;
+    out_branch[1] = NULL;
+    ron60 bts = 0, bverb = 0;
+    uri bu = {};
+    ok64 br = SNIFFAtBaseline(&bts, &bverb, &bu);
+    if (br != OK) done;        //  no baseline → trunk
+    a_dup(u8c, q, bu.query);
+    while (!u8csEmpty(q)) {
+        qref spec = {};
+        if (QURYu8sDrain(q, &spec) != OK) break;
+        if (spec.type == QURY_NONE) {
+            if ($empty(q)) break;
+            continue;
+        }
+        if (spec.type == QURY_REF) {
+            //  body slice points into the ULOG mmap; same lifetime
+            //  as the caller's `bu` reference.  Slices live until
+            //  ULOGClose / ULOGTruncate (per SNIFFAtBaseline contract).
+            out_branch[0] = spec.body[0];
+            out_branch[1] = spec.body[1];
+            done;
+        }
+    }
+    done;
+}
+
+//  Compute `parent_path` from an absolute branch path: drop the last
+//  `/`-segment.  Empty input (trunk) yields empty (which the caller
+//  treats as "no parent").  Output slice points into the input.
+static void path_parent(u8cs out, u8cs abs_branch) {
+    out[0] = abs_branch[0];
+    out[1] = abs_branch[0];
+    if ($empty(abs_branch)) return;
+    u8cp last_slash = NULL;
+    $for(u8c, p, abs_branch) {
+        if (*p == '/') last_slash = p;
+    }
+    if (last_slash != NULL) out[1] = last_slash;
+}
+
+//  Resolve the target's parent-branch tip sha.  `target_query` is the
+//  raw query string PATCHApply received (no leading `?`); we parse it
+//  through dog/QURY against the wt's current branch to produce the
+//  target's absolute branch path, take its parent (`dirname`), and
+//  resolve_target on that.  Returns:
+//    OK        — `*out` is the parent tip sha
+//    PATCHURELT — target is a sha (no parent branch concept), or the
+//                 target is at the trunk (no parent), or the parent
+//                 branch can't be resolved.
+static ok64 resolve_parent_tip(sha1 *out, u8cs reporoot,
+                               u8cs target_query) {
+    sane(out);
+    qref qspec = {};
+    a_dup(u8c, q_in, target_query);
+    if (QURYu8sDrain(q_in, &qspec) != OK) return PATCHURELT;
+    if (qspec.type != QURY_REF) return PATCHURELT;  //  sha target
+
+    //  Build the target's absolute branch path.
+    u8cs current = {};
+    (void)resolve_current_branch(current);
+    a_pad(u8, abs_buf, 256);
+    if (QURYBuildAbsolute(abs_buf, &qspec, current) != OK)
+        return PATCHURELT;
+    a_dup(u8c, abs_path, u8bData(abs_buf));
+
+    //  Parent path = dirname(abs_path).  An empty abs_path means
+    //  the target IS the trunk — there is no parent branch to fork
+    //  from, so we cannot derive a fork commit.
+    if ($empty(abs_path)) return PATCHURELT;
+    u8cs parent = {};
+    path_parent(parent, abs_path);
+
+    //  Re-run resolve_target on the parent path's query.  parent
+    //  is a slice into abs_buf; copy it into a local pad so the
+    //  query bytes are stable for resolve_target's REFSResolve call.
+    //  When `parent` is empty (target is a top-level branch like
+    //  ?feat), the resolver looks up trunk's tip via the bare `?`
+    //  REFS key — which is exactly the target's parent.
+    a_pad(u8, par_buf, 256);
+    if (!$empty(parent)) call(u8bFeed, par_buf, parent);
+    a_dup(u8c, par_q, u8bData(par_buf));
+    return resolve_target(out, reporoot, par_q);
+}
+
 // --- Public entries -------------------------------------------------
 
 //  Worktree scan: any file whose mtime is not in the ULOG stamp-set
@@ -656,11 +759,29 @@ ok64 PATCHApply(u8cs reporoot, u8cs target_query) {
     sha1 thr_sha = {};
     call(resolve_target, &thr_sha, reporoot, target_query);
 
-    sha1 lca_sha = {};
-    call(GRAFLca, &lca_sha, &our_sha, &thr_sha);
+    //  Per VERBS.md §PATCH and Invariant 2: the merge base is
+    //  `tree(arg.fork_commit)`, the commit on arg's parent branch
+    //  where arg was forked.  We model that as
+    //  `LCA(arg_parent_tip, arg_tip)` — the most recent shared
+    //  ancestor between the parent branch and the target branch.
+    //  This excludes ancestor commits already in cur's history,
+    //  which a plain `LCA(our, theirs)` would otherwise re-revert.
+    sha1 parent_tip = {};
+    {
+        ok64 pr = resolve_parent_tip(&parent_tip, reporoot, target_query);
+        if (pr != OK) {
+            fprintf(stderr,
+                "sniff: patch: cannot resolve target's fork point "
+                "(target has no parent branch, or it is on trunk)\n");
+            fail(PATCHURELT);
+        }
+    }
+
+    sha1 fork_sha = {};
+    call(GRAFLca, &fork_sha, &parent_tip, &thr_sha);
     {
         u8 zero[20] = {};
-        if (memcmp(lca_sha.data, zero, 20) == 0) {
+        if (memcmp(fork_sha.data, zero, 20) == 0) {
             fprintf(stderr, "sniff: patch: no common ancestor\n");
             fail(PATCHURELT);
         }
@@ -679,47 +800,36 @@ ok64 PATCHApply(u8cs reporoot, u8cs target_query) {
     patch_stats st = { .ts = ts };
     u8cs root = {NULL, NULL};   // empty dir_path → root tree
     call(patch_walk, reporoot, root,
-         &lca_sha, &our_sha, &thr_sha, &st);
+         &fork_sha, &our_sha, &thr_sha, &st);
 
-    //  Append a `patch` ULOG row.  Canonical at-log shape is
-    //  `?<branch>#<curhash>` everywhere; `patch` extends the query
-    //  with `&<theirs>` so the next `post` (squash-merge) finds the
-    //  extra parent commit there.  Result: `?<branch>&<theirs>#<ours>`.
+    //  Append a `patch` ULOG row.  Per VERBS.md §PATCH (history
+    //  erased), the row records the wt's current tip in the
+    //  fragment and copies the prior baseline's query verbatim —
+    //  no `&<theirs>` chain.  The next POST emits a single-parent
+    //  commit; provenance from the absorbed branch is not preserved.
+    //  Per-file forensic tracking lives in stamp_wrote (the row's ts
+    //  matches every touched file's mtime).
     uri baseline_u = {};
     {
         ron60 bts = 0, bverb = 0;
         ok64 br = SNIFFAtBaseline(&bts, &bverb, &baseline_u);
         if (br != OK) {
-            //  No prior baseline: rare (you can't patch into a fresh
-            //  worktree), but be defensive — emit `?#<ours>` with no
-            //  branch and `theirs` chained below.
+            //  No prior baseline: rare (you can't patch into a
+            //  fresh worktree).  Be defensive — emit `?#<ours>`
+            //  with an empty query.
             memset(&baseline_u, 0, sizeof(baseline_u));
         }
     }
 
-    //  Build the query: copy prior baseline query (branch + any prior
-    //  `&<theirs>` chain), then append the new `&<theirs>`.
-    a_pad(u8, qbuf, 512);
-    if (!u8csEmpty(baseline_u.query)) {
-        u8cs oldq = {baseline_u.query[0], baseline_u.query[1]};
-        u8bFeed(qbuf, oldq);
-    }
-    u8bFeed1(qbuf, '&');
-    a_pad(u8, thex, 40);
-    a_rawc(tsha, thr_sha);
-    HEXu8sFeedSome(thex_idle, tsha);
-    u8bFeed(qbuf, u8bDataC(thex));
-
-    //  Fragment carries `ours` — the current tree the wt is on.
+    //  Fragment carries `ours` — the wt's current tip.
     a_pad(u8, ohex, 40);
     a_rawc(osha, our_sha);
     HEXu8sFeedSome(ohex_idle, osha);
 
     uri urow = {};
-    {
-        a_dup(u8c, q, u8bData(qbuf));
-        urow.query[0] = q[0];
-        urow.query[1] = q[1];
+    if (!u8csEmpty(baseline_u.query)) {
+        urow.query[0] = baseline_u.query[0];
+        urow.query[1] = baseline_u.query[1];
     }
     {
         a_dup(u8c, h, u8bDataC(ohex));

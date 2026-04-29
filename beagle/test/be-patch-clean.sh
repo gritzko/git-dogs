@@ -1,7 +1,8 @@
 #!/bin/sh
-#  be-patch-clean.sh — patch a sibling branch into trunk.  PATCH
-#  appends one `patch` row carrying the source tip; subsequent POST
-#  drains it into a real multi-parent commit.
+#  be-patch-clean.sh — patch a sibling branch into trunk.  Per
+#  VERBS.md §PATCH and Invariant 2 (linear branches, single-parent
+#  commits), PATCH erases provenance: the baseline stays single-tip
+#  and the next POST emits a single-parent commit on cur.
 
 . "$(dirname "$0")/verbcheck.sh"
 . "$(dirname "$0")/setup-primitives.sh"
@@ -31,34 +32,35 @@ vc_snapshot after_patch
 
 vc_assert_exit 0
 vc_assert_appended sniff "^patch	" before after_patch
-#  After PATCH, baseline.patch_parents should be 1 (one extra parent
-#  recorded in the query).
+#  Per spec, PATCH leaves the baseline single-tip — no `&<theirs>`
+#  appended, so patch_parents (= number of `&` in baseline query)
+#  stays at 0.  Provenance is erased.
 b=$(vc_section after_patch baseline)
 pp=$(printf '%s\n' "$b" | awk -F= '$1=="patch_parents"{print $2}')
-[ "$pp" = "1" ] || vc_fail "patch_parents=$pp (want 1)"
-vc_note ".sniff baseline now has 1 patch parent"
+[ "$pp" = "0" ] || vc_fail "patch_parents=$pp (want 0; PATCH erases provenance)"
+vc_note ".sniff baseline single-tip after PATCH (history erased)"
 
-vc_step "be post merge feat — drain the patch parent into a real commit"
+vc_step "be post merge feat — emit a single-parent commit on cur"
 vc_run merge "$BE" post merge feat
 
 vc_snapshot after_post
 
 vc_assert_exit 0
 
-#  Verify the new commit has 2 parents.  Latest post row's fragment
-#  is the new commit sha; query the keeper.
+#  Verify the new commit has exactly 1 parent (cur's prior tip).
+#  Per VERBS.md §PATCH, PATCH never produces a merge commit.
 SQUASH=$(vc_section after_post sniff | awk '$1=="post"{last=$2} END{
     h=last; sub(/^[^#]*#/, "", h); print h
 }')
 PARENTS=$(keeper get ".#$SQUASH" 2>/dev/null | awk '/^parent / {print $2}' | wc -l)
-[ "$PARENTS" = "2" ] \
-    || vc_fail "merge commit has $PARENTS parents, want 2"
-vc_note "merge commit has 2 parents (multi-parent drain confirmed)"
+[ "$PARENTS" = "1" ] \
+    || vc_fail "merge commit has $PARENTS parents, want 1 (single-parent)"
+vc_note "merge commit has 1 parent (single-parent absorb confirmed)"
 
-#  Patch parents reset to 0 after POST drains them.
+#  Baseline still single-tip after POST.
 b=$(vc_section after_post baseline)
 pp=$(printf '%s\n' "$b" | awk -F= '$1=="patch_parents"{print $2}')
 [ "$pp" = "0" ] || vc_fail "patch_parents=$pp after POST (want 0)"
-vc_note "baseline reset (patch_parents=0)"
+vc_note "baseline single-tip after POST"
 
 echo "=== be-patch-clean: OK ==="

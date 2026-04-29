@@ -19,9 +19,10 @@ the row that owns the file's content.  ∉ stamp-set means the
 user edited it since.  POST walks the wt, classifies each file
 via stamp lookup, emits one keeper pack `commit → trees → blobs`,
 stamps every surviving wt file with the new post row's ts, and
-appends a `post` row.  Parents of the new commit are computed
-per-file: each `patch` row whose ts stamps any committed file
-contributes its `theirs` SHAs.
+appends a `post` row.  Per VERBS.md Invariant 2, every commit POST
+emits is single-parent — PATCH absorbs without recording provenance
+(history erased), so the parent of the new commit is always cur's
+prior tip.
 
 ## Wall-clock guard
 
@@ -38,14 +39,16 @@ For each candidate path, look up the on-disk mtime in the ULOG:
 |----------------------|------------------------------|----------|
 | `< last_get_ts`      | KEEP (untouched since reset) | KEEP |
 | `get` / `post` row   | KEEP (baseline content)      | KEEP |
-| `patch` row          | REWRITE; row's `theirs` joins parents | REWRITE; row's `theirs` joins parents |
+| `patch` row          | REWRITE (merged bytes)       | REWRITE (merged bytes) |
 | `put` row            | REWRITE (current bytes)      | REWRITE (current bytes) |
 | ∉ stamp-set          | ignore unless explicit `put` named it (warn if so; current bytes win) | REWRITE (auto-stage) |
 | `delete <path>` row  | DROP (file already unlinked at `be delete` time) | DROP |
 
-Parents = `[ours] ∪ {patch.theirs | patch row's ts stamps any
-committed file}`.  This subsumes the previous merge-vs-cherry-pick
-split — provenance is per-file, not per-mode.
+Parents = `[ours]` — single-parent per VERBS.md Invariant 2.
+PATCH-merged content contributes to the new tree but **not** to the
+parent set; provenance is erased at PATCH time.  Cross-branch
+deduplication (when cur eventually flows toward trunk) relies on
+patch-id matching, not recorded parents.
 
 ### Boundaries in `.sniff`
 
@@ -68,7 +71,7 @@ scan; no new ULOG verb required.
 | PUT.h | `put <path>` — one row per URI, no pack I/O, no tree work. |
 | DEL.h | `delete <path>` — mirror of PUT. |
 | POST.h | Commit: resolve baseline URI to a tree sha; classify per-path via a 2-input merge (`KEEPTreeListLeaves` baseline ↔ `SNIFFWtListPaths` wt) through `KEEPu8ssDrain`; ULOG put/delete rows layered on top.  Compute change-set per the rules above, pre-hash blobs, build dirty-spine trees, emit one pack `commit → trees → blobs`, advance keeper REFS, unlink explicit-deletes, append `post` row, stamp surviving files. |
-| PATCH.h | 3-way wt merge via graf; `refuse_if_dirty` is a wt-scan against the stamp-set; on success appends a `patch` row whose fragment extends the prior baseline fragment with the `theirs` sha (comma-separated multi-hash URI). |
+| PATCH.h | 3-way wt merge via graf with `base = tree(arg.fork_commit) = LCA(arg_parent_tip, arg_tip)`, `ours = cur.tip`, `theirs = arg.tip`; `refuse_if_dirty` is a wt-scan against the stamp-set.  On success appends a `patch` row that copies the prior baseline's query verbatim and records `ours` in the fragment — single-tip baseline, no `&<theirs>` chain (history erased per VERBS.md §PATCH). |
 
 ## CLI (`sniff`)
 

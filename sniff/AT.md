@@ -16,9 +16,9 @@ on-disk files are "clean" vs user-edited.
 | Verb | URI shape | Stamps files? |
 |------|-----------|---------------|
 | `repo`   | `file:///abs/path/.dogs/` (row 0 only; worktree → store anchor) | no |
-| `get`    | `[//origin/path]?heads/X&<sha>` (or `?<sha>` detached) | yes |
-| `post`   | `?heads/X&<sha>` (or `?<sha>` detached)               | yes |
-| `patch`  | `?heads/X&<ours>&<theirs>[…]` (extends prior query)   | yes |
+| `get`    | `?<branch>#<sha>` (or `?<sha>` detached)              | yes |
+| `post`   | `?<branch>#<sha>` (or `?<sha>` detached)              | yes |
+| `patch`  | `?<branch>#<ours>` (single-tip; copies prior query)   | yes |
 | `put`    | `<path>`                                              | yes (the staged file) |
 | `delete` | `<path>`                                              | no (file unlinked) |
 | `mod`    | `<path>`  (watch daemon hint — inotify observed edit) | no |
@@ -75,14 +75,19 @@ walk `u.query` with `QURYu8sDrain` to pull out the ref and SHA(s).
 ## Baseline URI
 
 The most recent `get` / `post` / `patch` row names the current
-baseline tree.  The query chains one REF and one-or-more SHAs with
-`&` (dog/QURY grammar):
+baseline tree.  The canonical shape is `?<branch>#<curhash>`: the
+query carries the absolute branch path (one REF spec per dog/QURY)
+and the fragment carries the wt's current 40-hex commit sha.
 
-* one SHA → keeper has a plain commit tree at that sha.
-* two or more → graf reconstructs a merge tree from that hash list.
+Per VERBS.md §PATCH and Invariant 2 (linear branches, single-parent
+commits), PATCH erases provenance — its row copies the prior
+baseline's query verbatim and writes the wt's tip into the fragment.
+No `&<theirs>` chain is appended; the baseline stays single-tip
+across PATCH and POST.  Per-file forensic tracking of which files
+came from a PATCH lives in the row's `ts` (every touched file's
+mtime equals the PATCH row's ts), not in the URI query.
 
-`post` collapses back to one SHA; `patch` appends one more.  Readers
-that only need "current tip" take the first 40-hex SHA spec via
+Readers that only need "current tip" take the fragment via
 `SNIFFAtQueryFirstSha(u, hex40)`.
 
 ## Stamp-set
