@@ -33,6 +33,7 @@
 #include "keeper/SHA1.h"
 
 #include "AT.h"
+#include "CLASS.h"
 
 // --- Bare-walk callback (baseline-tree visitor) ---
 
@@ -173,6 +174,53 @@ static ok64 put_baseline_tree(sha1 *tree_sha_out) {
     return to;
 }
 
+// --- Per-path classification via SNIFFClassify ----------------------
+
+typedef struct {
+    u8cs        raw;            // bytes from user URI (rel path, normalised)
+    b8          seen;
+    b8          stage;
+    char const *skip_reason;
+    ron60       mtime;          // wt mtime, captured from the merge
+} put_req;
+
+typedef struct {
+    put_req *reqs;
+    u32      n;
+    ron60    verb_get;
+    ron60    verb_post;
+} put_ctx;
+
+static ok64 put_classify_step(class_step const *step, void *ctx_) {
+    put_ctx *w = (put_ctx *)ctx_;
+    for (u32 j = 0; j < w->n; j++) {
+        if ($len(w->reqs[j].raw) != $len(step->path)) continue;
+        if (memcmp(w->reqs[j].raw[0], step->path[0],
+                   (size_t)$len(step->path)) != 0) continue;
+        put_req *r = &w->reqs[j];
+        r->seen = YES;
+        if (step->kind == CLASS_BASE_ONLY) {
+            r->skip_reason = "does not exist";
+            return OK;
+        }
+        //  WT_ONLY or BOTH — file is on disk.
+        if (step->wt_rec) r->mtime = step->wt_rec->ts;
+        if (step->kind == CLASS_BOTH && SNIFFAtKnown(r->mtime)) {
+            ron60 ow_verb = 0;
+            uri ow_u = {};
+            if (SNIFFAtRowAtTs(r->mtime, &ow_verb, &ow_u) == OK &&
+                (ow_verb == w->verb_get ||
+                 ow_verb == w->verb_post)) {
+                r->skip_reason = "is unchanged";
+                return OK;
+            }
+        }
+        r->stage = YES;
+        return OK;
+    }
+    return OK;
+}
+
 // --- Public API ---
 
 ok64 PUTStage(u32 nuris, uri const *uris) {
@@ -223,63 +271,105 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
         done;
     }
 
-    //  Per-path loop: warn-and-skip rather than abort, so a multi-arg
-    //  `put` ("touched + untouched mixed") still stages every file
-    //  that did change.  Only fail with PUTNONE when nothing landed.
+    //  Per-path loop is driven by the unified ULOG-merge classifier
+    //  (`SNIFFClassify`) — same primitive POST uses for its commit-
+    //  time merge.  We pre-collect the user's requested paths, then
+    //  let the merge tell us, per path, whether it's in baseline
+    //  and/or on disk.  No path-set in memory, no per-path lstat —
+    //  the wt cursor's `ts` field carries the file's mtime already.
+    //
+    //  Decisions:
+    //    BOTH       + mtime ∈ get/post stamp → unchanged, skip
+    //    BOTH       + otherwise              → stage (real edit)
+    //    WT_ONLY    (on disk, not tracked)   → stage (new file)
+    //    BASE_ONLY  (tracked, removed)       → skip ("does not exist")
+    //    not seen   (typo / never existed)   → skip ("does not exist")
+
+    //  Split file-form vs dir-form (path ends in `/`) requests.
+    //  Dir-form rows are emitted as-is; POST expands them at commit
+    //  time against the baseline tree.  File-form rows go through
+    //  SNIFFClassify to validate path-in-baseline-or-on-disk.
+    put_req reqs[CLI_MAX_URIS] = {};
+    u32 nreq = 0;
     u32 emitted = 0;
     u32 skipped = 0;
     for (u32 i = 0; i < nuris; i++) {
         u8cs raw = {};
         SNIFFAtPathBytes(&uris[i], raw);
         if (u8csEmpty(raw)) continue;
+        if ($len(raw) >= 2 && raw[0][0] == '.' && raw[0][1] == '/')
+            raw[0] += 2;
 
-        a_path(fp);
-        if (SNIFFFullpath(fp, reporoot, raw) != OK) {
-            fprintf(stderr, "sniff: put: cannot resolve %.*s — skipped\n",
-                    (int)$len(raw), (char *)raw[0]);
-            skipped++;
-            continue;
-        }
-
-        struct stat sb = {};
-        if (lstat((char const *)u8bDataHead(fp), &sb) != 0) {
-            fprintf(stderr, "sniff: put: %.*s does not exist — skipped\n",
-                    (int)$len(raw), (char *)raw[0]);
-            skipped++;
-            continue;
-        }
-
-        //  Skip a file that's already baseline-clean (mtime owned by
-        //  a `get` or `post` row).  PATCH and PUT stamps fall through —
-        //  re-staging a patched file is OK, re-staging an existing
-        //  put just refreshes the ts.
-        struct timespec mts = {.tv_sec  = sb.st_mtim.tv_sec,
-                               .tv_nsec = sb.st_mtim.tv_nsec};
-        ron60 mr = SNIFFAtOfTimespec(mts);
-        if (SNIFFAtKnown(mr)) {
-            ron60 ow_verb = 0;
-            uri ow_u = {};
-            if (SNIFFAtRowAtTs(mr, &ow_verb, &ow_u) == OK &&
-                (ow_verb == verb_get || ow_verb == verb_post)) {
-                fprintf(stderr, "sniff: put: %.*s is unchanged — skipped\n",
+        b8 is_dir = ($len(raw) > 0 && *(raw[1] - 1) == '/');
+        if (is_dir) {
+            //  Dir-form: lstat-confirm the dir exists, then emit one
+            //  row with the dir path.  POST walks every baseline /
+            //  wt entry under the prefix at commit time.
+            a_path(fp);
+            if (SNIFFFullpath(fp, reporoot, raw) != OK) {
+                fprintf(stderr,
+                        "sniff: put: cannot resolve %.*s — skipped\n",
                         (int)$len(raw), (char *)raw[0]);
+                skipped++; continue;
+            }
+            struct stat sb = {};
+            if (lstat((char const *)u8bDataHead(fp), &sb) != 0 ||
+                !S_ISDIR(sb.st_mode)) {
+                fprintf(stderr,
+                        "sniff: put: %.*s does not exist — skipped\n",
+                        (int)$len(raw), (char *)raw[0]);
+                skipped++; continue;
+            }
+            uri urow = {};
+            urow.path[0] = raw[0];
+            urow.path[1] = raw[1];
+            call(SNIFFAtAppendAt, ts, verb_put, &urow);
+            ts++;
+            emitted++;
+            continue;
+        }
+
+        if (nreq < CLI_MAX_URIS) {
+            reqs[nreq].raw[0] = raw[0];
+            reqs[nreq].raw[1] = raw[1];
+            nreq++;
+        }
+    }
+
+    if (nreq > 0) {
+        put_ctx pctx = {.reqs = reqs, .n = nreq,
+                        .verb_get = verb_get, .verb_post = verb_post};
+        call(SNIFFClassify, put_classify_step, &pctx);
+
+        for (u32 i = 0; i < nreq; i++) {
+            put_req *r = &reqs[i];
+            if (!r->stage) {
+                char const *reason = r->seen ? r->skip_reason
+                                             : "does not exist";
+                fprintf(stderr, "sniff: put: %.*s %s — skipped\n",
+                        (int)$len(r->raw), (char *)r->raw[0], reason);
                 skipped++;
                 continue;
             }
+            a_path(fp);
+            if (SNIFFFullpath(fp, reporoot, r->raw) != OK) {
+                fprintf(stderr,
+                        "sniff: put: cannot resolve %.*s — skipped\n",
+                        (int)$len(r->raw), (char *)r->raw[0]);
+                skipped++;
+                continue;
+            }
+            uri urow = {};
+            urow.path[0] = r->raw[0];
+            urow.path[1] = r->raw[1];
+            call(SNIFFAtAppendAt, ts, verb_put, &urow);
+            (void)SNIFFAtStampPath(fp, ts);
+            ts++;
+            emitted++;
         }
-
-        uri urow = {};
-        urow.path[0] = raw[0];
-        urow.path[1] = raw[1];
-        call(SNIFFAtAppendAt, ts, verb_put, &urow);
-        (void)SNIFFAtStampPath(fp, ts);
-        ts++;
-        emitted++;
     }
 
     if (emitted == 0) {
-        //  Every named path was skipped — surface PUTNONE so the
-        //  exit status reflects that nothing was staged.
         if (skipped > 0)
             fprintf(stderr, "sniff: put: no eligible paths\n");
         return PUTNONE;

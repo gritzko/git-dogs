@@ -1,0 +1,10 @@
+--- foo.c ---
+ #include <stdio.h>
+ 
+-int main(int argc, char **argv) {
+-    puts("hello"
++int main(void) {
++    puts("hello, world");
+     return 0;
+ }
+

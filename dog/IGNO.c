@@ -218,16 +218,24 @@ void IGNOFree(ignop ig) {
 //  callbacks pass through IGNOMatch, so this one check keeps
 //  internal state (git's .git, keeper's .dogs, sniff's .sniff ULOG)
 //  out of diff / status / post / patch worktree passes.
+//
+//  Matches at ANY directory level — `.git/` at the wt root and a
+//  submodule's nested `.git/` are equally ignored, so a submodule's
+//  internal git-state never surfaces as untracked.
 static b8 igno_is_meta(u8cs rel) {
     if ($empty(rel)) return NO;
     static char const *const metas[] = {".git", ".dogs", ".sniff"};
-    size_t rl = (size_t)$len(rel);
-    for (u32 i = 0; i < sizeof(metas) / sizeof(metas[0]); i++) {
-        size_t ml = strlen(metas[i]);
-        if (rl < ml) continue;
-        if (memcmp(rel[0], metas[i], ml) != 0) continue;
-        if (rl == ml) return YES;              // exact
-        if (rel[0][ml] == '/') return YES;     // dir prefix
+    u8cp seg = rel[0];
+    while (seg < rel[1]) {
+        u8cp end = seg;
+        while (end < rel[1] && *end != '/') end++;
+        size_t sl = (size_t)(end - seg);
+        for (u32 i = 0; i < sizeof(metas) / sizeof(metas[0]); i++) {
+            size_t ml = strlen(metas[i]);
+            if (sl == ml && memcmp(seg, metas[i], ml) == 0)
+                return YES;
+        }
+        seg = (end < rel[1]) ? end + 1 : end;
     }
     return NO;
 }
