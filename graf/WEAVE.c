@@ -275,3 +275,100 @@ ok64 WEAVEMerge(weave *dst, weave const *a, weave const *b) {
     (void)a; (void)b;
     return WEAVEFAIL;  // TODO: concurrent-branch weave merge
 }
+
+// --- WEAVEEmitDiff ---
+//
+//  Emits one hunk classifying every weave token vs the (from, to) sets
+//  passed in.  Output text is the concatenation of every kept token in
+//  weave order; hili is a tiling of that text with tok32(tag, end_off)
+//  spans.  Tags: 'I' (inserted on to-side), 'D' (deleted), ' ' (context).
+//  Empty diff (no `I` and no `D`) → no hunk emitted.
+
+#define WEAVE_DIFF_TEXT_MAX (64UL << 20)
+#define WEAVE_DIFF_HILI_MAX (1UL << 20)
+
+ok64 WEAVEEmitDiff(weave const *w, u8cs name,
+                   WEAVEsetfn in_from, void *from_ctx,
+                   WEAVEsetfn in_to,   void *to_ctx,
+                   HUNKcb cb, void *cb_ctx) {
+    sane(w && cb && in_from && in_to);
+
+    u32cp toks   = (u32cp)w->toks[1];
+    u32cp toks_e = (u32cp)w->toks[2];
+    u32   ntok   = (u32)(toks_e - toks);
+    inrmcp irm   = (inrmcp)w->inrm[1];
+    u8cp   text  = (u8cp)w->text[1];
+
+    Bu8 outtext = {};
+    Bu32 outhili = {};
+    call(u8bMap,  outtext, WEAVE_DIFF_TEXT_MAX);
+    ok64 mh = u32bMap(outhili, WEAVE_DIFF_HILI_MAX);
+    if (mh != OK) { u8bUnMap(outtext); return mh; }
+
+    u32 emitted_off = 0;
+    u32 prev_span_off = 0;   // end of last flushed hili span
+    u8  prev_tag = 0;        // 0 = no run yet
+    u32 has_id = 0;          // bitmask: 1='I' seen, 2='D' seen
+
+    for (u32 i = 0; i < ntok; i++) {
+        u32 lo = (i == 0) ? 0 : tok32Offset(toks[i - 1]);
+        u32 hi = tok32Offset(toks[i]);
+        u8cs tok_bytes = {text + lo, text + hi};
+
+        u32 in = irm[i].in;
+        u32 rm = irm[i].rm;
+
+        b8 alive_from = in_from(in, from_ctx) &&
+                        (rm == 0 || !in_from(rm, from_ctx));
+        b8 alive_to   = in_to(in, to_ctx) &&
+                        (rm == 0 || !in_to(rm, to_ctx));
+
+        u8 tag = 0;
+        if (alive_to && !alive_from)      tag = 'I';
+        else if (alive_from && !alive_to) tag = 'D';
+        else if (alive_from && alive_to)  tag = ' ';
+        else continue;
+
+        if (tag == 'I') has_id |= 1;
+        else if (tag == 'D') has_id |= 2;
+
+        // Flush previous run if tag changes.
+        if (prev_tag != 0 && tag != prev_tag) {
+            ok64 fo = u32bFeed1(outhili, tok32Pack(prev_tag, emitted_off));
+            if (fo != OK) { u8bUnMap(outtext); u32bUnMap(outhili); return fo; }
+            prev_span_off = emitted_off;
+        }
+        prev_tag = tag;
+
+        // Append token bytes to outtext.
+        ok64 fo = u8bFeed(outtext, tok_bytes);
+        if (fo != OK) { u8bUnMap(outtext); u32bUnMap(outhili); return fo; }
+        emitted_off += (u32)$len(tok_bytes);
+    }
+
+    // Flush trailing run.
+    if (prev_tag != 0 && emitted_off > prev_span_off) {
+        ok64 fo = u32bFeed1(outhili, tok32Pack(prev_tag, emitted_off));
+        if (fo != OK) { u8bUnMap(outtext); u32bUnMap(outhili); return fo; }
+    }
+
+    if (has_id == 0) {
+        // No insertions or deletions — caller asked for a diff between
+        // identical states.  Skip hunk emission.
+        u8bUnMap(outtext);
+        u32bUnMap(outhili);
+        done;
+    }
+
+    hunk hk = {};
+    $mv(hk.uri, name);
+    hk.text[0] = u8bDataHead(outtext);
+    hk.text[1] = u8bDataHead(outtext) + u8bDataLen(outtext);
+    hk.hili[0] = (tok32c *)u32bDataHead(outhili);
+    hk.hili[1] = (tok32c *)u32bDataHead(outhili) + u32bDataLen(outhili);
+    ok64 r = cb(&hk, cb_ctx);
+
+    u8bUnMap(outtext);
+    u32bUnMap(outhili);
+    return r;
+}

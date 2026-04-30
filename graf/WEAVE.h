@@ -25,9 +25,17 @@
 
 #include "abc/INT.h"
 #include "abc/RAP.h"
+#include "dog/HUNK.h"
 #include "dog/TOK.h"
 
 con ok64 WEAVEFAIL = 0x2038a7ce3ca495;
+
+//  Sentinel `src` for the worktree shadow version (uncommitted edits).
+//  Real `WHIFFHashlet40` truncations land in the bottom 32 bits — full
+//  0xFFFFFFFF is overwhelmingly likely to be free.  Shared between BLAME
+//  (worktree blame row) and the DIFF projector (wt as next-version-after
+//  -base in the wt-vs-base shape per VERBS.md `diff:`).
+#define WEAVE_WT_SRC 0xFFFFFFFFu
 
 typedef struct {
     u32 in;
@@ -78,5 +86,26 @@ ok64 WEAVEDiff (weave *dst, weave const *src, weave const *nu, u32 src_commit);
 //  dst = a merged with b (concurrent branches sharing an ancestor).
 //  Stub for now.
 ok64 WEAVEMerge(weave *dst, weave const *a, weave const *b);
+
+// --- Diff emission ---
+//
+//  Walk a built weave and emit one hunk classifying every alive token
+//  by its `inrm` membership in the `from` and `to` reachable sets.
+//  Per token:
+//    alive_from = in_from(in) && (rm == 0 || !in_from(rm))
+//    alive_to   = in_to  (in) && (rm == 0 || !in_to  (rm))
+//    alive_to && !alive_from → 'I' (inserted on the to-side)
+//    alive_from && !alive_to → 'D' (deleted on the to-side)
+//    alive_from && alive_to  → context
+//    else                    → skipped
+//  Output hunk: `text` is the concatenation of every kept token in weave
+//  order; `hili` is a complete tiling of `text` with tok32(tag, end_off)
+//  spans (`I`, `D`, or `' '` for context).  Suitable for HUNK rendering.
+typedef b8 (*WEAVEsetfn)(u32 commit_h32, void *ctx);
+
+ok64 WEAVEEmitDiff(weave const *w, u8cs name,
+                   WEAVEsetfn in_from, void *from_ctx,
+                   WEAVEsetfn in_to,   void *to_ctx,
+                   HUNKcb cb, void *cb_ctx);
 
 #endif

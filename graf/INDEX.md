@@ -40,8 +40,8 @@ graf status                        index run/entry counts
 | `NEIL.{h,c}`  | Edit-list semantic cleanup: removes false short equalities, lossless boundary shifts |
 | `DIFF.c`      | `GRAFDiff` — maps two files, calls `DIFFu8cs` with `GRAFHunkEmit` as callback |
 | `MERGE.c`     | `GRAFMerge` — 3-way merge using `JOIN`, writes resolved bytes to file or stdout |
-| `BLAME.c`     | `GRAFBlame` + `GRAFWeaveDiff` — walks DAG, pulls blobs via keeper, builds weave |
-| `WEAVE.{h,c}` | Double-buffered weave of token versions with intro/del gens |
+| `BLAME.c`     | `GRAFFileWeave` (shared file-history weave builder: ancestor-closure walk, byte-dedup, optional wt-as-final-layer with `WEAVE_WT_SRC`, per-layer step callback) + `GRAFBlame` (renders attribution rows over the built weave) + `GRAFWeaveDiff` |
+| `WEAVE.{h,c}` | Double-buffered weave of token versions with intro/del gens; `WEAVEEmitDiff` walks a built weave and emits one HUNK with `I`/`D`/` ` hili spans per token, classified by caller-supplied `(in_from, in_to)` reachability predicates |
 | `LOG.c`       | `GRAFLog` — `be log:[path]?ref[#N]` projector. Branch history walks COMMIT_PARENT via the DAG index; file history (`./path/file?ref`) reads PATH_VER under the tip's ancestor set. Commit body fetched from keeper for the `<sha7> <date> <author> <summary>` render |
 
 ## Pager

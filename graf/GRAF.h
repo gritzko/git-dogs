@@ -10,6 +10,7 @@
 #include "dog/HUNK.h"
 #include "dog/SHA1.h"
 #include "graf/DAG.h"
+#include "graf/WEAVE.h"
 
 #define GRAF_ARENA_SIZE (1UL << 24)   // 16MB
 
@@ -143,6 +144,26 @@ ok64 GRAFIndex(keeper *k);
 // Token-level blame (reads blobs from keeper).
 //   tip_h: 40-bit commit hashlet bounding the history (0 = no filter).
 ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot);
+
+// Build the file's full token weave by replaying its blob history along
+// `tip_h`'s ancestor closure (oldest-first, byte-dedup adjacent), then
+// optionally folding in the on-disk worktree bytes as a final layer
+// tagged `wt_src`.  Caller owns three weave instances (init'd via
+// `WEAVEInit`); the one holding the final state is returned in
+// `*out_final` (points into `wsrc` or `wdst`).  `cb`, when non-NULL, is
+// invoked once per kept layer with its `src_id` (truncated commit
+// hashlet, or `wt_src` for the wt layer) and the full 64-bit hashlet
+// (0 for the wt layer).
+//
+//   tip_h    : 40-bit commit hashlet bounding history (0 = all).
+//   wt_src   : `WEAVE_WT_SRC` to fold wt as a final layer; 0 to skip.
+typedef ok64 (*GRAFweaveStepCb)(u32 src_id, u64 commit_h, void *ctx);
+
+ok64 GRAFFileWeave(weave *wsrc, weave *wdst, weave *wnu,
+                   weave **out_final,
+                   keeper *k, u8cs filepath, u64 tip_h,
+                   u8cs reporoot, u32 wt_src,
+                   GRAFweaveStepCb cb, void *cb_ctx);
 
 // Resolve a URI's `#hex` / `?ref` / absent-query to a 20-byte commit
 // SHA-1 — the same policy `log:` uses (sniff/at.log → REFS fallback).
