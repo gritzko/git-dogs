@@ -53,11 +53,19 @@ static void graf_usage(void) {
 
 // --- Bro pager setup ---
 //
-//  Three output shapes:
-//    tty_out=YES               → spawn bro, emit HUNK TLV into the pipe
-//    tty_out=NO, force_tlv=YES → write HUNK TLV to stdout (BE→bro pipe
-//                                 already wired upstream; we're a producer)
-//    tty_out=NO, force_tlv=NO  → write plain text to stdout (scripts, redirects)
+//  Three output shapes — all producers emit `hunk` records via
+//  GRAFHunkEmit; the formatter pinned in `graf_emit` decides bytes:
+//
+//    tty_out=YES               → spawn bro, formatter = HUNKu8sFeed (TLV)
+//    tty_out=NO, force_tlv=YES → BE→bro pipe upstream, formatter = HUNKu8sFeed
+//    tty_out=NO, force_tlv=NO  → no bro downstream, formatter =
+//                                 HUNKu8sFeedLineBased (proper unified
+//                                 diff `+`/`-`/' ' shape per line —
+//                                 right default for diff/blame/weave).
+//
+//  Projectors whose hunk is plain text (`log:`, `map:`, `ls:`, etc.)
+//  override `graf_emit` to `HUNKu8sFeedText` after this call so the
+//  hunk text is emitted verbatim instead of getting the `' '` prefix.
 static pid_t graf_start_pager(b8 tty_out, b8 force_tlv) {
     if (!tty_out) {
         graf_out_fd = STDOUT_FILENO;
@@ -82,6 +90,14 @@ static pid_t graf_start_pager(b8 tty_out, b8 force_tlv) {
     graf_emit   = HUNKu8sFeed;
     signal(SIGPIPE, SIG_IGN);
     return pid;
+}
+
+//  Override the non-TLV formatter to plain text — for projectors
+//  whose hunk is grep/cat-shaped (no `+`/`-` line prefixes).  Called
+//  by log/map/ls dispatch after graf_start_pager.  No-op when bro is
+//  downstream (graf_emit is already HUNKu8sFeed).
+static void graf_pager_plain_text(void) {
+    if (graf_emit != HUNKu8sFeed) graf_emit = HUNKu8sFeedText;
 }
 
 static void graf_stop_pager(pid_t pid) {
@@ -308,6 +324,7 @@ ok64 GRAFExec(cli *c) {
 
     } else if ($eq(c->verb, v_map)) {
         pid_t pager = graf_start_pager(c->tty_out, force_tlv);
+        graf_pager_plain_text();
         ret = GRAFMap(c->nuris > 0 ? &c->uris[0] : NULL);
         graf_stop_pager(pager);
 
@@ -318,6 +335,7 @@ ok64 GRAFExec(cli *c) {
             return FAILSANITY;
         }
         pid_t pager = graf_start_pager(c->tty_out, force_tlv);
+        graf_pager_plain_text();
         ret = GRAFLog(&KEEP, &c->uris[0]);
         graf_stop_pager(pager);
 

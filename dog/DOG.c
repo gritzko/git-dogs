@@ -509,8 +509,20 @@ ok64 DOGutf8sFeedDate(u8s into, i64 ts, i64 now) {
 
     if (n < 0) n = 0;
     if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+
+    //  Pad to exactly 5 columns, centred — so a row of dates lines up
+    //  cleanly when stacked.  Width-3 ("now", "Wed") gets one space
+    //  on each side; width-4 ("-1hr") gets a trailing space; width-5
+    //  ("23Apr") prints as-is.  Width-1 ("?") gets two spaces each side.
+    int pad_total = 5 - n;
+    if (pad_total < 0) pad_total = 0;
+    int pad_left  = pad_total / 2;
+    int pad_right = pad_total - pad_left;
+    for (int i = 0; i < pad_left; i++) call(u8sFeed1, into, ' ');
     u8cs sl = {(u8 const *)buf, (u8 const *)buf + n};
-    return u8sFeed(into, sl);
+    call(u8sFeed, into, sl);
+    for (int i = 0; i < pad_right; i++) call(u8sFeed1, into, ' ');
+    done;
 }
 
 void DOGPupData(u8csp out, kv32b pups, u32 i) {

@@ -345,16 +345,14 @@ static i64 status_ron60_to_secs(ron60 ts) {
 
 static void status_push(Bu8 buf, u8cs path, ron60 ts, i64 now,
                         u32 *count) {
+    //  DOGutf8sFeedDate emits exactly 5 chars (centred-padded) — no
+    //  per-caller padding needed.
     u8 date_buf[8];
     u8s date_into = {date_buf, date_buf + sizeof(date_buf)};
     u8cp start = date_into[0];
     (void)DOGutf8sFeedDate(date_into, status_ron60_to_secs(ts), now);
     u8cs date_slice = {start, date_into[0]};
-    //  Pad date column to 5 chars so the status column lines up
-    //  even when relative forms vary in width (`now` vs `-23hr`).
     (void)u8bFeed(buf, date_slice);
-    for (size_t i = (size_t)$len(date_slice); i < 5; i++)
-        (void)u8bFeed1(buf, ' ');
     (void)u8bFeed1(buf, '\t');
     (void)u8bFeed(buf, path);
     (void)u8bFeed1(buf, '\n');

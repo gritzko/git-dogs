@@ -27,9 +27,9 @@ pass() { echo "PASS [$CASE]: $*"; }
 
 want_lines() {
     out=$1; n=$2
-    got=$(wc -l < "$out" | tr -d ' ')
-    [ "$got" = "$n" ] || { fail "want $n lines, got $got in $out"; cat "$out"; return; }
-    pass "$n lines"
+    got=$(grep -cE '^[0-9a-f]{7} ' "$out" || true)
+    [ "$got" = "$n" ] || { fail "want $n commit-rows, got $got in $out"; cat "$out"; return; }
+    pass "$n commit-rows"
 }
 
 want_grep() {

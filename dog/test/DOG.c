@@ -268,22 +268,23 @@ typedef struct {
 
 static i64 const DOG_DATE_NOW = 1746014400;  // 2025-04-30 12:00:00 UTC (Wed)
 
+//  All outputs padded to 5 cols, centred (lead = (5-len)/2, trail rest).
 static DateCase const DATE_CASES[] = {
-    {DOG_DATE_NOW,            "now"},     // exact now
-    {DOG_DATE_NOW - 30,       "now"},     // 30s ago
-    {DOG_DATE_NOW - 120,      "-2m"},     // 2 min
-    {DOG_DATE_NOW - 59 * 60,  "-59m"},    // just under 1hr
-    {DOG_DATE_NOW - 3600,     "-1hr"},    // 1 hr
+    {DOG_DATE_NOW,            " now "},   // exact now
+    {DOG_DATE_NOW - 30,       " now "},   // 30s ago
+    {DOG_DATE_NOW - 120,      " -2m "},   // 2 min
+    {DOG_DATE_NOW - 59 * 60,  "-59m "},   // just under 1hr
+    {DOG_DATE_NOW - 3600,     "-1hr "},   // 1 hr
     {DOG_DATE_NOW - 23*3600,  "-23hr"},   // 23 hr
     //  3 days back from Wed = Sun 2025-04-27.
-    {DOG_DATE_NOW - 3*86400,  "Sun"},
+    {DOG_DATE_NOW - 3*86400,  " Sun "},
     //  10 days back: same year → "DDMon".  2025-04-20 → "20Apr".
     {DOG_DATE_NOW - 10*86400, "20Apr"},
     //  Different year → "MonYY".  2024-02-19 12:00 UTC.
     {1708344000,              "Feb24"},
     //  ts <= 0: "?"
-    {0,                       "?"},
-    {-1,                      "?"},
+    {0,                       "  ?  "},
+    {-1,                      "  ?  "},
 };
 
 #define NDATE (sizeof(DATE_CASES) / sizeof(DATE_CASES[0]))
@@ -296,9 +297,10 @@ ok64 DOGTestFeedDate() {
         call(DOGutf8sFeedDate, u8bIdle(buf), tc->ts, DOG_DATE_NOW);
         a_dup(u8c, got, u8bData(buf));
         a_cstr(want, tc->expect);
-        if ($len(got) > 5) {
-            fprintf(stderr, "FAIL [%zu] ts=%lld: '%.*s' exceeds 5 chars\n",
-                    i, (long long)tc->ts, (int)$len(got), (char *)got[0]);
+        if ($len(got) != 5) {
+            fprintf(stderr, "FAIL [%zu] ts=%lld: '%.*s' is %d chars; want exactly 5\n",
+                    i, (long long)tc->ts,
+                    (int)$len(got), (char *)got[0], (int)$len(got));
             fail(TESTFAIL);
         }
         if (!$eq(got, want)) {

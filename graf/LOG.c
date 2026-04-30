@@ -47,22 +47,22 @@
 //  `#N` is a hard ceiling when the caller wants one.
 #define LOG_DEFAULT_COUNT 0xffffffffu
 #define LOG_OBJ_BUF       (1UL << 20)
-#define LOG_LINE_BUF      4096        // one rendered commit line + toks
-#define LOG_LINE_TOKS     16          // per-line packed-tag count
+#define LOG_TEXT_BUF      (4UL << 20)   // one big hunk; ~40k commits @ 100B
+#define LOG_TOKS_CAP      (1u << 16)    // tok32 entries (~9 per commit)
 #define LOG_FILE_VERS_CAP (1u << 16)
 #define LOG_ANC_SIZE      (1u << 18)
 
-// --- Per-emit context --------------------------------------------------
+// --- Accumulator context ----------------------------------------------
+//
+//  Append-only render buffers shared across the whole walk.  Each
+//  commit's row appends to `text` (and tok32 spans to `toks` in TLV
+//  mode); GRAFHunkEmit is called once at the end with the merged
+//  hunk, so HUNKu8sFeedText emits a single trailing blank line for
+//  the whole log rather than one per commit.
 
-//  Carries the single-commit scratch buffers, a `now` snapshot for
-//  relative-date formatting, and the title used on the first hunk.
-//  After the first emit `emit_title` flips off so subsequent hunks
-//  (one per commit) don't repeat the "log:..." separator in bro.
 typedef struct {
     Bu8   text;
     Bu32  toks;
-    u8cs  title;       //  borrowed; valid while caller's buffer lives
-    b8    emit_title;
     b8    tlv;
     i64   now;
 } log_ctx;
@@ -215,56 +215,15 @@ static ok64 graflog_render_commit(u8b out, u32b toks,
     done;
 }
 
-//  Emit one commit's worth of bytes.  TLV → one hunk via GRAFHunkEmit
-//  (write() blocks on full pipe → backpressure).  Plain → bytes
-//  straight to graf_out_fd / stdout.  Returns OK on success; the
-//  caller breaks its walk when graf_out_fd has been closed by
-//  GRAFHunkEmit (pager exited).
+//  Append one commit's row to the shared accumulator.  No emission
+//  here — GRAFHunkEmit fires once at the end of GRAFLog with the
+//  whole batch as a single hunk so HUNKu8sFeedText doesn't insert
+//  a separator blank line between every commit.
 static ok64 graflog_emit_one(log_ctx *lx, sha1 const *csha, u8cs body) {
     sane(lx);
-    u8bReset(lx->text);
-    if (lx->tlv) u32bReset(lx->toks);
-
-    call(graflog_render_commit, lx->text,
-         lx->tlv ? lx->toks : NULL, csha, body, lx->now);
-
-    if (!lx->tlv) {
-        a_dup(u8c, bytes, u8bData(lx->text));
-        int fd = (graf_out_fd >= 0) ? graf_out_fd : STDOUT_FILENO;
-        ssize_t off = 0;
-        while (off < (ssize_t)u8csLen(bytes)) {
-            ssize_t w = write(fd, bytes[0] + off, u8csLen(bytes) - off);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EPIPE) {
-                    if (graf_out_fd >= 0) graf_out_fd = -1;
-                    break;
-                }
-                break;
-            }
-            if (w == 0) break;
-            off += w;
-        }
-        done;
-    }
-
-    hunk hk = {};
-    if (lx->emit_title && !u8csEmpty(lx->title)) {
-        hk.uri[0] = lx->title[0];
-        hk.uri[1] = lx->title[1];
-        lx->emit_title = NO;     //  one title bar, on the first hunk
-    }
-    hk.text[0] = u8bDataHead(lx->text);
-    hk.text[1] = u8bIdleHead(lx->text);
-    hk.toks[0] = (u32 const *)u32bDataHead(lx->toks);
-    hk.toks[1] = (u32 const *)u32bIdleHead(lx->toks);
-    return GRAFHunkEmit(&hk, NULL);
-}
-
-//  YES once the pager has closed its end of the pipe.  GRAFHunkEmit
-//  zeroes graf_out_fd on EPIPE; the plain path here does the same.
-static b8 graflog_pipe_dead(log_ctx const *lx) {
-    return lx->tlv && graf_out_fd < 0;
+    return graflog_render_commit(lx->text,
+                                 lx->tlv ? lx->toks : NULL,
+                                 csha, body, lx->now);
 }
 
 static void graflog_strip_dotslash(u8cs path) {
@@ -282,7 +241,7 @@ static ok64 graflog_branch(log_ctx *lx, keeper *k, sha1 const *tip,
 
     u64 cur_h40 = WHIFFHashlet40(tip);
     for (u32 i = 0; i < count && cur_h40 != 0; i++) {
-        if (graflog_pipe_dead(lx)) break;
+        if (graf_out_fd < 0) break;
 
         u8bReset(cbuf);
         u8 ot = 0;
@@ -342,7 +301,7 @@ static ok64 graflog_file(log_ctx *lx, keeper *k, sha1 const *tip,
 
     u32 emitted = 0;
     for (u32 i = 0; i < nvers && emitted < count; i++) {
-        if (graflog_pipe_dead(lx)) break;
+        if (graf_out_fd < 0) break;
 
         u64 h40 = vers[i].commit_hashlet;
         if (h40 == 0) continue;
@@ -381,11 +340,10 @@ ok64 GRAFLog(keeper *k, uricp u) {
     log_ctx lx = {};
     lx.tlv = (graf_emit == HUNKu8sFeed);
     lx.now = (i64)time(NULL);
-    lx.emit_title = lx.tlv;
 
-    call(u8bAllocate, lx.text, LOG_LINE_BUF);
+    call(u8bAllocate, lx.text, LOG_TEXT_BUF);
     if (lx.tlv) {
-        ok64 to = u32bAllocate(lx.toks, LOG_LINE_TOKS);
+        ok64 to = u32bAllocate(lx.toks, LOG_TOKS_CAP);
         if (to != OK) { u8bFree(lx.text); return to; }
     }
 
@@ -397,8 +355,6 @@ ok64 GRAFLog(keeper *k, uricp u) {
         (void)u8bFeed1(title, '?');
         (void)u8bFeed(title, u->query);
     }
-    lx.title[0] = u8bDataHead(title);
-    lx.title[1] = u8bIdleHead(title);
 
     u8cs path = {};
     u8csMv(path, u->path);
@@ -415,6 +371,21 @@ ok64 GRAFLog(keeper *k, uricp u) {
     ok64 wo = $empty(path)
         ? graflog_branch(&lx, k, &tip, count)
         : graflog_file(&lx, k, &tip, path, count);
+
+    if (wo == OK) {
+        //  Single hunk for the whole walk — graf_emit (TLV via bro
+        //  pipe, or HUNKu8sFeedText for terminal/pipe) picks bytes.
+        hunk hk = {};
+        hk.uri[0]  = u8bDataHead(title);
+        hk.uri[1]  = u8bIdleHead(title);
+        hk.text[0] = u8bDataHead(lx.text);
+        hk.text[1] = u8bIdleHead(lx.text);
+        if (lx.tlv) {
+            hk.toks[0] = (u32 const *)u32bDataHead(lx.toks);
+            hk.toks[1] = (u32 const *)u32bIdleHead(lx.toks);
+        }
+        (void)GRAFHunkEmit(&hk, NULL);
+    }
 
     if (own_open) GRAFClose();
     if (lx.tlv) u32bFree(lx.toks);

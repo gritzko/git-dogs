@@ -1,17 +1,18 @@
 #!/bin/sh
 #  be-map-projector.sh — VERBS.md `map:` projector.
 #
-#  Builds a 4-branch layout:
-#       trunk
-#       ├── feat
-#       │   └── feat/sub
-#       └── docs               (sibling of ?feat)
+#  Builds a 4-branch layout, each with its own commit so every
+#  branch shows up as a distinct row in the map output:
+#
+#       trunk      (commit: t1)
+#       ├── feat   (commit: f1)
+#       │   └── feat/sub  (commit: s1)
+#       └── docs   (commit: d1)
 #
 #  And verifies `be map:` filters per the spec:
 #    wt on ?feat/sub  → trunk, ?feat, ?feat/sub  (ancestors + self)
 #    wt on trunk      → trunk, ?feat, ?feat/sub, ?docs  (all descendants)
-#    wt on ?feat      → trunk, ?feat, ?feat/sub  (ancestor + self + desc;
-#                                                  ?docs is a sibling — out)
+#    wt on ?feat      → trunk, ?feat, ?feat/sub        (sibling ?docs out)
 #
 set -eu
 
@@ -43,53 +44,62 @@ want_no_grep() {
     pass "absent /$pat/"
 }
 
-# --- Build the 4-branch layout ---------------------------------------
+# --- 4 branches each with one own commit ----------------------------
 R=$T/repo; mkdir -p "$R"; cd "$R"
 sniff init >/dev/null
 
-# Trunk: one commit
 echo "trunk content" > base.txt
 be post -m "trunk-c1" >/dev/null
 
-# ?feat at trunk's tip
-be post '?feat' >/dev/null
-
-# Switch to ?feat, advance, fork ?feat/sub
+be post '?./feat' >/dev/null
 be get '?feat' >/dev/null 2>&1
+echo feat-content > feat.txt
+be put feat.txt >/dev/null
+be post -m "feat-c1" >/dev/null
+
 be post '?./sub' >/dev/null
+be get '?feat/sub' >/dev/null 2>&1
+echo sub-content > sub.txt
+be put sub.txt >/dev/null
+be post -m "sub-c1" >/dev/null
 
-# ?docs: sibling of ?feat (root-level branch off trunk)
 be get '?' >/dev/null 2>&1
-be post '?docs' >/dev/null
+be post '?./docs' >/dev/null
+be get '?docs' >/dev/null 2>&1
+echo docs-content > docs.txt
+be put docs.txt >/dev/null
+be post -m "docs-c1" >/dev/null
 
-# --- Case A: wt on ?feat/sub -----------------------------------------
+# --- Case A: wt on ?feat/sub ---------------------------------------
 CASE=A
 be get '?feat/sub' >/dev/null 2>&1
 be 'map:' > "$T/A.out" 2>&1
-want_grep    "$T/A.out" '\*feat/sub'                    # current marker
-want_grep    "$T/A.out" '^\?feat[[:space:]]'            # ancestor row
-want_grep    "$T/A.out" '^\?[[:space:]]'                # trunk row
-want_no_grep "$T/A.out" '\?docs'                        # sibling out
+want_grep    "$T/A.out" 'sub-c1'
+want_grep    "$T/A.out" 'feat-c1'
+want_grep    "$T/A.out" 'trunk-c1'
+want_no_grep "$T/A.out" 'docs-c1'
+want_no_grep "$T/A.out" '\?docs'
 
-# --- Case B: wt on trunk ----------------------------------------------
+# --- Case B: wt on trunk -------------------------------------------
 CASE=B
 be get '?' >/dev/null 2>&1
 be 'map:' > "$T/B.out" 2>&1
-want_grep "$T/B.out" '^\*[[:space:]]'                   # trunk current
-want_grep "$T/B.out" '\?feat'                           # descendant
-want_grep "$T/B.out" 'feat/sub'                         # nested descendant
-want_grep "$T/B.out" '\?docs'                           # sibling-of-feat is descendant of trunk
+want_grep "$T/B.out" 'trunk-c1'
+want_grep "$T/B.out" 'feat-c1'
+want_grep "$T/B.out" 'sub-c1'
+want_grep "$T/B.out" 'docs-c1'
 
-# --- Case C: wt on ?feat (sibling-exclusion) -------------------------
+# --- Case C: wt on ?feat (sibling-exclusion) ------------------------
 CASE=C
 be get '?feat' >/dev/null 2>&1
 be 'map:' > "$T/C.out" 2>&1
-want_grep    "$T/C.out" '\*feat[[:space:]]'             # current
-want_grep    "$T/C.out" '^\?[[:space:]]'                # trunk ancestor
-want_grep    "$T/C.out" 'feat/sub'                      # descendant
-want_no_grep "$T/C.out" '\?docs'                        # sibling out
+want_grep    "$T/C.out" 'trunk-c1'
+want_grep    "$T/C.out" 'feat-c1'
+want_grep    "$T/C.out" 'sub-c1'
+want_no_grep "$T/C.out" 'docs-c1'
+want_no_grep "$T/C.out" '\?docs'
 
-# --- Summary ---------------------------------------------------------
+# --- Summary --------------------------------------------------------
 echo ""
 if [ "$FAIL" = "0" ]; then
     echo "=== be-map-projector OK (3 cases) ==="
