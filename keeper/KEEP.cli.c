@@ -51,7 +51,7 @@ static ok64 keeper_upload_pack(cli *c) {
     if (u8csEmpty(path)) return KEEPFAIL;
 
     home h = {};
-    call(HOMEOpen, &h, path, NO);
+    call(HOMEOpenAt, &h, path, NO);
     call(KEEPOpen, &h, NO);
 
     refadv adv = {};
@@ -78,7 +78,7 @@ static ok64 keeper_receive_pack(cli *c) {
     if (u8csEmpty(path)) return KEEPFAIL;
 
     home h = {};
-    call(HOMEOpen, &h, path, YES);
+    call(HOMEOpenAt, &h, path, YES);
     call(KEEPOpen, &h, YES);
 
     //  Indexer fan-out so received objects also reach graf/spot.
@@ -137,8 +137,13 @@ ok64 keepercli() {
     }
     b8 rw = !ro;
 
+    //  Prefer `--at` from be; fall back to cwd-walk via c.repo.
     home h = {};
-    call(HOMEOpen, &h, c.repo, rw);
+    uri at = {};
+    CLIAtURI(&at, &c);
+    if (u8csEmpty(at.path) && $ok(c.repo) && !u8csEmpty(c.repo))
+        u8csMv(at.path, c.repo);
+    call(HOMEOpen, &h, &at, rw);
 
     call(KEEPOpen, &h, rw);
 

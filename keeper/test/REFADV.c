@@ -108,7 +108,7 @@ ok64 REFADVtest_empty() {
     want(tmp_make(tmpdir) == OK);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     refadv adv = {};
@@ -141,7 +141,7 @@ ok64 REFADVtest_single_trunk() {
     want(tmp_make(tmpdir) == OK);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     //  REFS lives at <root>/.dogs.  Local trunk row (`?`) advertises
@@ -207,7 +207,7 @@ ok64 REFADVtest_multi() {
     want(tmp_make(tmpdir) == OK);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     a_path(keepdir, u8bDataC(h.root), KEEP_DIR_S);
@@ -280,7 +280,7 @@ ok64 REFADVtest_tip_lookup() {
     want(tmp_make(tmpdir) == OK);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     a_path(keepdir, u8bDataC(h.root), KEEP_DIR_S);
@@ -332,7 +332,7 @@ ok64 REFADVtest_round_trip() {
     want(tmp_make(tmpdir) == OK);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     a_path(keepdir, u8bDataC(h.root), KEEP_DIR_S);

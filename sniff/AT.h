@@ -49,6 +49,22 @@
 #include "abc/URI.h"
 #include "dog/ULOG.h"
 
+con ok64 SNIFFATNONE = 0xd61029d5d85ce;
+
+//  Standalone RO peek at `<wt>/.sniff` — does NOT touch the SNIFF
+//  singleton, does NOT open keeper.  Composes a URI carrying the
+//  worktree's full anchor:
+//    path     = repo root (parent of `.dogs/`, from the row-0 `repo`
+//               URI; `.dogs/` segment is stripped).
+//    query    = current be-side branch path (empty == trunk), from
+//               the latest `get`/`post`/`patch` row.
+//    fragment = current 40-hex commit sha, same row.
+//  The text `<root>?<branch>#<sha>` is fed into `out` and is then both
+//  URILexer-parseable and ready to forward as `--at <out>` to a
+//  sub-dog.  Returns SNIFFATNONE on a missing file, no `repo` row, or
+//  no row carrying a 40-hex sha.
+ok64 SNIFFAtTailOf(u8cs wt, u8bp out);
+
 //  Append one row to the current sniff log using `RONNow()`.
 ok64 SNIFFAtAppend(ron60 verb, uricp u);
 

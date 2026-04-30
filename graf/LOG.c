@@ -36,7 +36,6 @@
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "abc/URI.h"
-#include "dog/AT.h"
 #include "dog/DOG.h"
 #include "dog/FRAG.h"
 #include "dog/HUNK.h"
@@ -87,20 +86,17 @@ ok64 GRAFResolveTip(keeper *k, uricp u, sha1 *out) {
     }
 
     //  Bare `log:` with no query — fall back to the wt's current tip
-    //  recorded in `<root>/.sniff/at.log`.  Mirrors `git log` defaulting
-    //  to HEAD with no args.
+    //  parked in `k->h->cur_sha` by HOMEOpen (sourced from `--at`
+    //  forwarded by `be`).  Mirrors `git log` defaulting to HEAD with
+    //  no args.  Empty `cur_sha` (no `--at` forwarded — direct CLI
+    //  invocation) falls through to REFS so a fresh clone still
+    //  resolves trunk.
     if (u->query[0] == NULL) {
-        a_pad(u8, branch, 256);
-        a_pad(u8, sha_hex, 64);
-        a_dup(u8c, root_s, u8bDataC(k->h->root));
-        if (DOGAtTail(branch, sha_hex, root_s) == OK &&
-            u8bDataLen(sha_hex) == 40) {
+        if (u8bDataLen(k->h->cur_sha) == 40) {
             u8s sb = {out->data, out->data + 20};
-            a_dup(u8c, hx, u8bData(sha_hex));
+            a_dup(u8c, hx, u8bData(k->h->cur_sha));
             return HEXu8sDrainSome(sb, hx);
         }
-        //  Fall through to REFS so a fresh clone (only `<store>/refs`
-        //  populated, no at.log yet) still resolves trunk.
     }
 
     a_pad(u8, arena_buf, 1024);

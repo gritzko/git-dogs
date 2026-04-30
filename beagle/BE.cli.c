@@ -13,8 +13,8 @@
 #include "abc/PRO.h"
 #include "dog/DOG.h"
 #include "dog/HOME.h"
-#include "dog/AT.h"
 #include "keeper/REFS.h"
+#include "sniff/AT.h"
 
 // Distinct codes so the MAIN-wrapper's `Error: <code>` line tells you
 // what kind of failure stopped the pipeline — a dog exited non-zero
@@ -141,8 +141,8 @@ drain_done:
 
 static u32 BEReadDogs(char out[][64], u32 maxn) {
     home h = {};
-    u8cs at = {};
-    if (HOMEOpen(&h, at, NO) != OK) return 0;
+    uri at = {};
+    if (HOMEOpen(&h, &at, NO) != OK) return 0;
     a_path(p);
     a_dup(u8c, root_s, u8bDataC(h.root));
     if (PATHu8bFeed(p, root_s) != OK) { HOMEClose(&h); return 0; }
@@ -193,19 +193,42 @@ typedef struct {
     b8 bg;             // run in background (don't wait)
 } dog_step;
 
+//  Process-wide buffer for the `--at <root>?<branch>#<sha>` URI text
+//  forwarded to every sub-dog argv.  Populated once at the top of
+//  `becli` from `<cwd>/.sniff` via `SNIFFAtTailOf`; empty when no
+//  `.sniff` is present (fresh dir / pre-clone bootstrap), in which
+//  case sub-dogs fall back to their own cwd-walk.
+static u8 be_at_buf_storage[FILE_PATH_MAX_LEN + 128];
+static Bu8 be_at_buf = {
+    be_at_buf_storage, be_at_buf_storage,
+    be_at_buf_storage,
+    be_at_buf_storage + sizeof(be_at_buf_storage)
+};
+static u8c const be_at_flag_lit[] = "--at";
+static u8cs const be_at_flag = {
+    be_at_flag_lit, be_at_flag_lit + sizeof(be_at_flag_lit) - 1
+};
+
 static ok64 BEDispatch(cli *c, dog_step const *steps, u32 nsteps,
                         b8 seq) {
     sane(c && steps);
+    b8 have_at = u8bDataLen(be_at_buf) > 0;
     for (u32 i = 0; i < nsteps; i++) {
-        // argv: dog verb [flags...] [URIs...]
+        // argv: dog verb [--at <uri>] [flags...] [URIs...]
         // cli.flags and cli.uris[].data already are u8cs slices.
-        a_pad(u8cs, args, 2 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
+        a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
         // Local copies: const dog_step's u8cs fields are deeply const and
         // can't be passed by value to the mutable-pointer Feed1 param.
         a_dup(u8c, dog, steps[i].dog);
         a_dup(u8c, verb, steps[i].verb);
         u8csbFeed1(args, dog);
         u8csbFeed1(args, verb);
+        if (have_at) {
+            a_dup(u8c, at_flag, be_at_flag);
+            a_dup(u8c, at_val,  u8bData(be_at_buf));
+            u8csbFeed1(args, at_flag);
+            u8csbFeed1(args, at_val);
+        }
         // Flags come as {flag, val} pairs; val is the empty-string
         // sentinel for booleans.  Forward the flag name always; only
         // forward its value if it's genuinely non-empty, otherwise the
@@ -267,16 +290,18 @@ static ok64 BEGetWorktree(uri *u) {
     fprintf(stderr, "be: worktree from %.*s\n",
             (int)$len(u->path), (char *)u->path[0]);
 
-    // Resolve the primary's current commit via its sniff/at.log.
+    // Resolve the primary's current commit via its `.sniff` log.
     // Rewrite this URI to "?<sha>" so downstream sniff checks out
     // that commit in the worktree.
-    a_pad(u8, prim_branch, 256);
-    a_pad(u8, prim_sha, 64);
+    a_pad(u8, prim_at, FILE_PATH_MAX_LEN + 128);
     a_dup(u8c, prim_root, prim_s);
-    if (DOGAtTail(prim_branch, prim_sha, prim_root) != OK) done;
-    if (u8bDataLen(prim_sha) != 40) done;
+    if (SNIFFAtTailOf(prim_root, prim_at) != OK) done;
+    uri prim_uri = {};
+    u8csMv(prim_uri.data, u8bDataC(prim_at));
+    URILexer(&prim_uri);
+    if (u8csLen(prim_uri.fragment) != 40) done;
     wt_uri_text[0] = '?';
-    memcpy(wt_uri_text + 1, u8bDataHead(prim_sha), 40);
+    memcpy(wt_uri_text + 1, prim_uri.fragment[0], 40);
     wt_uri_text[41] = 0;
 
     u->data[0]      = wt_uri_text;
@@ -321,12 +346,21 @@ static ok64 BEProjector(cli *c, uri *u) {
     a$rg(a0, 0);
     HOMEResolveSibling(NULL, dogpath, dog_s, a0);
 
-    //  Verbless: dog argv is just `<dog> [--tlv] <URI>`.  The dog
-    //  sees the URI with its projector scheme intact and dispatches
-    //  on u->scheme inside its own CLI.
+    //  Verbless: dog argv is `<dog> [--at <uri>] [--tlv] <URI>`.  The
+    //  dog sees the URI with its projector scheme intact and dispatches
+    //  on u->scheme inside its own CLI.  `--at` carries the wt's tip
+    //  so the projector (graf map / log "you are here", etc.) doesn't
+    //  need to poke at `.sniff` itself.
     a_cstr(tlv_flag, "--tlv");
-    a_pad(u8cs, dargs, 3);
+    b8 have_at = u8bDataLen(be_at_buf) > 0;
+    a_pad(u8cs, dargs, 5);
     u8csbFeed1(dargs, dog_s);
+    if (have_at) {
+        a_dup(u8c, at_flag, be_at_flag);
+        a_dup(u8c, at_val,  u8bData(be_at_buf));
+        u8csbFeed1(dargs, at_flag);
+        u8csbFeed1(dargs, at_val);
+    }
     if (tty) u8csbFeed1(dargs, tlv_flag);
     u8csbFeed1(dargs, u->data);
     a_dup(u8cs, dargv, u8csbData(dargs));
@@ -365,8 +399,8 @@ static ok64 BEGet(cli *c, b8 seq) {
     //  place its subdir.  Local URIs already have a HOME.
     if (remote) {
         home probe_h = {};
-        u8cs at = {};
-        ok64 ho = HOMEOpen(&probe_h, at, NO);
+        uri at = {};
+        ok64 ho = HOMEOpen(&probe_h, &at, NO);
         HOMEClose(&probe_h);
         if (ho != OK) {
             a_path(here);
@@ -546,6 +580,21 @@ ok64 becli() {
     if (CLIHas(&c, "-h") || CLIHas(&c, "--help")) {
         BEUsage();
         done;
+    }
+
+    //  Read the wt's tip URI (`<root>?<branch>#<sha>`) once, here at
+    //  the top of the call chain, and stash it for `BEDispatch` to
+    //  forward to every sub-dog as `--at <uri>`.  Sub-dogs that need
+    //  to know the worktree's current branch / commit (sniff bare
+    //  `get` resume, keeper `get //origin` default branch, graf `log`
+    //  / `map` "you are here") read it back via `CLIAtURI` from
+    //  their own cli.flags — no more sub-dog poking at `.sniff`.
+    //  `c.repo` is the cwd-walked wt root resolved by `CLIParse`.
+    //  Absent / empty `.sniff` (fresh dir, pre-clone bootstrap) →
+    //  buffer stays empty and no `--at` flag is forwarded.
+    if ($ok(c.repo) && !u8csEmpty(c.repo)) {
+        u8bReset(be_at_buf);
+        (void)SNIFFAtTailOf(c.repo, be_at_buf);
     }
 
     // No args → default

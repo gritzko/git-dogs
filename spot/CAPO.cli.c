@@ -27,7 +27,7 @@ ok64 capocli() {
     b8 need_rw = $eq(c.verb, v_get);
 
     home h = {};
-    call(HOMEOpen, &h, c.repo, need_rw);
+    call(HOMEOpenAt, &h, c.repo, need_rw);
 
     call(SPOTOpen, &h, need_rw);
     ok64 ret = SPOTExec(&c);

@@ -72,8 +72,8 @@ ok64 CLIParse(cli *c, char const *const *verb_names,
     // later from c->repo.
     {
         home rh = {};
-        u8cs none = {};
-        if (HOMEOpen(&rh, none, NO) == OK) {
+        uri none = {};
+        if (HOMEOpen(&rh, &none, NO) == OK) {
             size_t rlen = u8bDataLen(rh.root);
             if (rlen >= sizeof(c->_repo)) rlen = sizeof(c->_repo) - 1;
             memcpy(c->_repo, u8bDataHead(rh.root), rlen);

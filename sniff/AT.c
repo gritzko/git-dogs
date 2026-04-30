@@ -14,6 +14,111 @@
 #include "dog/QURY.h"
 #include "keeper/WALK.h"   // WALK_KIND_*
 
+// --- Standalone RO tail peek (no SNIFF singleton, no keeper) -------
+
+//  Strip a trailing `.dogs/` (and any trailing slashes) from `in`,
+//  feeding the bare root path into `out`.  Mirrors
+//  `sniff_store_root_from_repo` (sniff/SNIFF.c) but operates on the
+//  caller's slice without touching the SNIFF singleton.
+static void at_root_from_repo_path(u8cs in, u8bp out) {
+    a_dup(u8c, p, in);
+    if (!$empty(p) && *u8csLast(p) == '/') u8csShed1(p);
+    a_cstr(dogs, ".dogs");
+    size_t dl = $len(dogs);
+    if ($len(p) >= dl && memcmp($atp(p, $len(p) - dl), dogs[0], dl) == 0)
+        for (size_t i = 0; i < dl; i++) u8csShed1(p);
+    while ($len(p) > 1 && *u8csLast(p) == '/') u8csShed1(p);
+    u8bReset(out);
+    u8bFeed(out, p);
+}
+
+ok64 SNIFFAtTailOf(u8cs wt, u8bp out) {
+    sane($ok(wt) && out);
+
+    a_cstr(rel, SNIFF_FILE);
+    a_path(apath, wt, rel);
+
+    //  RO open: callable concurrently with sniff's own RW handle.
+    //  ULOGOpenRO maps PROT_READ and skips FILEBook's page-align
+    //  ftruncate, so it can't trip the silent-EOF-truncation bug
+    //  the legacy RW reader caused.
+    u8bp  data = NULL;
+    Bkv64 idx  = {};
+    ok64 o = ULOGOpenRO(&data, idx, $path(apath));
+    if (o != OK) fail(SNIFFATNONE);
+
+    u32 n = ULOGCount(idx);
+    if (n == 0) { ULOGClose(data, idx, NO); fail(SNIFFATNONE); }
+
+    //  Row 0 = repo anchor → root path.
+    a_pad(u8, root_buf, FILE_PATH_MAX_LEN);
+    {
+        ulogrec r0 = {};
+        if (ULOGRow(data, idx, 0, &r0) != OK ||
+            r0.verb != SNIFFAtVerbRepo()) {
+            ULOGClose(data, idx, NO); fail(SNIFFATNONE);
+        }
+        u8cs rp = {r0.uri.path[0], r0.uri.path[1]};
+        at_root_from_repo_path(rp, root_buf);
+    }
+
+    //  Latest get/post/patch with a 40-hex sha → branch + sha.
+    u8cs ref_body = {}, sha_body = {};
+    b8 found = NO;
+    for (u32 i = n; i > 0; ) {
+        i--;
+        ulogrec rec = {};
+        if (ULOGRow(data, idx, i, &rec) != OK) continue;
+        uri u = rec.uri;
+
+        //  Canonical at-log shape: `?<branch>#<curhash>` — fragment
+        //  carries the sha, query carries the be-branch (empty for
+        //  trunk).  Legacy rows kept the sha in a query spec; fall
+        //  through and walk the `&`-chain when the fragment is empty.
+        ref_body[0] = ref_body[1] = NULL;
+        sha_body[0] = sha_body[1] = NULL;
+        {
+            u8cs frag = {u.fragment[0], u.fragment[1]};
+            if (u8csLen(frag) == 40) {
+                sha_body[0] = frag[0];
+                sha_body[1] = frag[1];
+            }
+        }
+        a_dup(u8c, q, u.query);
+        while (!$empty(q)) {
+            qref spec = {};
+            if (QURYu8sDrain(q, &spec) != OK) break;
+            if (spec.type == QURY_NONE) break;
+            if (spec.type == QURY_REF && $empty(ref_body)) {
+                ref_body[0] = spec.body[0];
+                ref_body[1] = spec.body[1];
+            } else if (spec.type == QURY_SHA &&
+                       $len(spec.body) == 40 &&
+                       $empty(sha_body)) {
+                sha_body[0] = spec.body[0];
+                sha_body[1] = spec.body[1];
+            }
+        }
+        if (!$empty(sha_body)) { found = YES; break; }
+    }
+
+    if (!found) { ULOGClose(data, idx, NO); fail(SNIFFATNONE); }
+
+    //  Compose `<root>?<branch>#<sha>` into `out`.  branch may be
+    //  empty (== trunk); `?` separator stays so URILexer round-trips
+    //  the empty query as a present-but-empty slot.
+    u8bReset(out);
+    a_dup(u8c, root_s, u8bData(root_buf));
+    u8bFeed(out, root_s);
+    u8bFeed1(out, '?');
+    if (!$empty(ref_body)) u8bFeed(out, ref_body);
+    u8bFeed1(out, '#');
+    u8bFeed(out, sha_body);
+
+    ULOGClose(data, idx, NO);
+    done;
+}
+
 //  Row-0 invariant guard: `repo` only at row 0, every other verb only
 //  at row ≥ 1.  Returns OK if the append is allowed.
 static ok64 at_check_row0(ron60 verb) {

@@ -32,7 +32,6 @@
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "abc/URI.h"
-#include "dog/AT.h"
 #include "dog/DOG.h"
 #include "dog/HUNK.h"
 #include "dog/WHIFF.h"
@@ -205,18 +204,17 @@ ok64 GRAFMap(uricp u) {
     (void)u;
 
     //  Resolve current branch (path) so we can compute the include
-    //  filter (current ∪ ancestors-to-trunk ∪ descendants).
-    a_pad(u8, cur_branch_buf, 256);
-    a_pad(u8, cur_sha_buf, 64);
-    a_dup(u8c, root_s, u8bDataC(KEEP.h->root));
+    //  filter (current ∪ ancestors-to-trunk ∪ descendants).  Sourced
+    //  from `--at <root>?<branch>#<sha>` forwarded by `be` and parked
+    //  in `KEEP.h->cur_branch` by HOMEOpen.  Empty branch == trunk.
     char cur_path[MAP_PATH_MAX] = {0};
     u16  cur_len = 0;
-    if (DOGAtTail(cur_branch_buf, cur_sha_buf, root_s) == OK) {
-        a_dup(u8c, cb, u8bData(cur_branch_buf));
+    {
+        a_dup(u8c, cb, u8bData(KEEP.h->cur_branch));
         size_t cl = (size_t)$len(cb);
-        if (cl > 0 && cb[0][0] == '?') { cb[0]++; cl--; }
+        if (cl > 0 && cb[0][0] == '?') { u8csUsed1(cb); cl--; }
         if (cl >= MAP_PATH_MAX) cl = MAP_PATH_MAX - 1;
-        memcpy(cur_path, cb[0], cl);
+        if (cl > 0) memcpy(cur_path, cb[0], cl);
         cur_len = (u16)cl;
     }
 

@@ -58,7 +58,7 @@ static ok64 stage_fixture(char const *tmpdir, char *out_hex_41) {
     sane(tmpdir && out_hex_41);
     a_cstr(root_s, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root_s, YES);
+    call(HOMEOpenAt, &h, root_s, YES);
     call(KEEPOpen, &h, YES);
 
     keep_pack p = {};

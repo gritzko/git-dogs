@@ -86,7 +86,7 @@ ok64 SNIFFAtHelpers() {
 
     a_cstr(root, g_tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
     call(SNIFFOpen, &h, YES);
 
@@ -224,7 +224,7 @@ ok64 SNIFFCheckoutCommit() {
 
     a_cstr(root, g_tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
 
     // Open keeper, create a blob + tree + commit manually
     
@@ -509,7 +509,7 @@ ok64 SNIFFRoundTrip_stash() {
 
     a_cstr(root, g_tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
 
     // 1. Create initial commit: a.txt, b.txt, c.txt
     

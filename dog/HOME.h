@@ -4,6 +4,7 @@
 #include "abc/B.h"
 #include "abc/BUF.h"
 #include "abc/PATH.h"
+#include "abc/URI.h"
 
 con ok64 NOHOME    = 0x5d845858e;
 con ok64 NOCONF    = 0x5d83185cf;
@@ -53,13 +54,43 @@ typedef struct {
     u8cs   open_branches[HOME_OPEN_BRANCHES_MAX];
     size_t open_branches_count;
     b8     write_frozen;
+
+    //  Worktree tip — the (branch, sha) pair learned from `.sniff` at
+    //  the top of the call chain (`be`) and forwarded to every dog
+    //  via the `--at <root>?<branch>#<sha>` flag.  Empty when no tip
+    //  is known (fresh clone, direct sub-dog invocation without
+    //  `--at`).  `cur_branch` is the be-side branch path (empty =
+    //  trunk).  `cur_sha` is 40 hex bytes (or empty).
+    u8b    cur_branch;
+    u8b    cur_sha;
 } home;
 
-// Initialize a `home` in place.  `at` is either an explicit repo root
-// (absolute path) or empty to auto-detect via HOMEFindDogs from cwd.
+// Initialize a `home` in place.  `at` is a URI carrying everything
+// the home needs to know about its anchor:
+//   path     → repo root (where `.dogs/` lives).  Empty → auto-detect
+//              via HOMEFindDogs from cwd.
+//   query    → current be-side branch path.  Empty == trunk.  When
+//              non-empty (or path is set), HOMEOpenBranch is called
+//              internally so slot 0 is claimed in one step.
+//   fragment → current commit sha as 40 hex.  Empty when no tip is
+//              recorded (fresh clone).
 // rw=YES allows downstream dogs to create their `.dogs/<name>/` dirs.
 // Reserves the arena, mmaps `.dogs/config` if present.
-ok64 HOMEOpen(home *h, u8cs at, b8 rw);
+//
+// Pass an empty `uri` for the historical "empty `at`" behaviour.
+ok64 HOMEOpen(home *h, uricp at, b8 rw);
+
+// Path-only shim for tests / fixtures that have a repo root but no
+// branch / sha to forward.  Wraps `HOMEOpen` with a URI carrying just
+// `path = root`.  Empty `root` triggers the same cwd-walk fallback.
+fun ok64 HOMEOpenAt(home *h, u8cs root, b8 rw) {
+    uri at = {};
+    if ($ok(root) && !u8csEmpty(root)) {
+        at.path[0] = root[0];
+        at.path[1] = root[1];
+    }
+    return HOMEOpen(h, &at, rw);
+}
 
 // Release arena, config mmap, and path buffer.
 ok64 HOMEClose(home *h);

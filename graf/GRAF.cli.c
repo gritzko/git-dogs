@@ -15,8 +15,14 @@ ok64 grafcli() {
 
     // Most graf verbs read .dogs/graf/; index writes. Use rw=YES to
     // keep parity with the previous behavior (always mkdir -p).
+    //
+    // Prefer `--at` from be; fall back to cwd-walk via c.repo.
     home h = {};
-    call(HOMEOpen, &h, c.repo, YES);
+    uri at = {};
+    CLIAtURI(&at, &c);
+    if (u8csEmpty(at.path) && $ok(c.repo) && !u8csEmpty(c.repo))
+        u8csMv(at.path, c.repo);
+    call(HOMEOpen, &h, &at, YES);
 
     call(GRAFOpen, &h, YES);
     ok64 ret = GRAFExec(&c);

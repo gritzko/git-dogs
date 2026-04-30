@@ -1999,8 +1999,8 @@ ok64 BRORun(hunk const *hunks, u32 nhunks) {
     home scratch_h = {};
     home *rh = bro_state && bro_state->h ? bro_state->h : &scratch_h;
     if (rh == &scratch_h) {
-        u8cs none = {};
-        if (HOMEOpen(rh, none, NO) != OK) rh = NULL;
+        uri none = {};
+        if (HOMEOpen(rh, &none, NO) != OK) rh = NULL;
     }
     if (rh != NULL) {
         size_t rl = u8bDataLen(rh->root);
@@ -2153,8 +2153,8 @@ ok64 BROPipeRun(int pipefd) {
     char repo[FILE_PATH_MAX_LEN] = {};
     {
         home rh = {};
-        u8cs none = {};
-        if (HOMEOpen(&rh, none, NO) == OK) {
+        uri none = {};
+        if (HOMEOpen(&rh, &none, NO) == OK) {
             size_t rl = u8bDataLen(rh.root);
             if (rl < sizeof(repo)) {
                 memcpy(repo, u8bDataHead(rh.root), rl);

@@ -128,7 +128,7 @@ ok64 WALKtest2() {
     want(mkdtemp(tmp) != NULL);
     a_cstr(root, tmp);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
 
     
     call(KEEPOpen, &h, YES);
@@ -239,7 +239,7 @@ ok64 WALKtest4() {
     want(mkdtemp(tmp) != NULL);
     a_cstr(root, tmp);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     keep_pack p = {};

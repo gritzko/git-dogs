@@ -70,4 +70,22 @@ fun b8 CLIHas(cli const *c, char const *flag) {
     return v[0] != NULL;
 }
 
+// Compose `at` URI for `HOMEOpen`.  When `--at <uri>` is in `c->flags`,
+// URILexer it into `*at`; the slices borrow from the cli's flag
+// storage (stable for the lifetime of `c`).  When the flag is absent,
+// `*at` stays zero (HOMEOpen will then auto-detect via cwd-walk).
+//
+// The flag's payload follows the at-log row shape:
+//   `<root>?<branch>#<sha>` — path = repo root, query = current
+//   branch (empty == trunk), fragment = 40-hex commit sha.
+// `be` (the verb owner) is the producer; sub-dogs read it here.
+fun void CLIAtURI(uri *at, cli const *c) {
+    u8cs v = {};
+    CLIFlag(v, c, "--at");
+    memset(at, 0, sizeof(*at));
+    if (v[0] == NULL || u8csEmpty(v)) return;
+    u8csMv(at->data, v);
+    URILexer(at);
+}
+
 #endif

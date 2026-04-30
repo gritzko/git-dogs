@@ -41,7 +41,7 @@ ok64 HOMETestGet() {
 
     a_cstr(root, tmp);
     home h = {};
-    call(HOMEOpen, &h, root, NO);
+    call(HOMEOpenAt, &h, root, NO);
 
     u8 vbuf[128];
 
@@ -119,7 +119,7 @@ ok64 HOMETestMissingFile() {
 
     a_cstr(root, tmp);
     home h = {};
-    call(HOMEOpen, &h, root, NO);
+    call(HOMEOpenAt, &h, root, NO);
 
     u8 vbuf[64];
     u8s val = {vbuf, vbuf + sizeof(vbuf)};
@@ -151,7 +151,7 @@ ok64 HOMETestBranches() {
 
     a_cstr(root, tmp);
     home h = {};
-    call(HOMEOpen, &h, root, NO);
+    call(HOMEOpenAt, &h, root, NO);
 
     // 1. No branches yet → WriteBranch returns HOMENOBR.
     {
@@ -176,7 +176,7 @@ ok64 HOMETestBranches() {
 
     // 4. Reset and try the other order: rw first.
     HOMEClose(&h);
-    call(HOMEOpen, &h, root, NO);
+    call(HOMEOpenAt, &h, root, NO);
     {
         a_cstr(feat, "heads/feature");
         want(HOMEOpenBranch(&h, feat, YES) == OK);

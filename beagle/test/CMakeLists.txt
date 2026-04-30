@@ -29,6 +29,15 @@ add_test(NAME BEworktree
 set_tests_properties(BEworktree PROPERTIES
     ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=BEworktree")
 
+# be-clone-sniff.sh — after a clone, `.sniff` must carry both rows
+# (repo + get).  Pins the on-disk shape against silent regressions
+# where only the bootstrap repo row survives.
+add_test(NAME be-clone-sniff
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/be-clone-sniff.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(be-clone-sniff PROPERTIES
+    ENVIRONMENT "BIN=${DOG_BIN_DIR};TMP=${DOG_TEST_TMP_ROOT};TEST_ID=be-clone-sniff")
+
 # history.sh — put/post, delete/post, edit/post, then checkout an
 # older commit by SHA (version handle = at.log tail).  No ssh.
 add_test(NAME BEhistory

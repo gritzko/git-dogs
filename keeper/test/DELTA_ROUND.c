@@ -79,7 +79,7 @@ ok64 DELTARoundTrip() {
 
     u8cs root = {(u8cp)tmp, (u8cp)tmp + strlen(tmp)};
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     enum { N = 4 };

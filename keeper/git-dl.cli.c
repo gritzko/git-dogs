@@ -62,7 +62,7 @@ ok64 gitdl() {
     }
 
     home h = {};
-    call(HOMEOpen, &h, out_arg, YES);
+    call(HOMEOpenAt, &h, out_arg, YES);
     call(KEEPOpen, &h, YES);
 
     u8csc remote_cs = {remote_arg[0], remote_arg[1]};

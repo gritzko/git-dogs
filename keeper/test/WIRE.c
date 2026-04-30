@@ -129,7 +129,7 @@ ok64 WIREtest_empty() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     refadv adv = {};
@@ -194,7 +194,7 @@ ok64 WIREtest_single_want() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     sha1 blob_sha = {};
@@ -239,7 +239,7 @@ ok64 WIREtest_have_ff() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     //  First pack: blob A (the "have").
@@ -294,7 +294,7 @@ ok64 WIREtest_nosha() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     sha1 known = {};
@@ -333,7 +333,7 @@ ok64 WIREtest_caps() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     sha1 blob = {};
@@ -377,7 +377,7 @@ ok64 WIREtest_round_trip() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     sha1 sha_a = {};
@@ -423,7 +423,7 @@ ok64 WIREtest_end_to_end() {
     want(mkdtemp(tmpdir) != NULL);
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     sha1 blob_sha = {};

@@ -9,7 +9,7 @@ include_directories(.. .)
 
 add_executable(be-cli BE.cli.c)
 target_compile_definitions(be-cli PRIVATE NDEBUG)
-target_link_libraries(be-cli dog keeplib abc-core)
+target_link_libraries(be-cli snifflib graflib spotlib keeplib gitcompat dog abc-core)
 set_target_properties(be-cli PROPERTIES OUTPUT_NAME be RUNTIME_OUTPUT_DIRECTORY ${DOG_BIN_DIR})
 
 add_subdirectory(test)

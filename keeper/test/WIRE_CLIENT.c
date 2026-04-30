@@ -113,7 +113,7 @@ static ok64 stage_local_keeper(char const *keeper_root, char const *pack_path,
 
     a_cstr(root_s, keeper_root);
     home h = {};
-    call(HOMEOpen, &h, root_s, YES);
+    call(HOMEOpenAt, &h, root_s, YES);
     call(KEEPOpen, &h, YES);
 
     u8csc bytes = {pbuf, pbuf + plen};
@@ -143,7 +143,7 @@ static b8 lookup_local_ref(char const *keeper_root, char const *branch,
                            char *out_41) {
     a_cstr(root_s, keeper_root);
     home h = {};
-    if (HOMEOpen(&h, root_s, NO) != OK) return NO;
+    if (HOMEOpenAt(&h, root_s, NO) != OK) return NO;
     if (KEEPOpen(&h, NO) != OK) { HOMEClose(&h); return NO; }
     a_path(keepdir, u8bDataC(KEEP.h->root), KEEP_DIR_S);
 
@@ -202,7 +202,7 @@ ok64 WIRECLIENTtest_fetch_smoke() {
     {
         a_cstr(client_root_s, clientdir);
         home h = {};
-        call(HOMEOpen, &h, client_root_s, YES);
+        call(HOMEOpenAt, &h, client_root_s, YES);
         call(KEEPOpen, &h, YES);
 
         FILE_URI(uri, serverdir);
@@ -248,7 +248,7 @@ ok64 WIRECLIENTtest_push_smoke() {
     {
         a_cstr(src_root_s, srcdir);
         home h = {};
-        call(HOMEOpen, &h, src_root_s, YES);
+        call(HOMEOpenAt, &h, src_root_s, YES);
         call(KEEPOpen, &h, YES);
 
         FILE_URI(uri, dstdir);
@@ -303,7 +303,7 @@ ok64 WIRECLIENTtest_round_trip() {
     {
         a_cstr(A_root_s, Adir);
         home h = {};
-        call(HOMEOpen, &h, A_root_s, YES);
+        call(HOMEOpenAt, &h, A_root_s, YES);
         call(KEEPOpen, &h, YES);
 
         FILE_URI(uri, Bdir);
@@ -323,7 +323,7 @@ ok64 WIRECLIENTtest_round_trip() {
     {
         a_cstr(C_root_s, Cdir);
         home h = {};
-        call(HOMEOpen, &h, C_root_s, YES);
+        call(HOMEOpenAt, &h, C_root_s, YES);
         call(KEEPOpen, &h, YES);
 
         FILE_URI(uri, Adir);

@@ -104,7 +104,7 @@ static void home_bootstrap_config(home *h) {
     FILEClose(&fd);
 }
 
-ok64 HOMEOpen(home *h, u8cs at, b8 rw) {
+ok64 HOMEOpen(home *h, uricp at, b8 rw) {
     sane(h != NULL);
     zerop(h);
     h->rw = rw;
@@ -115,19 +115,44 @@ ok64 HOMEOpen(home *h, u8cs at, b8 rw) {
     h->open_branches_count = 0;
     h->write_frozen = NO;
 
-    // 1. Path buffers for wt and repo root, 1 KB each.
-    call(u8bAllocate, h->root, FILE_PATH_MAX_LEN);
-    call(u8bAllocate, h->wt,   FILE_PATH_MAX_LEN);
+    // 1. Path buffers for wt and repo root, 1 KB each; tip buffers
+    // for branch path (interning size) and sha (40-hex).
+    call(u8bAllocate, h->root,       FILE_PATH_MAX_LEN);
+    call(u8bAllocate, h->wt,         FILE_PATH_MAX_LEN);
+    call(u8bAllocate, h->cur_branch, 256);
+    call(u8bAllocate, h->cur_sha,    64);
 
-    // 2. Resolve root: explicit → feed; implicit → HOMEFindDogs.
-    if ($ok(at) && !u8csEmpty(at)) {
-        call(PATHu8bFeed, h->root, at);
+    // 2. Resolve root: explicit URI path → feed; absent → HOMEFindDogs.
+    u8cs at_path  = {};
+    u8cs at_query = {};
+    u8cs at_frag  = {};
+    if (at != NULL) {
+        u8csMv(at_path,  at->path);
+        u8csMv(at_query, at->query);
+        u8csMv(at_frag,  at->fragment);
+    }
+    if (!u8csEmpty(at_path)) {
+        call(PATHu8bFeed, h->root, at_path);
     } else {
         call(HOMEFindDogs, h);
     }
-    //  Default wt = root (colocated).  SNIFFOpen refines h->root from
-    //  the `.sniff` repo row in secondary worktrees.
-    {
+    //  wt: where `.sniff` lives.
+    //    * URI carries query OR fragment → call came from `be`'s
+    //      `--at <root>?<branch>#<sha>` forward; the wt is the
+    //      *subprocess cwd*, which may differ from `root` (secondary
+    //      worktree symlinking into a primary's `.dogs/`).
+    //    * URI path only (test fixture / HOMEOpenAt shim) or empty
+    //      (cwd-walk) → wt == root, the colocated default.
+    if (!u8csEmpty(at_query) || !u8csEmpty(at_frag)) {
+        a_path(cwdp);
+        if (FILEGetCwd(cwdp) == OK) {
+            a_dup(u8c, cwd_s, u8bDataC(cwdp));
+            call(PATHu8bFeed, h->wt, cwd_s);
+        } else {
+            a_dup(u8c, r, u8bDataC(h->root));
+            call(PATHu8bFeed, h->wt, r);
+        }
+    } else {
         a_dup(u8c, r, u8bDataC(h->root));
         call(PATHu8bFeed, h->wt, r);
     }
@@ -153,6 +178,20 @@ ok64 HOMEOpen(home *h, u8cs at, b8 rw) {
                 ((u8 **)h->config)[i] = mapped[i];
         }
     }
+
+    // 5. Tip from URI: query → cur_branch + claim slot 0 via
+    //    HOMEOpenBranch; fragment → cur_sha.  Trunk maps to the
+    //    canonical empty branch — feed an empty slice when query is
+    //    absent so HOMEOpenBranch's normalizer claims slot 0 anyway.
+    //    No tip yet (fresh clone, direct sub-dog without --at) →
+    //    leave both buffers empty and skip the branch claim.
+    if (!u8csEmpty(at_query) || !u8csEmpty(at_frag)) {
+        u8bFeed(h->cur_branch, at_query);
+        if (!u8csEmpty(at_frag)) u8bFeed(h->cur_sha, at_frag);
+        a_dup(u8c, br, u8bDataC(h->cur_branch));
+        ok64 bo = HOMEOpenBranch(h, br, rw);
+        if (bo != OK && bo != HOMEOPEN) return bo;
+    }
     done;
 }
 
@@ -162,6 +201,8 @@ ok64 HOMEClose(home *h) {
     if (h->arena[0]         != NULL) u8bUnMap(h->arena);
     if (h->root[0]          != NULL) u8bFree(h->root);
     if (h->wt[0]            != NULL) u8bFree(h->wt);
+    if (h->cur_branch[0]    != NULL) u8bFree(h->cur_branch);
+    if (h->cur_sha[0]       != NULL) u8bFree(h->cur_sha);
     if (h->branches_data[0] != NULL) u8bFree(h->branches_data);
     zerop(h);
     done;

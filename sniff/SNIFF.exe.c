@@ -17,7 +17,6 @@
 #include "PATCH.h"
 #include "POST.h"
 #include "PUT.h"
-#include "dog/AT.h"
 #include "dog/CLI.h"
 #include "dog/QURY.h"
 #include "dog/DOG.h"
@@ -625,16 +624,14 @@ static ok64 SNIFFGetURI(u8cs reporoot, uri *u) {
     }
 
     //  Bare `be get` (no URI args at all): resume the worktree's
-    //  current branch (from sniff's at.log) against the local trunk
-    //  row `?#<sha>`.
-    a_pad(u8, at_branch, 256);
-    a_pad(u8, at_sha, 64);
-    a_dup(u8c, at_root, reporoot);
-    if (DOGAtTail(at_branch, at_sha, at_root) == OK &&
-        u8bDataLen(at_branch) > 0) {
+    //  current branch (from `--at` forwarded by `be`, parked in
+    //  `KEEP.h->cur_branch` by HOMEOpen) against the local trunk row
+    //  `?#<sha>`.  Empty branch == trunk → falls through to the bare
+    //  `?` lookup below.
+    if (u8bDataLen(KEEP.h->cur_branch) > 0) {
         a_pad(u8, qbuf, 256);
         u8bFeed1(qbuf, '?');
-        u8bFeed(qbuf, u8bDataC(at_branch));
+        u8bFeed(qbuf, u8bDataC(KEEP.h->cur_branch));
         a_dup(u8c, qkey, u8bData(qbuf));
         ok64 o = sniff_get_by_refkey(reporoot, $path(keepdir), qkey);
         if (o == OK) return OK;
@@ -696,7 +693,7 @@ char const *const SNIFF_VERBS[] = {
 };
 
 char const SNIFF_VAL_FLAGS[] =
-    "-m\0--author\0";
+    "-m\0--author\0--at\0";
 
 // --- Entry: run the parsed CLI against the open state ---
 

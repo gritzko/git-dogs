@@ -17,7 +17,6 @@
 #include "dog/CLI.h"
 #include "dog/DOG.h"
 #include "dog/WHIFF.h"
-#include "dog/AT.h"
 
 // --- Verb / flag tables ---
 
@@ -28,7 +27,7 @@ char const *const KEEP_CLI_VERBS[] = {
     "help", NULL
 };
 
-char const KEEP_CLI_VAL_FLAGS[] = "--want\0--have\0";
+char const KEEP_CLI_VAL_FLAGS[] = "--want\0--have\0--at\0";
 
 // --- Usage ---
 
@@ -291,16 +290,19 @@ ok64 KEEPGetRemote(uri *g) {
     a_pad(u8, branch_buf, 256);
     u8cs cur_branch = {};
     if (u8csEmpty(want_ref)) {
-        a_pad(u8, at_branch, 256);
-        a_pad(u8, at_sha, 64);
-        a_dup(u8c, at_root, u8bDataC(k->h->root));
-        if (DOGAtTail(at_branch, at_sha, at_root) == OK &&
-            u8bDataLen(at_branch) > 0) {
-            //  Build "heads/<branch>" from worktree's current branch.
-            //  at.log may already carry the "heads/" prefix — strip it
-            //  first so we always emit a single prefix.
+        //  No explicit ref → default to the worktree's current branch
+        //  as forwarded by `be` via `--at <root>?<branch>#<sha>` and
+        //  parked in `h->cur_branch` by `HOMEOpen`.  Strip a redundant
+        //  `heads/` prefix and re-attach a canonical one so we emit
+        //  exactly `heads/<branch>` on the wire.  When no `--at` was
+        //  forwarded (direct `keeper get //origin` invocation), leave
+        //  `want_ref` empty — `wcli_match_advert` then picks the
+        //  peer's HEAD-mapped branch (mirrors `git clone`).
+        a_dup(u8c, at_branch, u8bData(k->h->cur_branch));
+        if (!u8csEmpty(at_branch)) {
             a_cstr(heads_pfx, "heads/");
-            u8cs src = {u8bDataHead(at_branch), u8bIdleHead(at_branch)};
+            u8cs src = {};
+            u8csMv(src, at_branch);
             if ($len(src) > 6 && memcmp(src[0], heads_pfx[0], 6) == 0)
                 u8csUsed(src, 6);
             u8bFeed(branch_buf, heads_pfx);
@@ -496,21 +498,23 @@ static ok64 keeper_post(keeper *k, cli *c) {
 
     //  1. Worktree's current branch + tip (used both as the WIREPush
     //     local_branch default and to record the new peer-side ref).
-    a_pad(u8, at_branch, 256);
-    a_pad(u8, at_sha, 64);
-    a_dup(u8c, at_root, u8bDataC(k->h->root));
-    if (DOGAtTail(at_branch, at_sha, at_root) != OK ||
-        u8bDataLen(at_sha) != 40) {
+    //     Sourced from `--at <root>?<branch>#<sha>` forwarded by `be`
+    //     and parked in `h->cur_branch` / `h->cur_sha` by HOMEOpen.
+    //     Empty when `--at` was not forwarded (direct `keeper post`
+    //     without sniff in the loop).
+    if (u8bDataLen(k->h->cur_sha) != 40) {
         fprintf(stderr, "keeper: post: worktree commit not set\n");
         return KEEPFAIL;
     }
+    a_dup(u8c, at_branch, u8bData(k->h->cur_branch));
+    a_dup(u8c, at_sha,    u8bData(k->h->cur_sha));
 
     //  2. Target branch.  Precedence:
     //       a. explicit URI `?query`           — user said which branch.
     //       b. refs-log host-prefix match      — `be post //sniff` after
     //          a prior `be get ssh://sniff/...?feat` recovers `feat`
     //          from `<store>/refs` via REFSResolve.
-    //       c. worktree current branch (DOGAtTail) — last-resort default.
+    //       c. worktree current branch (h->cur_branch) — last-resort default.
     //     Branch is be-side and may be empty (= trunk).  WIREPush's
     //     wcli_be_to_wire applies the trunk⇔refs/heads/main alias.
     a_pad(u8, peer_arena, 1024);
@@ -534,8 +538,8 @@ static ok64 keeper_post(keeper *k, cli *c) {
             src[0] = peer_refname[0];
             src[1] = peer_refname[1];
         } else if (u8csEmpty(g->query)) {
-            src[0] = u8bDataHead(at_branch);
-            src[1] = u8bIdleHead(at_branch);
+            src[0] = at_branch[0];
+            src[1] = at_branch[1];
         } else {
             src[0] = g->query[0];
             src[1] = g->query[1];
@@ -568,11 +572,11 @@ static ok64 keeper_post(keeper *k, cli *c) {
     sha1 at_tip = {};
     {
         u8s bin = {at_tip.data, at_tip.data + 20};
-        a_dup(u8c, hx, u8bDataC(at_sha));
+        a_dup(u8c, hx, at_sha);
         if (HEXu8sDrainSome(bin, hx) != OK || bin[0] != at_tip.data + 20) {
             fprintf(stderr,
-                    "keeper: post: bad at_sha (%llu bytes)\n",
-                    (unsigned long long)u8bDataLen(at_sha));
+                    "keeper: post: bad at_sha (%lld bytes)\n",
+                    (long long)$len(at_sha));
             u8bUnMap(rarena);
             return KEEPFAIL;
         }

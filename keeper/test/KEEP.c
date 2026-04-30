@@ -73,7 +73,7 @@ ok64 KEEPempty() {
 
     u8cs root = {(u8cp)tmpdir, (u8cp)tmpdir + strlen(tmpdir)};
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
     want(kv32bDataLen(KEEP.packs) == 0);
@@ -104,7 +104,7 @@ ok64 KEEPput() {
 
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
     want(kv32bDataLen(KEEP.packs) == 0);
@@ -174,7 +174,7 @@ ok64 KEEPpackIncremental() {
 
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
 
@@ -268,7 +268,7 @@ ok64 KEEPBranchDropTable() {
 
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     call(KEEPOpen, &h, YES);
 
     //  Trunk aliases must all refuse with KEEPTRUNK — none may be
@@ -324,7 +324,7 @@ ok64 KEEPbranchRoundTrip() {
 
     a_cstr(root, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
 
     //  Phase 1: open trunk first (creates the .dogs dir + lock), then
     //  use KEEPCreateBranch to materialise nested feat/ → feat/fix.

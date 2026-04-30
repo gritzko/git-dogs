@@ -87,8 +87,15 @@ ok64 sniffcli() {
          || is_post_dryrun;
     b8 rw = !ro;
 
+    //  Prefer the explicit `--at <root>?<branch>#<sha>` flag forwarded
+    //  by `be`; falls back to the legacy reporoot path (cwd-walk via
+    //  HOMEOpen when reporoot is empty).
     home h = {};
-    call(HOMEOpen, &h, reporoot, rw);
+    uri at = {};
+    CLIAtURI(&at, &c);
+    if (u8csEmpty(at.path) && $ok(reporoot) && !u8csEmpty(reporoot))
+        u8csMv(at.path, reporoot);
+    call(HOMEOpen, &h, &at, rw);
     call(SNIFFOpen, &h, rw);   // opens keeper singleton too
 
     //  Indexer fan-out for rw verbs (commit / stage paths that mutate

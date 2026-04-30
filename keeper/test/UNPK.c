@@ -198,7 +198,7 @@ static ok64 run_toy(char const *recipe) {
     // Set up keeper against kdir.
     u8cs root = {(u8cp)kdir, (u8cp)kdir + strlen(kdir)};
     home h = {};
-    call(HOMEOpen, &h, root, YES);
+    call(HOMEOpenAt, &h, root, YES);
     
     call(KEEPOpen, &h, YES);
 

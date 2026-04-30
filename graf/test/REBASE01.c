@@ -46,7 +46,7 @@ static ok64 setup_repo(void) {
     want(mkdtemp(g_tmp) != NULL);
     a_cstr(root, g_tmp);
     memset(&g_home, 0, sizeof(g_home));
-    call(HOMEOpen, &g_home, root, YES);
+    call(HOMEOpenAt, &g_home, root, YES);
     call(KEEPOpen, &g_home, YES);
     done;
 }

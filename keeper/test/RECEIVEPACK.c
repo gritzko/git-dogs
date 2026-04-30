@@ -192,7 +192,7 @@ static ok64 seed_ref(char const *tmpdir, char const *refname,
     sane(tmpdir && refname && hex_40);
     a_cstr(root_s, tmpdir);
     home h = {};
-    call(HOMEOpen, &h, root_s, YES);
+    call(HOMEOpenAt, &h, root_s, YES);
     call(KEEPOpen, &h, YES);
     a_path(keepdir, u8bDataC(KEEP.h->root), KEEP_DIR_S);
 
@@ -213,7 +213,7 @@ static ok64 seed_ref(char const *tmpdir, char const *refname,
 static b8 lookup_ref(char const *tmpdir, char const *refname, char *out_41) {
     a_cstr(root_s, tmpdir);
     home h = {};
-    if (HOMEOpen(&h, root_s, NO) != OK) return NO;
+    if (HOMEOpenAt(&h, root_s, NO) != OK) return NO;
     if (KEEPOpen(&h, NO) != OK) { HOMEClose(&h); return NO; }
     a_path(keepdir, u8bDataC(KEEP.h->root), KEEP_DIR_S);
 

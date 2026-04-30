@@ -26,7 +26,7 @@ char const *const GRAF_CLI_VERBS[] = {
     "log", "map", "status", "help", NULL
 };
 
-char const GRAF_CLI_VAL_FLAGS[] = "-o\0";
+char const GRAF_CLI_VAL_FLAGS[] = "-o\0--at\0";
 
 // --- Usage ---
 
