@@ -943,10 +943,16 @@ ok64 SNIFFExec(cli *c) {
         //    * path-form (`<file>`)    — stage a file removal.
         //  Bare `sniff delete` (no URIs) is the legacy "sweep
         //  missing tracked files" path; route through DELStage.
-        u32 path_n = 0;
+        //
+        //  Path-forms are batched into ONE DELStage call so the
+        //  trailing summary line appears once for the whole
+        //  invocation; branch-forms each go through DELBranch
+        //  individually (independent ref ops).
         if (c->nuris == 0) {
             ret = DELStage(0, NULL);
         } else {
+            uri path_uris[CLI_MAX_URIS];
+            u32 npath = 0;
             for (u32 i = 0; i < c->nuris && ret == OK; i++) {
                 uri *u = &c->uris[i];
                 //  Branch-form is signalled by a literal leading `?`
@@ -956,7 +962,6 @@ ok64 SNIFFExec(cli *c) {
                 //  form deletes.
                 b8 branch_form = !$empty(u->data) && u->data[0][0] == '?';
                 if (branch_form) {
-                    //  Resolve relative `?./X`, `?../X`, `?..` first.
                     a_pad(u8, del_qbuf,    256);
                     a_pad(u8, del_databuf, 260);
                     if (sniff_resolve_rel(u, del_qbuf, del_databuf,
@@ -965,13 +970,12 @@ ok64 SNIFFExec(cli *c) {
                     }
                     ret = DELBranch(u);
                 } else {
-                    ret = DELStage(1, u);
-                    if (ret == OK) path_n++;
+                    if (npath < CLI_MAX_URIS) path_uris[npath++] = *u;
                 }
             }
+            if (ret == OK && npath > 0)
+                ret = DELStage(npath, path_uris);
         }
-        //  DEL.c prints its own per-call message.
-        (void)path_n;
     } else if (is_checkout) {
         if (c->nuris < 1) {
             fprintf(stderr, "sniff: get/checkout requires a URI or hex\n");

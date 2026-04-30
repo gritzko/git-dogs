@@ -24,14 +24,90 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "abc/B.h"
 #include "abc/BUF.h"
 #include "abc/FILE.h"
+#include "abc/HEX.h"
 #include "abc/OK.h"
 #include "abc/PATH.h"
 #include "abc/PRO.h"
+#include "keeper/GIT.h"
+#include "keeper/KEEP.h"
 #include "keeper/REFS.h"
+#include "keeper/WALK.h"
 
 #include "AT.h"
+
+// --- Baseline-tree membership (for absent-path classification) ------
+//
+//  When a `be delete <path>` target is already absent on disk we
+//  need to know whether the baseline tree had it: tracked → emit
+//  the delete row so POST drops the path from the next commit;
+//  untracked → silent no-op (no row, nothing to drop).  Walks the
+//  baseline tree once on first use and caches the path set.
+
+typedef struct {
+    Bu8 paths;     // newline-terminated tracked paths
+    b8  loaded;    // YES once we've tried to walk the baseline
+    b8  ok;        // YES if walk landed (no baseline = NO, set is empty)
+} del_tracked;
+
+static ok64 del_collect_tracked(u8cs path, u8 kind, u8cp esha,
+                                u8cs blob, void0p vctx) {
+    (void)esha; (void)blob;
+    if (kind == WALK_KIND_DIR || kind == WALK_KIND_SUB) return OK;
+    if ($empty(path)) return OK;
+    del_tracked *t = (del_tracked *)vctx;
+    (void)u8bFeed(t->paths, path);
+    (void)u8bFeed1(t->paths, '\n');
+    return OK;
+}
+
+static b8 del_tracked_has(del_tracked *t, u8cs path) {
+    if (!t->loaded) {
+        t->loaded = YES;
+        if (u8bAllocate(t->paths, 1UL << 16) != OK) return NO;
+        ron60 ts = 0, verb = 0;
+        uri u = {};
+        if (SNIFFAtBaseline(&ts, &verb, &u) != OK) return NO;
+        u8 hex40[40];
+        if (SNIFFAtQueryFirstSha(&u, hex40) != OK) return NO;
+        sha1 commit_sha = {};
+        a_raw(csha_bin, commit_sha);
+        u8cs h40 = {hex40, hex40 + 40};
+        if (HEXu8sDrainSome(csha_bin, h40) != OK) return NO;
+        Bu8 cbuf = {};
+        if (u8bAllocate(cbuf, 1UL << 20) != OK) return NO;
+        u8 ctype = 0;
+        if (KEEPGetExact(&KEEP, &commit_sha, cbuf, &ctype) != OK
+            || ctype != DOG_OBJ_COMMIT) {
+            u8bFree(cbuf); return NO;
+        }
+        sha1 tree_sha = {};
+        u8cs body = {u8bDataHead(cbuf), u8bIdleHead(cbuf)};
+        ok64 to = GITu8sCommitTree(body, tree_sha.data);
+        u8bFree(cbuf);
+        if (to != OK) return NO;
+        (void)WALKTreeLazy(&KEEP, tree_sha.data,
+                           del_collect_tracked, t);
+        t->ok = YES;
+    }
+    if (!t->ok) return NO;
+    u8cs scan = {u8bDataHead(t->paths), u8bIdleHead(t->paths)};
+    while (!$empty(scan)) {
+        u8cp nl = scan[0];
+        while (nl < scan[1] && *nl != '\n') nl++;
+        if ((size_t)(nl - scan[0]) == (size_t)$len(path) &&
+            memcmp(scan[0], path[0], (size_t)$len(path)) == 0)
+            return YES;
+        scan[0] = (nl < scan[1]) ? nl + 1 : scan[1];
+    }
+    return NO;
+}
+
+static void del_tracked_free(del_tracked *t) {
+    if (t->loaded && t->ok) u8bFree(t->paths);
+}
 
 // --- Dir-form recursive delete --------------------------------------
 
@@ -141,6 +217,8 @@ ok64 DELStage(u32 nuris, uri const *uris) {
 
     u32 unlinked = 0;
     u32 emitted = 0;
+    u32 skipped = 0;
+    del_tracked tracked = {};
     for (u32 i = 0; i < nuris; i++) {
         u8cs raw = {};
         SNIFFAtPathBytes(&uris[i], raw);
@@ -194,9 +272,16 @@ ok64 DELStage(u32 nuris, uri const *uris) {
                 fail(SNIFFFAIL);
             }
             unlinked++;
+        } else {
+            //  Already absent on disk.  Only emit a row if the path
+            //  was actually in the baseline tree — otherwise this is
+            //  a no-op (the user named a path that never existed in
+            //  the repo, e.g. a typo / a renamed-away file).
+            if (!del_tracked_has(&tracked, raw)) {
+                skipped++;
+                continue;
+            }
         }
-        //  else: already absent on disk — log the row anyway.
-        //        POST drops the path either way.
 
         uri urow = {};
         urow.path[0] = raw[0];
@@ -206,8 +291,14 @@ ok64 DELStage(u32 nuris, uri const *uris) {
         emitted++;
     }
 
-    if (emitted > 0)
-        fprintf(stderr, "sniff: deleted %u file(s) (%u row(s))\n",
+    del_tracked_free(&tracked);
+    if (skipped > 0)
+        fprintf(stderr,
+                "sniff: deleted %u file(s) (%u row(s), %u skipped)\n",
+                unlinked, emitted, skipped);
+    else
+        fprintf(stderr,
+                "sniff: deleted %u file(s) (%u row(s))\n",
                 unlinked, emitted);
     done;
 }
