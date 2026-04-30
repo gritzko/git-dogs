@@ -188,10 +188,10 @@ ok64 GRAFExec(cli *c) {
 
     if ($eq(c->verb, v_status)) {
         u64 total_entries = 0;
-        for (u32 i = 0; i < g->idx.n; i++)
-            total_entries += (u64)(g->idx.runs[i][1] - g->idx.runs[i][0]);
+        for (u32 i = 0; i < g->runs_n; i++)
+            total_entries += (u64)(g->runs[i][1] - g->runs[i][0]);
         fprintf(stdout, "graf: %u index run(s), %llu entries\n",
-                g->idx.n, (unsigned long long)total_entries);
+                g->runs_n, (unsigned long long)total_entries);
         done;
     }
 

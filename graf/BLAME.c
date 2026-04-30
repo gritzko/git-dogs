@@ -193,10 +193,12 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     //  fetch+dedup loop drops commits that don't touch this path.
     Bwh128 ancestors = {};
     call(wh128bAllocate, ancestors, BLAME_ANC_SIZE);
+    wh128css runs = {NULL, NULL};
+    GRAFRuns(runs);
     if (tip_h != 0) {
-        DAGAncestors(ancestors, &GRAF.idx, tip_h);
+        DAGAncestors(ancestors, runs, tip_h);
     } else {
-        DAGAllCommits(ancestors, &GRAF.idx);
+        DAGAllCommits(ancestors, runs);
     }
 
     size_t anc_cap = (size_t)(wh128bTerm(ancestors) -
@@ -206,7 +208,7 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     u32  nord    = 0;
     if (anc_cap > 0 && u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
         ordered = (u64 *)u8bDataHead(ord_buf);
-        nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors, &GRAF.idx);
+        nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors, runs);
     }
 
     // Build author table + fetch blob bytes + build weave

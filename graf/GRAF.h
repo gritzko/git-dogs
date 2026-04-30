@@ -2,7 +2,10 @@
 #define GRAF_GRAF_H
 
 #include "abc/INT.h"
+#include "abc/KV.h"
+#include "abc/MSET.h"
 #include "dog/CLI.h"
+#include "dog/DOG.h"
 #include "dog/HOME.h"
 #include "dog/HUNK.h"
 #include "dog/SHA1.h"
@@ -17,14 +20,37 @@ typedef ok64 (*graf_emit_fn)(u8s into, hunk const *hk);
 typedef struct dag_ingest dag_ingest;
 
 // --- graf control struct (per DOG.md rule 8) ---
+//
+// Mirrors keeper's branch-aware shape: per-branch dirs hold
+// `<seqno>.graf.idx` files, registered as a DOGPup* puppy stack
+// (`puppies`).  GRAFOpenBranch walks trunk → … → leaf calling
+// DOGPupOpenAll per dir; reads fan out across the whole path; writes
+// only land in the leaf dir.  The typed `wh128cs runs[]` view is
+// rebuilt from the puppy stack on every Open and after each
+// DOGPupCreate / DOGPupThinTail; queries (DAGLookup et al) consume it
+// via `GRAFRuns()`.
 
 typedef struct {
     home        *h;          // borrowed
-    int          lock_fd;    // flock on .dogs/graf/.lock; -1 = none
+    int          lock_fd;    // flock on leaf dir's .lock; -1 = ro
     Bu8          arena;      // hunk staging buffer
     int          out_fd;     // output fd (-1 = uninitialized)
     graf_emit_fn emit;       // serializer (TLV or plain text)
-    dag_stack    idx;        // DAG index (LSM sorted runs)
+
+    //  Puppy stack: (seqno → fd) for every `<seqno>.graf.idx` along
+    //  trunk → leaf.  Mmaps live in FILE_WANT_BUFS[fd].  Compaction
+    //  appends a new puppy to the tail (DOGPupCreate) and drops the
+    //  young suffix (DOGPupThinTail).
+    Bkv32        puppies;
+    Bu8          leaf_branch;  // canonical leaf-branch path (trailing
+                               // '/'; empty for trunk).  Heap-backed.
+
+    //  Typed wh128cs view over `puppies`, rebuilt by `graf_refresh_view`
+    //  on every change.  Newest run sits at the highest index — query
+    //  loops scan in reverse so newer LSM levels override older.
+    wh128cs      runs[MSET_MAX_LEVELS];
+    u32          runs_n;
+
     dag_ingest  *ing;        // lazily allocated on first GRAFUpdate
 } graf;
 
@@ -40,21 +66,36 @@ ok64 GRAFDagFinish(void);
 con ok64 GRAFFAIL    = 0x41b28f3ca495;
 con ok64 GRAFOPEN    = 0x41b28f619397;
 con ok64 GRAFOPENRO  = 0x41b28f6193976d8;
-//  GRAFOpenBranch: branch outside the Phase-3-supported set (trunk only).
 con ok64 GRAFNOBR    = 0x41b28f5d82db;
+//  Missing prefix dir along the trunk → leaf branch path.
+con ok64 GRAFNOPATH  = 0x41b28f5d864a751;
 
 // --- Public API (DOG 4-fn, singleton) ---
 
-//  Open graf state.  Returns OK (I opened), GRAFOPEN (already open
-//  compatible), GRAFOPENRO (ro/rw conflict), or a real error.
+//  Open graf state on the trunk.  Thin wrapper over `GRAFOpenBranch`
+//  with an empty branch.  Returns OK (I opened), GRAFOPEN (already
+//  open compatible), GRAFOPENRO (ro/rw conflict), or a real error.
 ok64 GRAFOpen(home *h, b8 rw);
 
-//  Branch-aware Open (Phase 3 surface).  Normalizes `branch` via
-//  DPATHBranchNormFeed and registers it on the home singleton via
-//  HOMEOpenBranch before delegating to GRAFOpen.  Phase 3 accepts
-//  only the trunk (canonical form = empty); other branches return
-//  GRAFNOBR.  Mirrors `KEEPOpenBranch`.
+//  Branch-aware Open.  Normalizes `branch` via DPATHBranchNormFeed,
+//  registers it on the home singleton via HOMEOpenBranch, then walks
+//  trunk → … → leaf under `<root>/.dogs/graf/`, calling
+//  `DOGPupOpenAll(GRAF.puppies, dir, ".graf.idx")` per dir.  Locks
+//  the leaf's `.lock` when rw.  Refreshes the typed `runs[]` view.
+//  Mirrors `KEEPOpenBranch`.  Missing prefix dirs return `GRAFNOPATH`.
 ok64 GRAFOpenBranch(home *h, u8cs branch, b8 rw);
+
+//  Fill `out` with a live `wh128css` view over the open puppy stack
+//  (oldest run at index 0, newest last).  Slice ends point into
+//  `GRAF.runs[]`; valid until the next DOGPupCreate / DOGPupThinTail
+//  / GRAFClose.
+void GRAFRuns(wh128cssp out);
+
+//  Refresh GRAF.runs[] / GRAF.runs_n from the current GRAF.puppies
+//  stack.  Called by GRAFOpenBranch and after every DOGPupCreate /
+//  DOGPupThinTail; exposed here so DAG.c's compactor (which lives
+//  next to its writes) can keep the view in sync.
+void GRAFRefreshView(void);
 
 //  Run one CLI invocation.
 ok64 GRAFExec(cli *c);

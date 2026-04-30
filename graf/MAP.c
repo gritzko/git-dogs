@@ -257,7 +257,9 @@ ok64 GRAFMap(uricp u) {
             return ao;
         }
         kept[i].anc_init = YES;
-        DAGAncestors(kept[i].ancestors, &GRAF.idx, kept[i].tip_h40);
+        wh128css runs = {NULL, NULL};
+        GRAFRuns(runs);
+        DAGAncestors(kept[i].ancestors, runs, kept[i].tip_h40);
     }
 
     //  Union all hashlets.  The deepest-claiming branch owns each.
@@ -267,7 +269,9 @@ ok64 GRAFMap(uricp u) {
     if (nk > 0) {
         u64 *tips = (u64 *)calloc(nk, sizeof(u64));
         for (u32 i = 0; i < nk; i++) tips[i] = kept[i].tip_h40;
-        DAGAncestorsOfMany(union_set, &GRAF.idx, tips, nk);
+        wh128css runs = {NULL, NULL};
+        GRAFRuns(runs);
+        DAGAncestorsOfMany(union_set, runs, tips, nk);
         free(tips);
     }
 

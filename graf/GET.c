@@ -150,8 +150,10 @@ static u64 get_lca(u64 a_h40, u64 b_h40) {
         wh128bFree(set_a); wh128bFree(set_b); return 0;
     }
 
-    ok64 oa = DAGAncestors(set_a, &GRAF.idx, a_h40);
-    ok64 ob = DAGAncestors(set_b, &GRAF.idx, b_h40);
+    wh128css runs = {NULL, NULL};
+    GRAFRuns(runs);
+    ok64 oa = DAGAncestors(set_a, runs, a_h40);
+    ok64 ob = DAGAncestors(set_b, runs, b_h40);
     if (oa != OK || ob != OK) {
         wh128bFree(set_a); wh128bFree(set_b); wh128bFree(set_c);
         return 0;
@@ -173,7 +175,7 @@ static u64 get_lca(u64 a_h40, u64 b_h40) {
     Bu8 ord_buf = {};
     if (cap > 0 && u8bMap(ord_buf, cap * sizeof(u64)) == OK) {
         u64 *ordered = (u64 *)u8bDataHead(ord_buf);
-        u32 nord = DAGTopoSort(ordered, (u32)cap, set_c, &GRAF.idx);
+        u32 nord = DAGTopoSort(ordered, (u32)cap, set_c, runs);
         if (nord > 0) best = ordered[nord - 1];
         u8bUnMap(ord_buf);
     }
@@ -282,7 +284,9 @@ static ok64 get_weave_union(u8b into, u8cs path,
 
     u64 tip_hs[GET_MAX_TIPS] = {};
     for (u32 i = 0; i < ntips; i++) tip_hs[i] = tips[i].h40;
-    ok64 ao = DAGAncestorsOfMany(anc, &GRAF.idx, tip_hs, ntips);
+    wh128css runs = {NULL, NULL};
+    GRAFRuns(runs);
+    ok64 ao = DAGAncestorsOfMany(anc, runs, tip_hs, ntips);
     if (ao != OK) { wh128bFree(anc); return ao; }
 
     //  Topo-sort the ancestor union parents-before-children.  No
@@ -295,7 +299,7 @@ static ok64 get_weave_union(u8b into, u8cs path,
     Bu8 ord_buf = {};
     if (anc_cap > 0 && u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
         u64 *ordered = (u64 *)u8bDataHead(ord_buf);
-        u32 nord = DAGTopoSort(ordered, (u32)anc_cap, anc, &GRAF.idx);
+        u32 nord = DAGTopoSort(ordered, (u32)anc_cap, anc, runs);
         if (nord > GET_MAX_VERS) nord = GET_MAX_VERS;
         memcpy(vers, ordered, nord * sizeof(u64));
         nvers = nord;

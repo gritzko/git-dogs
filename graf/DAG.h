@@ -9,9 +9,13 @@
 //  no content — actual blobs/trees are retrieved via keeper using
 //  the full path at query time.
 //
-//  Layout:
-//      .dogs/graf/0000000001.idx   sorted wh128 runs (LSM)
-//      .dogs/graf/COMMIT           last-seen ref tips, oldest first
+//  Layout (mirrors keeper's branch-sharded shape):
+//      .dogs/graf/<branch>/0000000001.graf.idx  sorted wh128 runs (LSM)
+//      .dogs/graf/COMMIT                        last-seen ref tips
+//  Trunk's `<branch>` slot is empty; nested branches live under
+//  parent dirs (`.dogs/graf/feat/sub/...`).  `GRAFOpenBranch` walks
+//  trunk → leaf, registering every `.graf.idx` along the way as a
+//  DOGPup* puppy stack.  Writes only land in the leaf dir.
 //
 //  Entry format (wh128 = 2 × wh64 = 16 bytes):
 //      a = type[4] | id[20] | hashlet[40]
@@ -87,26 +91,25 @@ fun void DAGsha1ToHex(char *hex41, sha1 const *s) {
 }
 
 // --- LSM stack for index lookups ---
+//
+//  Public DAG queries take `wh128css runs` — a slice over the live
+//  wh128cs runs that make up the LSM index.  graf produces it via
+//  `GRAFRuns()` (a typed view over the kv32b puppy stack populated by
+//  `DOGPupOpenAll`); test fixtures or other callers can build their
+//  own from any source.  Newest-first scan order; per-run binary
+//  search.
 
 #include "abc/MSET.h"
 
-typedef struct {
-    wh128cs runs[MSET_MAX_LEVELS];
-    u8bp    maps[MSET_MAX_LEVELS];
-    u32     n;
-} dag_stack;
-
-ok64 dag_stack_open(dag_stack *st, u8cs dagdir);
-void dag_stack_close(dag_stack *st);
-
-//  Find first entry matching (type, hashlet) in the stack.
+//  Find first entry matching (type, hashlet) anywhere in the stack.
 //  Returns NULL if not found.  Scans across type-interleaved entries.
-fun wh128cp DAGLookup(dag_stack const *st, u8 type, u64 hashlet) {
+fun wh128cp DAGLookup(wh128css runs, u8 type, u64 hashlet) {
     u64 key_lo = DAGPack(type, 0, hashlet);
     u64 key_hi = DAGPack(type, WHIFF_ID_MASK, hashlet);
-    for (u32 r = 0; r < st->n; r++) {
-        wh128cp base = st->runs[r][0];
-        size_t len = (size_t)(st->runs[r][1] - base);
+    a_dup(wh128cs, scan, runs);
+    $for(wh128cs, run, scan) {
+        wh128cp base = (*run)[0];
+        size_t len = (size_t)((*run)[1] - base);
         size_t lo = 0, hi = len;
         while (lo < hi) {
             size_t mid = lo + (hi - lo) / 2;
@@ -126,30 +129,30 @@ fun wh128cp DAGLookup(dag_stack const *st, u8 type, u64 hashlet) {
 // ==========================================================
 
 //  Root-tree hashlet of a commit.  0 if not indexed.
-fun u64 DAGCommitTree(dag_stack const *idx, u64 commit_h) {
-    wh128cp rec = DAGLookup(idx, DAG_COMMIT_TREE, commit_h);
+fun u64 DAGCommitTree(wh128css runs, u64 commit_h) {
+    wh128cp rec = DAGLookup(runs, DAG_COMMIT_TREE, commit_h);
     return rec ? DAGHashlet(rec->val) : 0;
 }
 
 //  Collect parent hashlets of a commit into out[0..cap).  Returns the
 //  total number of parents found; only the first min(count, cap) are
 //  written.  Root commits return 0.
-u32 DAGParents(dag_stack const *idx, u64 commit_h, u64 *out, u32 cap);
+u32 DAGParents(wh128css runs, u64 commit_h, u64 *out, u32 cap);
 
 //  BFS from `tip` over COMMIT_PARENT edges; populate `set` with all
 //  reachable commit hashlets (tip included).  `set` must be a
 //  pre-allocated, power-of-two-sized Bwh128.  Pass tip=0 for a no-op.
-ok64 DAGAncestors(Bwh128 set, dag_stack const *idx, u64 tip);
+ok64 DAGAncestors(Bwh128 set, wh128css runs, u64 tip);
 
 //  Union of DAGAncestors across `n` tips into `set`.  Each tip is
 //  walked independently; duplicates collapse on the common set.
-ok64 DAGAncestorsOfMany(Bwh128 set, dag_stack const *idx,
+ok64 DAGAncestorsOfMany(Bwh128 set, wh128css runs,
                         u64 const *tips, u32 n);
 
 //  Populate `set` with every commit hashlet recorded in the index
 //  (one record per COMMIT_TREE entry).  Use when there's no tip to
 //  scope the walk to and a full-history projection is wanted.
-ok64 DAGAllCommits(Bwh128 set, dag_stack const *idx);
+ok64 DAGAllCommits(Bwh128 set, wh128css runs);
 
 //  Membership check on a set populated by DAGAncestors.
 b8 DAGAncestorsHas(Bwh128 set, u64 commit_h);
@@ -164,7 +167,7 @@ ok64 dag_anc_put(Bwh128 set, u64 commit_h);
 //  Out-of-set parents are ignored.  On stack overflow or alloc failure
 //  the routine returns what it has so far.
 u32 DAGTopoSort(u64 *out, u32 cap,
-                Bwh128 set, dag_stack const *idx);
+                Bwh128 set, wh128css runs);
 
 // --- hashlet width bridging ---
 //

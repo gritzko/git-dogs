@@ -537,3 +537,16 @@ void DOGPupData(u8csp out, kv32b pups, u32 i) {
     out[0] = slot[0];
     out[1] = slot[2];
 }
+
+ok64 DOGPupAllData(u8csb out, kv32b pups) {
+    sane(out && pups);
+    u8csbReset(out);
+    u32 n = (u32)kv32bDataLen(pups);
+    for (u32 i = 0; i < n; i++) {
+        u8cs s = {};
+        DOGPupData(s, pups, i);
+        if (s[0] == NULL) continue;
+        call(u8csbFeed1, out, s);
+    }
+    done;
+}

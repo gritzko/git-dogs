@@ -258,7 +258,9 @@ static ok64 graflog_branch(log_ctx *lx, keeper *k, sha1 const *tip,
         //  invariant — `parents[1+]` only appears for git-imported
         //  merges, which a `--first-parent`-style log skips by design).
         u64 parents[2] = {0, 0};
-        u32 np = DAGParents(&GRAF.idx, cur_h40, parents, 2);
+        wh128css runs = {NULL, NULL};
+        GRAFRuns(runs);
+        u32 np = DAGParents(runs, cur_h40, parents, 2);
         if (np == 0) break;
         cur_h40 = parents[0];
     }
@@ -278,7 +280,9 @@ static ok64 graflog_file(log_ctx *lx, keeper *k, sha1 const *tip,
 
     Bwh128 ancestors = {};
     call(wh128bAllocate, ancestors, LOG_ANC_SIZE);
-    DAGAncestors(ancestors, &GRAF.idx, tip_h40);
+    wh128css runs = {NULL, NULL};
+    GRAFRuns(runs);
+    DAGAncestors(ancestors, runs, tip_h40);
 
     //  Topo-sort parents-before-children, then walk in reverse for
     //  newest-first emission.
@@ -290,7 +294,7 @@ static ok64 graflog_file(log_ctx *lx, keeper *k, sha1 const *tip,
         fail(GRAFFAIL);
     }
     u64 *ordered = (u64 *)u8bDataHead(ord_buf);
-    u32 nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors, &GRAF.idx);
+    u32 nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors, runs);
 
     //  Walk parents-first, dedup each commit's blob against its parent's
     //  bytes; collect "touching" commit hashlets into `keep[]`.  The

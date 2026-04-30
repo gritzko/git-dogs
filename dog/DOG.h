@@ -173,6 +173,14 @@ fun u32 DOGPupCount(kv32b pups) { return (u32)kv32bDataLen(pups); }
 // `i` is out-of-range or the file's mapping has been released.
 void DOGPupData(u8csp out, kv32b pups, u32 i);
 
+// Fill `out` with one [data_start, data_end) slice per live puppy
+// (oldest → newest, matching the kv32b's seqno order from
+// DOGPupOpenAll).  Resets `out` first.  Skips puppies whose slot has
+// been released — the resulting slice count may be less than
+// DOGPupCount.  Used by the LSM merge / lookup loops in keeper, graf,
+// spot to view the whole stack as one `u8css`.
+ok64 DOGPupAllData(u8csb out, kv32b pups);
+
 // Seqno of the i-th puppy.  Returns 0 when out-of-range.
 fun u32 DOGPupSeqno(kv32b pups, u32 i) {
     if (i >= kv32bDataLen(pups)) return 0;
