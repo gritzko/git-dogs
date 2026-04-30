@@ -188,9 +188,9 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     //  No PATH_VER pre-filter — the blob fetch loop below skips commits
     //  where the path is absent and dedups byte-identical adjacent
     //  versions.  When tip_h == 0 (caller couldn't resolve a tip), fall
-    //  back to all commits recorded in the index.
-    u64 vers[BLAME_MAX_VERS];
-    u32 nvers = 0;
+    //  back to all commits recorded in the index.  No size cap on the
+    //  ordered list: the heap buffer scales with the index, and the
+    //  fetch+dedup loop drops commits that don't touch this path.
     Bwh128 ancestors = {};
     call(wh128bAllocate, ancestors, BLAME_ANC_SIZE);
     if (tip_h != 0) {
@@ -202,14 +202,11 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     size_t anc_cap = (size_t)(wh128bTerm(ancestors) -
                               wh128bHead(ancestors));
     Bu8 ord_buf = {};
-    if (u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
-        u64 *ordered = (u64 *)u8bDataHead(ord_buf);
-        u32 nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors,
-                               &GRAF.idx);
-        if (nord > BLAME_MAX_VERS) nord = BLAME_MAX_VERS;
-        memcpy(vers, ordered, nord * sizeof(u64));
-        nvers = nord;
-        u8bUnMap(ord_buf);
+    u64 *ordered = NULL;
+    u32  nord    = 0;
+    if (anc_cap > 0 && u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
+        ordered = (u64 *)u8bDataHead(ord_buf);
+        nord = DAGTopoSort(ordered, (u32)anc_cap, ancestors, &GRAF.idx);
     }
 
     // Build author table + fetch blob bytes + build weave
@@ -237,8 +234,8 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     PATHu8sExt(ext, filepath);
 
     b8 have_prev = NO;
-    for (u32 i = 0; i < nvers; i++) {
-        u64 commit_h = vers[i];
+    for (u32 i = 0; i < nord; i++) {
+        u64 commit_h = ordered[i];
         u8bReset(*cur_blob);
         ok64 fo = GRAFBlobAtCommit(*cur_blob, k, commit_h, filepath);
         if (fo != OK) continue;
@@ -444,6 +441,7 @@ ok64 GRAFBlame(keeper *k, u8cs filepath, u64 tip_h, u8cs reporoot) {
     WEAVEFree(&wA);
     WEAVEFree(&wB);
     WEAVEFree(&wnu);
+    if (ord_buf[0]) u8bUnMap(ord_buf);
     if (wh128bHead(ancestors) != wh128bTerm(ancestors)) wh128bFree(ancestors);
     if (own_open) GRAFClose();
     GRAFArenaCleanup();
