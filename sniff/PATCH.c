@@ -371,6 +371,15 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
             sha1 lsub = l ? l->sha : (sha1){};
             sha1 osub = o ? o->sha : (sha1){};
             sha1 tsub = t ? t->sha : (sha1){};
+            //  Subtree-level short-circuit: when all three sides
+            //  agree on the subtree sha, every leaf below is XXX-
+            //  noop by construction — skip the whole recursion.
+            //  Requires all three sides present (a missing side has
+            //  a zero sha that would never match a real tree sha).
+            if (l && o && t &&
+                sha_eq(&lsub, &osub) && sha_eq(&osub, &tsub)) {
+                continue;
+            }
             //  If either subtree is missing AND absent on LCA, the
             //  whole subtree is a pure add/delete — for MVP skeleton
             //  we still descend with empty-stand-in.  Real add/delete
