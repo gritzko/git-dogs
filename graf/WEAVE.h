@@ -37,6 +37,14 @@ con ok64 WEAVEFAIL = 0x2038a7ce3ca495;
 //  -base in the wt-vs-base shape per VERBS.md `diff:`).
 #define WEAVE_WT_SRC 0xFFFFFFFFu
 
+//  Sentinel `src` for synthetic conflict-marker tokens that frame
+//  divergent regions in a merged weave's alive byte stream.  Picked
+//  one shy of WEAVE_WT_SRC so the same arithmetic-rare-value rationale
+//  applies (bottom 32 bits of a real `WHIFFHashlet40` are unlikely
+//  to be 0xFFFFFFFE).  Only ever observed at render time — never
+//  stored in committed history.
+#define WEAVE_CFLCT_SRC 0xFFFFFFFEu
+
 typedef struct {
     u32 in;
     u32 rm;
@@ -144,5 +152,34 @@ ok64 WEAVEEmitDiff(weave const *w, u8cs name,
                    WEAVEsetfn in_from, void *from_ctx,
                    WEAVEsetfn in_to,   void *to_ctx,
                    HUNKcb cb, void *cb_ctx);
+
+// --- Conflict-aware merged-weave render ---
+//
+//  Emit alive bytes of a merged weave (output of `WEAVEMerge`) into
+//  `out`, framing divergent regions with `<<<<` / `||||` / `>>>>`
+//  marker bytes when the merge inputs disagreed.
+//
+//  `preds[0..npreds)` carry one membership predicate per merge input
+//  head — `WEAVEsetfn(commit_h32, ctx)` returns YES iff the supplied
+//  32-bit commit hashlet is in that head's reachable history (the
+//  natural backing is the `Bwh128` ancestor closure produced by
+//  `DAGAncestors`, optionally augmented with `WEAVE_WT_SRC` for a
+//  wt-as-final-layer side).  Tokens with `inrm.in == 0` (pre-timeframe
+//  bootstrap) are treated as spine (member of every predicate).
+//
+//  Conflict criterion (per non-EQ run): the run is a conflict iff it
+//  contains two alive tokens whose membership signatures are disjoint
+//  (no `P_i` satisfies both).  Otherwise the run's alive bytes emit
+//  verbatim in weave order.
+//
+//  Conflict emission: `<<<<`, then per-distinct-membership cluster
+//  bytes interleaved with `||||`, then `>>>>`.  Cluster order matches
+//  first-appearance order in the run.  No newline framing — JOIN
+//  format compatibility.
+//
+//  `out` is reset on entry.  npreds <= 32.
+ok64 WEAVEEmitMerged(weave const *w,
+                     WEAVEsetfn const *preds, void *const *ctxs,
+                     u32 npreds, u8b out);
 
 #endif

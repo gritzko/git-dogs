@@ -23,6 +23,7 @@
 #include "abc/TEST.h"
 #include "dog/DOG.h"
 #include "dog/HOME.h"
+#include "dog/WHIFF.h"
 #include "keeper/KEEP.h"
 
 // --- Tiny test harness (mirrors REBASE01.c) ----------------------------
@@ -267,11 +268,73 @@ ok64 test_wt_clean_drift(void) {
     done;
 }
 
+//  (d) Same line edited by both wt and tgt → conflict markers.
+//  Both sides change line 2; the merger can't pick one — output
+//  carries `<<<<` / `||||` / `>>>>` framing the divergent region.
+ok64 test_conflict(void) {
+    sane(1);
+    call(setup_repo);
+
+    keep_pack p = {};
+    call(KEEPPackOpen, &KEEP, &p);
+    p.strict_order = NO;
+
+    sha1 c_base = {}, c_tgt = {};
+    call(commit_one_file, &p, "f.txt",
+         "one\nbeta\nthree\n", NULL,        "base", 1700000000L, &c_base);
+    call(commit_one_file, &p, "f.txt",
+         "one\nBETA-tgt\nthree\n", &c_base, "tgt",  1700000100L, &c_tgt);
+
+    call(KEEPPackClose, &KEEP, &p);
+    call(GRAFOpen, &g_home, YES);
+    call(GRAFIndex, &KEEP);
+
+    //  wt edits the same line, differently from tgt.
+    call(write_wt, "f.txt", "one\nBETA-wt\nthree\n");
+
+    Bu8 out = {};
+    call(u8bAllocate, out, 1024);
+    a_cstr(path, "f.txt");
+    a_dup(u8c, root, u8bData(g_home.wt));
+
+    call(GRAFMergeWtFile, path, root, &c_base, &c_tgt, out);
+
+    //  Output must carry conflict markers framing the disagreement.
+    //  WEAVEMerge's NEIL/canonicalization can split a single conceptual
+    //  conflict across multiple non-EQ runs (e.g., when a shared spine
+    //  token sits between divergent inserts), so we only assert that
+    //  markers fire and that both sides' distinguishing bytes survive
+    //  somewhere in the output.
+    u8s out_view = {u8bDataHead(out), u8bIdleHead(out)};
+    size_t olen  = (size_t)$len(out_view);
+    b8 has_open  = NO, has_mid = NO, has_close = NO;
+    for (size_t i = 0; i + 4 <= olen; i++) {
+        u8 const *p2 = out_view[0] + i;
+        if (memcmp(p2, "<<<<", 4) == 0) has_open  = YES;
+        if (memcmp(p2, "||||", 4) == 0) has_mid   = YES;
+        if (memcmp(p2, ">>>>", 4) == 0) has_close = YES;
+    }
+    want(has_open && has_mid && has_close);
+
+    //  Both sides' distinguishing bytes appear somewhere in the output.
+    b8 has_wt = NO, has_tgt = NO;
+    for (size_t i = 0; i + 3 <= olen; i++) {
+        if (memcmp(out_view[0] + i, "wt",  2) == 0) has_wt  = YES;
+        if (memcmp(out_view[0] + i, "tgt", 3) == 0) has_tgt = YES;
+    }
+    want(has_wt && has_tgt);
+
+    u8bFree(out);
+    teardown_repo();
+    done;
+}
+
 ok64 maintest(void) {
     sane(1);
     call(test_clean_merge);
     call(test_wt_absent);
     call(test_wt_clean_drift);
+    call(test_conflict);
     done;
 }
 

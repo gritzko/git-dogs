@@ -221,6 +221,9 @@ ok64 GRAFLca(sha1 *out, sha1 const *a, sha1 const *b) {
 //  `get_weave_union`'s helpers.
 static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
                             u64 const *tip_hs, u32 ntips);
+static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
+                                     u64 const *tip_hs, u32 ntips,
+                                     Bu32 out_ids);
 static ok64 emit_alive_bytes(u8b into, weave const *w);
 
 //  WEAVE-based 3-way merge.  Builds an ancestor-aware weave per tip
@@ -306,16 +309,32 @@ static ok64 graf_fold_wt_layer(weave *next, b8 *used_next,
     return ret;
 }
 
+//  Per-side membership predicate for `WEAVEEmitMerged`.  Backed by a
+//  Bu32 of `sc` values used during `build_tip_weave_with_ids` (and
+//  optionally augmented with WEAVE_WT_SRC for the wt-folded side).
+typedef struct {
+    u32cp ids;     // u32 array of in-stamps reachable via this side
+    u32   n;
+} merge_id_set;
+
+static b8 merge_id_set_has(u32 in, void *vctx) {
+    merge_id_set *s = (merge_id_set *)vctx;
+    if (!s) return NO;
+    for (u32 i = 0; i < s->n; i++)
+        if (s->ids[i] == in) return YES;
+    return NO;
+}
+
 //  Weave-merge a single file across two commits, treating the wt's
 //  on-disk bytes for `path` as an implicit edit attached to `base`.
 //  Builds the ancestor-closure weave for each tip, folds the wt
 //  bytes as a final WEAVE_WT_SRC layer on the base side, runs
-//  WEAVEMerge, and emits the resulting alive-token bytes into `out`.
+//  WEAVEMerge, and emits the alive-token bytes into `out` —
+//  framing divergent regions with `<<<<` / `||||` / `>>>>` when the
+//  two sides' inserts collide (see `WEAVEEmitMerged`).
 //
-//  Returns OK on success.  Divergent regions currently render as
-//  base-then-tgt concatenation (WEAVE marker emission lands later);
-//  GRAFFAIL on history-empty-on-both-sides.  Caller writes `out` to
-//  disk and stamps the new mtime.
+//  Returns OK on success.  GRAFFAIL on history-empty-on-both-sides.
+//  Caller writes `out` to disk and stamps the new mtime.
 ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
                      sha1 const *base, sha1 const *tgt,
                      u8b out) {
@@ -330,34 +349,35 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
 
     weave wbase = {}, wbase_wt = {}, wnu = {};
     weave wtgt = {}, wmerge = {};
+    Bu32 base_ids = {}, tgt_ids = {};
     ok64 ret = OK;
     if ((ret = WEAVEInit(&wbase))    != OK) return ret;
     if ((ret = WEAVEInit(&wbase_wt)) != OK) goto cleanup;
     if ((ret = WEAVEInit(&wnu))      != OK) goto cleanup;
     if ((ret = WEAVEInit(&wtgt))     != OK) goto cleanup;
     if ((ret = WEAVEInit(&wmerge))   != OK) goto cleanup;
+    if ((ret = u32bMap(base_ids, 4096)) != OK) goto cleanup;
+    if ((ret = u32bMap(tgt_ids,  4096)) != OK) goto cleanup;
 
-    //  Base side: ancestor closure of base commit.
-    ret = build_tip_weave(&wbase, path, ext, &base_h40, 1);
+    //  Base side: ancestor closure of base commit, plus wt layer.
+    ret = build_tip_weave_with_ids(&wbase, path, ext, &base_h40, 1, base_ids);
     if (ret != OK) goto cleanup;
 
-    //  Fold wt bytes onto the base side.  When the file is missing or
-    //  byte-equal to the last commit, `used_next` stays NO and `wcur`
-    //  remains `&wbase`.
     weave const *wcur = &wbase;
     b8 wt_layered = NO;
     ret = graf_fold_wt_layer(&wbase_wt, &wt_layered, &wbase, &wnu,
                              path, ext, reporoot);
     if (ret != OK) goto cleanup;
-    if (wt_layered) wcur = &wbase_wt;
+    if (wt_layered) {
+        wcur = &wbase_wt;
+        (void)u32bFeed1(base_ids, WEAVE_WT_SRC);
+    }
 
     //  Target side: ancestor closure of tgt commit.
-    ret = build_tip_weave(&wtgt, path, ext, &tgt_h40, 1);
+    ret = build_tip_weave_with_ids(&wtgt, path, ext, &tgt_h40, 1, tgt_ids);
     if (ret != OK) goto cleanup;
 
-    //  Empty-side degeneracy: if either side has no alive tokens,
-    //  emit the other side's alive bytes verbatim (mirrors
-    //  `get_merge_2way`).
+    //  Empty-side degeneracy.
     u32 base_n = (u32)((u32cp)wcur->toks[2] - (u32cp)wcur->toks[1]);
     u32 tgt_n  = (u32)((u32cp)wtgt.toks[2]  - (u32cp)wtgt.toks[1]);
     if (base_n == 0 && tgt_n == 0) { ret = GRAFFAIL; goto cleanup; }
@@ -367,9 +387,23 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
     ret = WEAVEMerge(&wmerge, wcur, &wtgt);
     if (ret != OK) goto cleanup;
 
-    ret = emit_alive_bytes(out, &wmerge);
+    //  Build per-side predicates and render with conflict markers.
+    merge_id_set base_set = {
+        .ids = (u32cp)u32bDataHead(base_ids),
+        .n   = (u32)u32bDataLen(base_ids),
+    };
+    merge_id_set tgt_set = {
+        .ids = (u32cp)u32bDataHead(tgt_ids),
+        .n   = (u32)u32bDataLen(tgt_ids),
+    };
+    WEAVEsetfn preds[2] = { merge_id_set_has, merge_id_set_has };
+    void *ctxs[2] = { &base_set, &tgt_set };
+
+    ret = WEAVEEmitMerged(&wmerge, preds, ctxs, 2, out);
 
 cleanup:
+    if (tgt_ids[0])  u32bUnMap(tgt_ids);
+    if (base_ids[0]) u32bUnMap(base_ids);
     WEAVEFree(&wmerge);
     WEAVEFree(&wtgt);
     WEAVEFree(&wnu);
@@ -393,8 +427,24 @@ cleanup:
 //  case-B (importing a multi-parent commit) is a follow-up that swaps
 //  the per-step WEAVEDiff for WEAVEReplay when the topo step has >1
 //  parent.
+//
+//  When `out_ids` is non-NULL, every 32-bit `sc` value passed to
+//  `WEAVEDiff` is appended to `*out_ids` in walk order.  Callers
+//  driving `WEAVEEmitMerged` use these to build per-side membership
+//  predicates over token `inrm.in` values.
+static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
+                                     u64 const *tip_hs, u32 ntips,
+                                     Bu32 out_ids);
+
 static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
                             u64 const *tip_hs, u32 ntips) {
+    Bu32 noids = {};
+    return build_tip_weave_with_ids(out, path, ext, tip_hs, ntips, noids);
+}
+
+static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
+                                     u64 const *tip_hs, u32 ntips,
+                                     Bu32 out_ids) {
     sane(out && ntips > 0);
 
     //  Ancestor union across the supplied tips.
@@ -474,6 +524,7 @@ static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
             ok64 dfo = WEAVEDiff(wdst, wsrc, &wnu, sc);
             if (dfo == OK) {
                 weave *wtmp = wsrc; wsrc = wdst; wdst = wtmp;
+                if (out_ids[0]) (void)u32bFeed1(out_ids, sc);
             }
         }
 

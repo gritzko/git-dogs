@@ -1040,3 +1040,161 @@ cleanup:
     u32bUnMap(windows);
     return ret;
 }
+
+// --- WEAVEEmitMerged ---
+//
+//  Conflict-aware render of a merged weave's alive bytes.  See
+//  WEAVE.h for the contract.  Algorithm:
+//
+//    1. Walk the merged weave's alive tokens in weave order.  For
+//       each, compute its membership bitmask `m` (one bit per
+//       supplied predicate; `in == 0` → all-bits-set spine).
+//    2. Tokens with `m == spine_mask` (member of every predicate)
+//       emit verbatim — they are shared-spine context.
+//    3. A maximal stretch of non-spine tokens forms a non-EQ run.
+//       Detect conflict by scanning the run: two alive tokens with
+//       disjoint memberships (`m1 & m2 == 0`) → conflict.
+//    4. Conflict run → emit `<<<<`, per-distinct-membership cluster
+//       bytes interleaved with `||||`, `>>>>`.  Non-conflict run →
+//       emit alive bytes verbatim.
+//
+//  Implementation notes: membership is recomputed per token (cheap —
+//  npreds bounded; predicates are small bitset lookups).  Distinct
+//  memberships per run are recorded in a tiny stack array (cap 32);
+//  in practice 2-way merges have at most 2 non-spine memberships.
+
+#define WEAVE_EMIT_MAX_PREDS  32
+#define WEAVE_EMIT_MAX_GROUPS 32
+
+static u32 weave_emit_membership(u32 in,
+                                 WEAVEsetfn const *preds,
+                                 void *const *ctxs,
+                                 u32 npreds, u32 spine_mask) {
+    if (in == 0) return spine_mask;        // pre-timeframe → spine
+    u32 m = 0;
+    for (u32 p = 0; p < npreds; p++)
+        if (preds[p] && preds[p](in, ctxs ? ctxs[p] : NULL))
+            m |= (1u << p);
+    return m;
+}
+
+static ok64 weave_emit_token(u8b out, u8cp text, u32cp toks, u32 i) {
+    u32 lo = (i == 0) ? 0 : tok32Offset(toks[i - 1]);
+    u32 hi = tok32Offset(toks[i]);
+    u8cs tb = {text + lo, text + hi};
+    return u8bFeed(out, tb);
+}
+
+ok64 WEAVEEmitMerged(weave const *w,
+                     WEAVEsetfn const *preds, void *const *ctxs,
+                     u32 npreds, u8b out) {
+    sane(w && out);
+    if (npreds > WEAVE_EMIT_MAX_PREDS) return WEAVEFAIL;
+    u8bReset(out);
+
+    u32cp  toks   = (u32cp)w->toks[1];
+    u32cp  toks_e = (u32cp)w->toks[2];
+    u32    ntok   = (u32)(toks_e - toks);
+    inrmcp irm    = (inrmcp)w->inrm[1];
+    u8cp   text   = (u8cp)w->text[1];
+
+    //  Empty weave → empty output.  npreds == 0 also short-circuits
+    //  to verbatim alive-bytes emission (spine_mask = 0; every token
+    //  has membership 0 = spine; nothing flagged).
+    if (ntok == 0) done;
+
+    u32 spine_mask =
+        (npreds == 0) ? 0
+        : (npreds == 32 ? 0xFFFFFFFFu : ((1u << npreds) - 1u));
+
+    a_cstr(mk_open,  "<<<<");
+    a_cstr(mk_mid,   "||||");
+    a_cstr(mk_close, ">>>>");
+
+    u32 i = 0;
+    while (i < ntok) {
+        if (irm[i].rm != 0) { i++; continue; }   // dead, skip
+
+        u32 m = weave_emit_membership(irm[i].in, preds, ctxs,
+                                      npreds, spine_mask);
+        if (m == spine_mask) {
+            //  Spine token — emit and continue.
+            call(weave_emit_token, out, text, toks, i);
+            i++;
+            continue;
+        }
+
+        //  Non-spine: collect a maximal run of non-spine alive tokens.
+        u32 run_lo = i;
+        u32 run_hi = i;     // exclusive
+        while (run_hi < ntok) {
+            if (irm[run_hi].rm != 0) { run_hi++; continue; }
+            u32 mm = weave_emit_membership(irm[run_hi].in, preds, ctxs,
+                                           npreds, spine_mask);
+            if (mm == spine_mask) break;
+            run_hi++;
+        }
+
+        //  Conflict detection: two alive tokens with disjoint memberships.
+        b8 conflict = NO;
+        u32 groups[WEAVE_EMIT_MAX_GROUPS];
+        u32 ngroups = 0;
+        for (u32 j = run_lo; j < run_hi && !conflict; j++) {
+            if (irm[j].rm != 0) continue;
+            u32 mj = weave_emit_membership(irm[j].in, preds, ctxs,
+                                           npreds, spine_mask);
+            for (u32 k = 0; k < ngroups; k++) {
+                if ((groups[k] & mj) == 0) { conflict = YES; break; }
+            }
+            if (conflict) break;
+            //  Record mj if new.
+            b8 dup = NO;
+            for (u32 k = 0; k < ngroups; k++)
+                if (groups[k] == mj) { dup = YES; break; }
+            if (!dup && ngroups < WEAVE_EMIT_MAX_GROUPS)
+                groups[ngroups++] = mj;
+        }
+
+        if (!conflict) {
+            //  Emit alive bytes in weave order, verbatim.
+            for (u32 j = run_lo; j < run_hi; j++) {
+                if (irm[j].rm != 0) continue;
+                call(weave_emit_token, out, text, toks, j);
+            }
+            i = run_hi;
+            continue;
+        }
+
+        //  Conflict: cluster by distinct membership (first-appearance
+        //  order) and frame with markers.  Re-collect distinct
+        //  memberships; the early-out above may have skipped some.
+        ngroups = 0;
+        for (u32 j = run_lo; j < run_hi; j++) {
+            if (irm[j].rm != 0) continue;
+            u32 mj = weave_emit_membership(irm[j].in, preds, ctxs,
+                                           npreds, spine_mask);
+            b8 dup = NO;
+            for (u32 k = 0; k < ngroups; k++)
+                if (groups[k] == mj) { dup = YES; break; }
+            if (!dup && ngroups < WEAVE_EMIT_MAX_GROUPS)
+                groups[ngroups++] = mj;
+        }
+
+        call(u8bFeed, out, mk_open);
+        for (u32 g = 0; g < ngroups; g++) {
+            if (g > 0) call(u8bFeed, out, mk_mid);
+            for (u32 j = run_lo; j < run_hi; j++) {
+                if (irm[j].rm != 0) continue;
+                u32 mj = weave_emit_membership(irm[j].in, preds, ctxs,
+                                               npreds, spine_mask);
+                if (mj != groups[g]) continue;
+                call(weave_emit_token, out, text, toks, j);
+            }
+        }
+        call(u8bFeed, out, mk_close);
+
+        i = run_hi;
+    }
+
+    done;
+}
