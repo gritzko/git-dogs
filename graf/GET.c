@@ -29,7 +29,7 @@ con ok64 GETBAD    = 0x40e74b28d;
 con ok64 GETNOTIPS = 0x1039d5d875265c;
 
 #define GET_MAX_TIPS   8
-#define GET_MAX_VERS   512
+#define GET_MAX_VERS   200000
 #define GET_ANC_SIZE   (1u << 18)     // 256K slots
 #define GET_BLOB_MAX   (16UL << 20)   // 16 MB / blob
 #define GET_TREE_MAX_ENTRIES 4096
@@ -68,7 +68,7 @@ static ok64 get_resolve_qref(get_tip *out, qref const *q) {
     KEEPObjSha(&out->sha, DOG_OBJ_COMMIT, body);
     u8bFree(cbuf);
 
-    out->h40 = WHIFFHashlet40(&out->sha);
+    out->h40 = WHIFFHashlet60(&out->sha);
     out->gen = 0;            //  gen is no longer indexed
     done;
 }
@@ -194,8 +194,8 @@ ok64 GRAFLca(sha1 *out, sha1 const *a, sha1 const *b) {
     sane(out && a && b);
     memset(out->data, 0, sizeof(out->data));
 
-    u64 a_h40 = WHIFFHashlet40(a);
-    u64 b_h40 = WHIFFHashlet40(b);
+    u64 a_h40 = WHIFFHashlet60(a);
+    u64 b_h40 = WHIFFHashlet60(b);
     u64 lca_h = get_lca(a_h40, b_h40);
     if (lca_h == 0) done;   // unrelated histories — leave out zero
 
@@ -205,8 +205,8 @@ ok64 GRAFLca(sha1 *out, sha1 const *a, sha1 const *b) {
     Bu8 cbuf = {};
     call(u8bAllocate, cbuf, 1UL << 20);
     u8 ct = 0;
-    ok64 o = KEEPGet(&KEEP, DAGh40ToKeeperPrefix(lca_h),
-                     DAG_H40_HEXLEN, cbuf, &ct);
+    ok64 o = KEEPGet(&KEEP, lca_h,
+                     DAG_H60_HEXLEN, cbuf, &ct);
     if (o != OK || ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); done; }
 
     a_dup(u8c, body, u8bData(cbuf));
@@ -341,8 +341,8 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
     sane($ok(path) && $ok(reporoot) && base && tgt && out);
     u8bReset(out);
 
-    u64 base_h40 = WHIFFHashlet40(base);
-    u64 tgt_h40  = WHIFFHashlet40(tgt);
+    u64 base_h40 = WHIFFHashlet60(base);
+    u64 tgt_h40  = WHIFFHashlet60(tgt);
 
     u8cs ext = {};
     PATHu8sExt(ext, path);
@@ -455,18 +455,19 @@ static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
     ok64 ao = DAGAncestorsOfMany(anc, runs, tip_hs, ntips);
     if (ao != OK) { wh128bFree(anc); return ao; }
 
-    //  Topo-sort: parents-before-children.
-    u64 vers[GET_MAX_VERS];
+    //  Topo-sort: parents-before-children.  Heap-allocated; the cap
+    //  needs to fit a real repo's history (src/git ~80k commits would
+    //  blow a stack array).
     u32 nvers = 0;
+    u64 *vers = NULL;
     size_t anc_cap = (size_t)(wh128bTerm(anc) - wh128bHead(anc));
     Bu8 ord_buf = {};
     if (anc_cap > 0 && u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
         u64 *ordered = (u64 *)u8bDataHead(ord_buf);
         u32 nord = DAGTopoSort(ordered, (u32)anc_cap, anc, runs);
         if (nord > GET_MAX_VERS) nord = GET_MAX_VERS;
-        memcpy(vers, ordered, nord * sizeof(u64));
+        vers = ordered;
         nvers = nord;
-        u8bUnMap(ord_buf);
     }
     wh128bFree(anc);
 
@@ -551,6 +552,7 @@ cleanup_w:
     WEAVEFree(&wB);
     WEAVEFree(&wnu);
 out:
+    if (u8bOK(ord_buf)) u8bUnMap(ord_buf);
     return r;
 }
 
@@ -601,8 +603,8 @@ static ok64 get_tree_at(sha1 *tree_out, keeper *k,
     Bu8 cbuf = {};
     call(u8bAllocate, cbuf, 1UL << 20);
     u8 ct = 0;
-    ok64 o = KEEPGet(k, DAGh40ToKeeperPrefix(commit_h40),
-                     DAG_H40_HEXLEN, cbuf, &ct);
+    ok64 o = KEEPGet(k, commit_h40,
+                     DAG_H60_HEXLEN, cbuf, &ct);
     if (o != OK || ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); return KEEPNONE; }
 
     sha1 cur = {};
@@ -706,7 +708,7 @@ static ok64 get_tree_merge(u8b into, u8cs path,
 
         u8cs body = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
         u8cs file = {}, esha = {};
-        while (GITu8sDrainTree(body, file, esha) == OK) {
+        while (GITu8sDrainTree(body, file, esha, NULL) == OK) {
             u8cs scan = {file[0], file[1]};
             if (u8csFind(scan, ' ') != OK) continue;
             u8cs mode_s = {file[0], scan[0]};

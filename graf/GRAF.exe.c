@@ -300,7 +300,7 @@ ok64 GRAFExec(cli *c) {
         {
             sha1 tip = {};
             if (GRAFResolveTip(&KEEP, &c->uris[0], &tip) == OK)
-                tip_h = WHIFFHashlet40(&tip);
+                tip_h = WHIFFHashlet60(&tip);
         }
         ret = GRAFBlame(&KEEP, path, tip_h, reporoot);
         graf_stop_pager(pager);
@@ -358,7 +358,7 @@ ok64 GRAFExec(cli *c) {
             a_dup(u8c, base_dup, base_hex);
             u8s sb = {(u8p)base_sha.data, (u8p)base_sha.data + 20};
             ok64 ho = HEXu8sDrainSome(sb, base_dup);
-            u64 base_h40 = (ho == OK) ? WHIFFHashlet40(&base_sha) : 0;
+            u64 base_h40 = (ho == OK) ? WHIFFHashlet60(&base_sha) : 0;
 
             if (!u8csEmpty(u->query)) {
                 //  `?branch` → branch vs base (ref-to-ref).

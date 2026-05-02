@@ -50,7 +50,7 @@ static ok64 walk_tree_dive(keeper *k, sha1 const *tree_sha,
     ok64 result = OK;
 
     u8 const *tsp = (u8 const *)tree_sha;
-    while (GITu8sDrainTree(tree_s, file, esha) == OK) {
+    while (GITu8sDrainTree(tree_s, file, esha, NULL) == OK) {
         // Parse "<mode> <name>".
         u8cs scan = {file[0], file[1]};
         if (u8csFind(scan, ' ') != OK) continue;
@@ -208,7 +208,7 @@ static ok64 lsf_descend(keeper *k, sha1 const *root_tree, u8cs subpath,
         u8 next_kind = 0;
         sha1 next_sha = {};
         u8cs file = {}, esha = {};
-        while (GITu8sDrainTree(tree_s, file, esha) == OK) {
+        while (GITu8sDrainTree(tree_s, file, esha, NULL) == OK) {
             u8cs fscan = {file[0], file[1]};
             if (u8csFind(fscan, ' ') != OK) continue;
             u8cs mode_s = {file[0], fscan[0]};

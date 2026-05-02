@@ -22,7 +22,7 @@ ok64 GRAFTreeStep(keeper *k, sha1 *cur, u8cs name) {
     u8cs body = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
     u8cs field = {}, esha = {};
     ok64 result = KEEPNONE;
-    while (GITu8sDrainTree(body, field, esha) == OK) {
+    while (GITu8sDrainTree(body, field, esha, NULL) == OK) {
         u8cs scan = {field[0], field[1]};
         if (u8csFind(scan, ' ') != OK) continue;
         u8cs entry_name = {scan[0] + 1, field[1]};
@@ -37,14 +37,14 @@ ok64 GRAFTreeStep(keeper *k, sha1 *cur, u8cs name) {
 }
 
 ok64 GRAFBlobAtCommit(u8bp buf, keeper *k,
-                      u64 commit_hashlet40, u8cs filepath) {
+                      u64 commit_hashlet60, u8cs filepath) {
     sane(buf && k);
 
     Bu8 cbuf = {};
     call(u8bAllocate, cbuf, 1UL << 20);
     u8 ct = 0;
-    ok64 o = KEEPGet(k, DAGh40ToKeeperPrefix(commit_hashlet40),
-                     DAG_H40_HEXLEN, cbuf, &ct);
+    ok64 o = KEEPGet(k, commit_hashlet60,
+                     DAG_H60_HEXLEN, cbuf, &ct);
     if (o != OK || ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); return KEEPNONE; }
 
     sha1 tree_sha = {};

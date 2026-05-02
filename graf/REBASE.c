@@ -346,7 +346,7 @@ static ok64 tm_parse(sha1 const *tree_sha, tm_set *out,
 
     u8cs body = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
     u8cs file = {}, esha = {};
-    while (GITu8sDrainTree(body, file, esha) == OK) {
+    while (GITu8sDrainTree(body, file, esha, NULL) == OK) {
         u8cs scan = {file[0], file[1]};
         if (u8csFind(scan, ' ') != OK) continue;
         u8cs mode_s = {file[0], scan[0]};

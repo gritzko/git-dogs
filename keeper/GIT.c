@@ -10,7 +10,13 @@
 //  Tree entry: <mode SP name>\0<20-byte-sha1>.  Find the NUL via
 //  u8csFind; slice before = "<mode> <name>"; the 20 bytes that follow
 //  are the raw SHA-1.
-ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1) {
+//
+//  `mode` is optional — pass NULL when the caller doesn't need it.
+//  When non-NULL, parses the leading octal-ascii digits into *mode
+//  (e.g. "100644" → 0100644).  *mode is set to 0 on parse failure.
+//  Mode is what graf needs to classify a child as TREE (040000),
+//  BLOB (100xxx, 120000), or COMMIT/gitlink (160000).
+ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1, u32 *mode) {
     sane(u8csOK(obj) && file && sha1);
     if ($empty(obj)) return NODATA;
 
@@ -25,6 +31,17 @@ ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1) {
     if ((u64)u8csLen(scan) < GIT_SHA1_LEN) return GITBADFMT;
     sha1[0] = scan[0];
     sha1[1] = scan[0] + GIT_SHA1_LEN;
+
+    if (mode) {
+        u32 m = 0;
+        u8cp p = file[0];
+        while (p < file[1] && *p >= '0' && *p <= '7') {
+            m = (m << 3) | (u32)(*p - '0');
+            p++;
+        }
+        //  Require at least one digit followed by space (or end).
+        *mode = (p > file[0] && (p == file[1] || *p == ' ')) ? m : 0;
+    }
 
     obj[0] = sha1[1];  // advance past this entry
     done;

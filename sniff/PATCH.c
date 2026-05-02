@@ -57,7 +57,7 @@ static ok64 parse_tree(entry *out, u32 *nout, u32 cap, u8cs body) {
     u32 n = 0;
     u8cs obj = {body[0], body[1]};
     u8cs file = {}, esha = {};
-    while (n < cap && GITu8sDrainTree(obj, file, esha) == OK) {
+    while (n < cap && GITu8sDrainTree(obj, file, esha, NULL) == OK) {
         //  `file` is `<mode> <name>`.  csFind consumes `scan` up to
         //  the space; mode is [file[0]..scan[0]), name is [scan[0]+1..file[1]).
         a_dup(u8c, scan, file);

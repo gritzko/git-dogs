@@ -1041,7 +1041,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
         u8cs body = {content, content + content_sz};
         while (!$empty(body)) {
             u8cs entry_field = {}, entry_sha = {};
-            ok64 o = GITu8sDrainTree(body, entry_field, entry_sha);
+            ok64 o = GITu8sDrainTree(body, entry_field, entry_sha, NULL);
             if (o != OK) break;
             if ($len(entry_sha) != 20) continue;
             // Skip gitlinks (submodule refs) — mode 160000, commit in another repo
@@ -3039,7 +3039,7 @@ static ok64 keep_walk_tree(keeper *k, sha1 const *tree_sha,
     u8cs tree_body = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
     u8cs walk = {tree_body[0], tree_body[1]};
     u8cs file = {}, sha = {};
-    while (GITu8sDrainTree(walk, file, sha) == OK) {
+    while (GITu8sDrainTree(walk, file, sha, NULL) == OK) {
         if ($len(sha) != 20) continue;
         u8 mode_buf[8] = {};
         size_t mlen = 0;

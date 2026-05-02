@@ -67,9 +67,11 @@ ok64 GITParseRef(u8csc in, gitref_kind *kind, u8csp name);
 //  for a kind that requires it, or kind is unrecognised.
 ok64 GITFeedRef(u8b out, gitref_kind kind, u8csc name);
 
-//  Drain one tree entry: file mode+name into `file`, raw SHA1 into `sha1`.
-//  Advances `obj`; returns NODATA when exhausted.
-ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1);
+//  Drain one tree entry: file mode+name into `file`, raw SHA1 into
+//  `sha1`, and the parsed octal mode into `*mode` (NULL allowed when
+//  the caller doesn't need it).  Advances `obj`; returns NODATA when
+//  exhausted.
+ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1, u32 *mode);
 
 //  Drain one commit header: field name into `field`, value into `value`.
 //  On the blank-line separator, returns empty `field` and commit body

@@ -96,8 +96,8 @@ static void blame_fetch_author(blame_author *ba, keeper *k,
     Bu8 cbuf = {};
     if (u8bMap(cbuf, 1UL << 20) != OK) return;
     u8 obj_type = 0;
-    if (KEEPGet(k, DAGh40ToKeeperPrefix(commit_hashlet),
-                DAG_H40_HEXLEN, cbuf, &obj_type) != OK ||
+    if (KEEPGet(k, commit_hashlet,
+                DAG_H60_HEXLEN, cbuf, &obj_type) != OK ||
         obj_type != DOG_OBJ_COMMIT) {
         u8bUnMap(cbuf);
         return;

@@ -144,7 +144,7 @@ static ok64 map_collect_cb(keep_tipcp t, void *ctx) {
         s->n--;   // bad sha; drop this branch
         return OK;
     }
-    b->tip_h40 = WHIFFHashlet40(&tip);
+    b->tip_h40 = WHIFFHashlet60(&tip);
     return OK;
 }
 
@@ -305,7 +305,7 @@ ok64 GRAFMap(uricp u) {
 
         u8bReset(cbuf);
         u8 ot = 0;
-        if (KEEPGet(&KEEP, DAGh40ToKeeperPrefix(h40), DAG_H40_HEXLEN,
+        if (KEEPGet(&KEEP, h40, DAG_H60_HEXLEN,
                     cbuf, &ot) != OK || ot != DOG_OBJ_COMMIT) continue;
         a_dup(u8c, body, u8bData(cbuf));
         sha1 csha = {};

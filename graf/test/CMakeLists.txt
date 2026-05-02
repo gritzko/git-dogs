@@ -1,3 +1,9 @@
+add_executable(DAG01test DAG01.c)
+target_link_options(DAG01test PRIVATE ${TEST_LDD_FLAGS})
+target_compile_options(DAG01test PRIVATE ${TEST_CXX_FLAGS})
+target_link_libraries(DAG01test graflib dog abc-core)
+add_test(NAME DAG01test COMMAND DAG01test)
+
 add_executable(JOIN01test JOIN01.c)
 target_link_options(JOIN01test PRIVATE ${TEST_LDD_FLAGS})
 target_compile_options(JOIN01test PRIVATE ${TEST_CXX_FLAGS})

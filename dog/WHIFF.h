@@ -20,6 +20,17 @@
 
 typedef u64 wh64;
 
+fun int wh64cmp(wh64 const *a, wh64 const *b) {
+    return *a < *b ? -1 : (*a == *b ? 0 : 1);
+}
+
+//  Bx instantiation for the wh64 value type — gives us `wh64b`,
+//  `wh64s`, `wh64sFeed1`, etc.  Distinct from `u64*` even though
+//  wh64 is a u64 alias, so call sites can declare intent.
+#define X(M, name) M##wh64##name
+#include "abc/Bx.h"
+#undef X
+
 #define WHIFF_TYPE_BITS   4
 #define WHIFF_TYPE_MASK   0xfULL
 #define WHIFF_ID_SHIFT    WHIFF_TYPE_BITS       // bits 4-23
@@ -63,13 +74,20 @@ fun b8 wh128Z(wh128 const *a, wh128 const *b) {
 #include "abc/Bx.h"
 #undef X
 
-//  Slice-swap for wh128cs (= wh128 const *[2]).  Required by HITx.h;
-//  array-typed slices can't go through Sx.h's generic Swap.
-fun void wh128csSwap(wh128cs *a, wh128cs *b) {
-    wh128c *t0 = (*a)[0], *t1 = (*a)[1];
-    (*a)[0] = (*b)[0]; (*a)[1] = (*b)[1];
-    (*b)[0] = t0;      (*b)[1] = t1;
-}
+//  Bx instantiation for wh128cs slots (the slice-of-wh128 type
+//  itself).  Gives us `wh128csb` (4-pointer buffer of wh128cs) and
+//  `wh128cssFeed1` (push one wh128cs slot through a wh128css head),
+//  paralleling BUF.h's u8csb / u8cssFeed1.  ABC_X_$ flag is set
+//  because wh128cs is array-typed.
+typedef wh128cs const *wh128cscp;
+
+fun int wh128cscmp(wh128cs const *a, wh128cs const *b) { return $cmp(*a, *b); }
+
+#define X(M, name) M##wh128cs##name
+#define ABC_X_$
+#include "abc/Bx.h"
+#undef ABC_X_$
+#undef X
 
 // --- SHA-1 hashlet helpers ---
 //

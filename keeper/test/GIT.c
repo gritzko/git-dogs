@@ -17,17 +17,19 @@ ok64 GITtest1() {
     u8cs file = {};
     u8cs sha1 = {};
 
-    ok64 o = GITu8sDrainTree(obj, file, sha1);
+    u32 mode = 0;
+    ok64 o = GITu8sDrainTree(obj, file, sha1, &mode);
     want(o == OK);
     want($len(file) == 14);  // "100644 hello.c"
     want(memcmp(file[0], "100644 hello.c", 14) == 0);
     want($len(sha1) == 20);
     want(*sha1[0] == 0x01);
     want(*(sha1[1] - 1) == 0x14);
+    want(mode == 0100644);   // octal → 33188
 
     // should be exhausted
     want($empty(obj));
-    o = GITu8sDrainTree(obj, file, sha1);
+    o = GITu8sDrainTree(obj, file, sha1, NULL);
     want(o == NODATA);
 
     done;
@@ -48,19 +50,22 @@ ok64 GITtest2() {
     u8cs sha1 = {};
 
     // first entry
-    ok64 o = GITu8sDrainTree(obj, file, sha1);
+    u32 mode = 0;
+    ok64 o = GITu8sDrainTree(obj, file, sha1, &mode);
     want(o == OK);
     want($len(file) == 10);  // "100644 a.c"
     want(*sha1[0] == 0x01);
+    want(mode == 0100644);
 
     // second entry
-    o = GITu8sDrainTree(obj, file, sha1);
+    o = GITu8sDrainTree(obj, file, sha1, &mode);
     want(o == OK);
     want($len(file) == 12);  // "40000 subdir"
     want(*sha1[0] == 0x21);
+    want(mode == 040000);
 
     // exhausted
-    o = GITu8sDrainTree(obj, file, sha1);
+    o = GITu8sDrainTree(obj, file, sha1, NULL);
     want(o == NODATA);
 
     done;
@@ -76,7 +81,7 @@ ok64 GITtest3() {
     u8cs file = {};
     u8cs sha1 = {};
 
-    ok64 o = GITu8sDrainTree(obj, file, sha1);
+    ok64 o = GITu8sDrainTree(obj, file, sha1, NULL);
     want(o == GITBADFMT);
 
     done;

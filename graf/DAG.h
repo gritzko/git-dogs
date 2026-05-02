@@ -1,13 +1,13 @@
 #ifndef GRAF_DAG_H
 #define GRAF_DAG_H
 
-//  DAG: graf's commit-graph index.
+//  DAG: graf's commit-graph + tree-shape index.
 //
 //  An LSM-style index of wh128 records (16 bytes each) covering
-//  commit parentage and commit→tree edges only.  Kept under
-//  <reporoot>/.dogs/graf/.  Used by graf to walk history; stores
-//  no content — actual blobs/trees are retrieved via keeper using
-//  the full path at query time.
+//  commit parentage, commit→tree edges, and parent-tree→child-object
+//  edges.  Kept under <reporoot>/.dogs/graf/.  Stores no content —
+//  actual blobs/trees/commits are retrieved via keeper using the full
+//  path at query time.
 //
 //  Layout (mirrors keeper's branch-sharded shape):
 //      .dogs/graf/<branch>/0000000001.graf.idx  sorted wh128 runs (LSM)
@@ -18,19 +18,33 @@
 //  DOGPup* puppy stack.  Writes only land in the leaf dir.
 //
 //  Entry format (wh128 = 2 × wh64 = 16 bytes):
-//      a = type[4] | id[20] | hashlet[40]
-//      b = type[4] | id[20] | hashlet[40]
+//      a (key) = hashlet[60] | type[4]
+//      b (val) = hashlet[60] | type[4]
 //
-//  Entry types (low 4 bits of .a.type):
-//      2  COMMIT_PARENT  commit → parent commit
-//                        a = (2, 0, commit_h), b = (2, 0, parent_h)
-//      3  COMMIT_TREE    commit → root tree hashlet
-//                        a = (3, 0, commit_h), b = (3, 0, tree_h)
+//  Per-half types (4 bits in low nibble of each wh64):
+//      1  COMMIT   refers to a commit object
+//      2  TREE     refers to a tree object
+//      3  BLOB     refers to a blob object
 //
-//  Type 1 (COMMIT_GEN) and type 4 (PATH_VER) are reserved: older
-//  indexes may still contain those records; current code never
-//  writes or reads them.  The 20-bit `id` slot is no longer
-//  populated — kept zero in every record we write.
+//  Entry kinds = (key.type, val.type) pairs:
+//      (COMMIT, COMMIT)  commit → parent commit
+//                        key.hl = commit_h60, val.hl = parent_h60
+//      (COMMIT, TREE)    commit → root tree
+//                        key.hl = commit_h60, val.hl = tree_h60
+//      (TREE,   TREE)    parent-tree → child subtree
+//      (TREE,   BLOB)    parent-tree → child blob (file)
+//      (TREE,   COMMIT)  parent-tree → child commit (gitlink/submodule)
+//                        key.hl = tree_h60 ^ RAPHashSeed60(name)
+//                        val.hl = child_h60
+//
+//  Hashlets are 60-bit (top 60 bits of SHA-1) — the same width keeper
+//  uses for its LSM keys, so a graf hashlet resolves directly in
+//  keeper without prefix-lifting.
+//
+//  Tree-child keys are XOR-keyed on the segment name; lookup of
+//  (tree, name) is a direct binary search, but callers must scan
+//  forward across equal-key entries and verify against keeper to
+//  defend against the (extremely rare) 60-bit collision.
 
 #include "abc/INT.h"
 #include "dog/SHA1.h"
@@ -41,38 +55,38 @@ con ok64 DAGFAIL     = 0xd2903ca495;
 con ok64 DAGNOROOM   = 0xd2905d86d8616;
 con ok64 DAGNOPATH   = 0xd2905d864a751;
 
-// --- Entry types ---
+// --- Per-half types (LSB of each wh64) ---
+
+#define DAG_T_COMMIT  1
+#define DAG_T_TREE    2
+#define DAG_T_BLOB    3
+
+// --- wh64 layout local to graf: hashlet[60] | type[4] (no id slot) ---
 //
-//  COMMIT_GEN (type 1) and PATH_VER (type 4) were removed:
-//    - COMMIT_GEN: gens were ingest-order dependent; replaced at
-//      query time by DAGTopoSort.
-//    - PATH_VER: path-touch events required walking each commit's
-//      tree at ingest time; query side now derives equivalent
-//      information by walking COMMIT_PARENT + descending each tree
-//      via keeper.
+//  Hashlet is 60-bit, packed in the high bits so wh64 sorts by
+//  hashlet primarily.  Type lives in the low nibble.
 
-#define DAG_COMMIT_PARENT  2
-#define DAG_COMMIT_TREE    3
+#define DAG_HL_SHIFT  4
+#define DAG_HL_MASK   ((1ULL << 60) - 1)
 
-// wh128 a/b use the wh64 layout: hashlet[40] | id[20] | type[4]
-// (type in low bits; hashlet in high bits — see dog/WHIFF.h).
-#define DAGPack    wh64Pack
-#define DAGType    wh64Type
-#define DAGId      wh64Id
-#define DAGHashlet wh64Off
+fun wh64 DAGPack(u8 type, u64 hl) {
+    return ((u64)type & 0xfULL) | ((hl & DAG_HL_MASK) << DAG_HL_SHIFT);
+}
+fun u8  DAGType(wh64 v)    { return (u8)(v & 0xfULL); }
+fun u64 DAGHashlet(wh64 v) { return (v >> DAG_HL_SHIFT) & DAG_HL_MASK; }
 
-fun wh128 DAGEntry(u8 atype, u32 aid, u64 ahash,
-                   u8 btype, u32 bid, u64 bhash) {
+fun wh128 DAGEntry(u8 ktype, u64 khash,
+                   u8 vtype, u64 vhash) {
     return (wh128){
-        .key = wh64Pack(atype, aid, ahash),
-        .val = wh64Pack(btype, bid, bhash),
+        .key = DAGPack(ktype, khash),
+        .val = DAGPack(vtype, vhash),
     };
 }
 
 // --- sha1 helpers ---
 
 fun u64 DAGsha1Hashlet(sha1 const *s) {
-    return WHIFFHashlet40(s);
+    return WHIFFHashlet60(s);
 }
 
 fun ok64 DAGsha1FromHex(sha1 *out, char const *hex40) {
@@ -101,11 +115,23 @@ fun void DAGsha1ToHex(char *hex41, sha1 const *s) {
 
 #include "abc/MSET.h"
 
-//  Find first entry matching (type, hashlet) anywhere in the stack.
-//  Returns NULL if not found.  Scans across type-interleaved entries.
+//  Populate `hits` with one wh128cs slot per run that has at least
+//  one entry whose key equals `key`.  Each populated slot covers
+//  exactly the equal-key span in that run (binary search + forward
+//  walk).  `hits[1]` carries the slot cap on the way in; the
+//  function advances `hits[0]` past each filled slot — caller stashes
+//  the original head before the call and recovers the populated range
+//  as [stash, hits[0]).  Returns DAGNOROOM if the cap is exhausted
+//  before all matching runs are scanned.
+ok64 DAGRange(wh128css hits, wh128css runs, wh64 key);
+
+//  Find the first entry matching (type, hashlet) anywhere in the
+//  stack.  Returns NULL if not found.  Caller may walk forward across
+//  entries with identical key (multiple parents, child-name
+//  collisions, etc.) by checking `DAGType(p->key) == type &&
+//  DAGHashlet(p->key) == hashlet` for each successor.
 fun wh128cp DAGLookup(wh128css runs, u8 type, u64 hashlet) {
-    u64 key_lo = DAGPack(type, 0, hashlet);
-    u64 key_hi = DAGPack(type, WHIFF_ID_MASK, hashlet);
+    u64 want = DAGPack(type, hashlet);
     a_dup(wh128cs, scan, runs);
     $for(wh128cs, run, scan) {
         wh128cp base = (*run)[0];
@@ -113,13 +139,10 @@ fun wh128cp DAGLookup(wh128css runs, u8 type, u64 hashlet) {
         size_t lo = 0, hi = len;
         while (lo < hi) {
             size_t mid = lo + (hi - lo) / 2;
-            if (base[mid].key < key_lo) lo = mid + 1;
+            if (base[mid].key < want) lo = mid + 1;
             else hi = mid;
         }
-        while (lo < len && base[lo].key >= key_lo && base[lo].key <= key_hi) {
-            if (DAGType(base[lo].key) == type) return &base[lo];
-            lo++;
-        }
+        if (lo < len && base[lo].key == want) return &base[lo];
     }
     return NULL;
 }
@@ -129,15 +152,21 @@ fun wh128cp DAGLookup(wh128css runs, u8 type, u64 hashlet) {
 // ==========================================================
 
 //  Root-tree hashlet of a commit.  0 if not indexed.
-fun u64 DAGCommitTree(wh128css runs, u64 commit_h) {
-    wh128cp rec = DAGLookup(runs, DAG_COMMIT_TREE, commit_h);
-    return rec ? DAGHashlet(rec->val) : 0;
-}
+//  (COMMIT, commit_h) keys cover both parent and root-tree edges;
+//  caller's view is filtered on val.type == TREE inside.
+u64 DAGCommitTree(wh128css runs, u64 commit_h);
 
-//  Collect parent hashlets of a commit into out[0..cap).  Returns the
-//  total number of parents found; only the first min(count, cap) are
-//  written.  Root commits return 0.
-u32 DAGParents(wh128css runs, u64 commit_h, u64 *out, u32 cap);
+//  Feed the parent edges from `commit_h` (a packed wh64 key, e.g.
+//  `DAGPack(DAG_T_COMMIT, h60)`) into `parents` as full val-wh64s.
+//  Each fed value carries (type, hashlet); decode with DAGType /
+//  DAGHashlet.  Filters on val.type == DAG_T_COMMIT so the
+//  same-key root-tree edge isn't yielded.  Returns DAGNOROOM when
+//  `parents` fills.  Caller pattern:
+//      wh64 storage[16];
+//      wh64s parents = {storage, storage + 16};
+//      DAGParents(idx, parents, DAGPack(DAG_T_COMMIT, h60));
+//      // populated: [storage, parents[0])
+ok64 DAGParents(wh128css index, wh64s parents, wh64 commit_h);
 
 //  BFS from `tip` over COMMIT_PARENT edges; populate `set` with all
 //  reachable commit hashlets (tip included).  `set` must be a
@@ -150,7 +179,7 @@ ok64 DAGAncestorsOfMany(Bwh128 set, wh128css runs,
                         u64 const *tips, u32 n);
 
 //  Populate `set` with every commit hashlet recorded in the index
-//  (one record per COMMIT_TREE entry).  Use when there's no tip to
+//  (one record per (COMMIT, TREE) entry).  Use when there's no tip to
 //  scope the walk to and a full-history projection is wanted.
 ok64 DAGAllCommits(Bwh128 set, wh128css runs);
 
@@ -171,15 +200,53 @@ u32 DAGTopoSort(u64 *out, u32 cap,
 
 // --- hashlet width bridging ---
 //
-//  graf stores 40-bit hashlets (top 40 bits of SHA-1); keeper stores
-//  60-bit hashlets (top 60 bits) in its LSM keys.  To resolve a graf
-//  hashlet in keeper, left-align into the 60-bit space and do a
-//  40-bit prefix match (hexlen = 10).  For small repos 40-bit
-//  collisions are vanishingly rare; the caller further narrows by
-//  checking obj_type.
+//  graf's 60-bit hashlets line up exactly with keeper's 60-bit LSM
+//  keys, so resolution is a direct lookup with hexlen=15.  Kept as a
+//  named constant for self-documenting call sites.
 
-#define DAG_H40_HEXLEN 10
+#define DAG_H60_HEXLEN 15
 
-fun u64 DAGh40ToKeeperPrefix(u64 h40) { return h40 << 20; }
+// ==========================================================
+// Tree-shape index
+// ==========================================================
+
+//  RAPHash seed for tree-segment names.  Constant, public so that
+//  ingest and lookup hash the same way.  Picked from the golden ratio
+//  bits — anything fixed and non-zero will do; the value just needs to
+//  isolate the segment-name hash space from raw-SHA hashlets so the
+//  XOR'd key doesn't accidentally collide with a same-shape COMMIT
+//  key from a different entry kind.
+#define GRAF_SEG_SEED 0x9e3779b97f4a7c15ULL
+
+//  Visitor for DAGTreeChildren.  Receives one (child_h60, kind) per
+//  matching wh128 record.  `kind` is DAG_T_TREE / DAG_T_BLOB /
+//  DAG_T_COMMIT.  Return OK to keep iterating; return any non-OK to
+//  abort the walk (the value propagates back to the caller — use it
+//  to signal "found what I wanted, stop").
+typedef ok64 (*DAGChildCb)(void *ctx, u64 child_h, u8 kind);
+
+//  Look up children of `tree_h` named `name` in the index.  Computes
+//  the XOR'd key, binary-searches each run, and walks every entry
+//  whose key matches before invoking `cb`.  In the no-collision case
+//  this is exactly one callback per matching entry; in the rare 60-bit
+//  collision case it's >1 and the caller disambiguates via keeper.
+ok64 DAGTreeChildren(wh128css runs, u64 tree_h, u8cs name,
+                     DAGChildCb cb, void *ctx);
+
+//  Walk path segments from `commit_h` (a packed wh64 key like
+//  `DAGPack(DAG_T_COMMIT, h60)`) through the tree-shape index and
+//  return the leaf object's wh64 (carries both kind and hashlet —
+//  decode with DAGType / DAGHashlet).  Returns 0 (a never-valid wh64,
+//  since type is always non-zero) if the commit isn't indexed, any
+//  intermediate segment is missing, or an intermediate is anything
+//  other than a TREE.  Hash-collision robustness: when multiple
+//  candidates match a segment, the first TREE-typed (intermediate)
+//  or any-typed (leaf) hit is taken.  Pure index lookups — no
+//  keeper roundtrip, no allocation.
+//
+//  Empty `path` returns the commit's root tree wh64.
+//  Trailing-slash paths are tolerated (treated as no segment after
+//  the slash).
+wh64 DAGCommitPathHashlet(wh128css index, wh64 commit_h, u8cs path);
 
 #endif

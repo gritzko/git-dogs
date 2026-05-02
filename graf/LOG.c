@@ -240,13 +240,13 @@ static ok64 graflog_branch(log_ctx *lx, keeper *k, sha1 const *tip,
     Bu8 cbuf = {};
     call(u8bMap, cbuf, LOG_OBJ_BUF);
 
-    u64 cur_h40 = WHIFFHashlet40(tip);
+    u64 cur_h40 = WHIFFHashlet60(tip);
     for (u32 i = 0; i < count && cur_h40 != 0; i++) {
         if (graf_out_fd < 0) break;
 
         u8bReset(cbuf);
         u8 ot = 0;
-        if (KEEPGet(k, DAGh40ToKeeperPrefix(cur_h40), DAG_H40_HEXLEN,
+        if (KEEPGet(k, cur_h40, DAG_H60_HEXLEN,
                     cbuf, &ot) != OK || ot != DOG_OBJ_COMMIT) break;
         a_dup(u8c, body, u8bData(cbuf));
         sha1 csha = {};
@@ -257,12 +257,14 @@ static ok64 graflog_branch(log_ctx *lx, keeper *k, sha1 const *tip,
         //  First-parent walk via the DAG index (linear-history
         //  invariant — `parents[1+]` only appears for git-imported
         //  merges, which a `--first-parent`-style log skips by design).
-        u64 parents[2] = {0, 0};
+        wh64 par_buf[2] = {};
+        wh64s parents = {par_buf, par_buf + 2};
+        wh64 *pbase = parents[0];
         wh128css runs = {NULL, NULL};
         GRAFRuns(runs);
-        u32 np = DAGParents(runs, cur_h40, parents, 2);
-        if (np == 0) break;
-        cur_h40 = parents[0];
+        DAGParents(runs, parents, DAGPack(DAG_T_COMMIT, cur_h40));
+        if (parents[0] == pbase) break;   // no parents → root commit
+        cur_h40 = DAGHashlet(*pbase);
     }
     u8bUnMap(cbuf);
     done;
@@ -276,7 +278,7 @@ static ok64 graflog_file(log_ctx *lx, keeper *k, sha1 const *tip,
                          u8cs path, u32 count) {
     sane(k && tip && $ok(path));
 
-    u64 tip_h40 = WHIFFHashlet40(tip);
+    u64 tip_h40 = WHIFFHashlet60(tip);
 
     Bwh128 ancestors = {};
     call(wh128bAllocate, ancestors, LOG_ANC_SIZE);
@@ -356,7 +358,7 @@ static ok64 graflog_file(log_ctx *lx, keeper *k, sha1 const *tip,
         u64 h40 = keep[ki - 1];
         u8bReset(cbuf);
         u8 ot = 0;
-        if (KEEPGet(k, DAGh40ToKeeperPrefix(h40), DAG_H40_HEXLEN,
+        if (KEEPGet(k, h40, DAG_H60_HEXLEN,
                     cbuf, &ot) != OK || ot != DOG_OBJ_COMMIT) continue;
         a_dup(u8c, body, u8bData(cbuf));
         sha1 csha = {};

@@ -34,7 +34,7 @@
 // object body for callers that don't (e.g. `graf index`'s manual
 // reindex walk at graf/INDEX.c).
 static u64 dag_obj_hashlet(u8 obj_type, sha1 const *sha, u8cs body) {
-    if (sha) return WHIFFHashlet40(sha);
+    if (sha) return WHIFFHashlet60(sha);
 
     char hdr[32];
     char const *tn = "blob";
@@ -55,7 +55,7 @@ static u64 dag_obj_hashlet(u8 obj_type, sha1 const *sha, u8cs body) {
     SHA1Feed(&st, body);
     sha1 out = {};
     SHA1DCFinal(out.data, &st);
-    return WHIFFHashlet40(&out);
+    return WHIFFHashlet60(&out);
 }
 
 // --- Template instantiations for wh128 (sort, merge, hash).
@@ -140,41 +140,64 @@ static ok64 dag_index_write_leaf(graf *g, wh128cs run) {
 
 // --- Graph-navigation primitives ---
 
-u32 DAGParents(wh128css runs, u64 commit_h, u64 *out, u32 cap) {
-    u64 lo = DAGPack(DAG_COMMIT_PARENT, 0, commit_h);
-    u64 hi = DAGPack(DAG_COMMIT_PARENT, WHIFF_ID_MASK, commit_h);
-    u32 total = 0;
+ok64 DAGRange(wh128css hits, wh128css runs, wh64 key) {
+    sane(hits);
     a_dup(wh128cs, scan, runs);
     $for(wh128cs, run, scan) {
         wh128cp base = (*run)[0];
-        size_t len = (size_t)((*run)[1] - base);
-        size_t lo_i = 0, hi_i = len;
-        while (lo_i < hi_i) {
-            size_t mid = lo_i + (hi_i - lo_i) / 2;
-            if (base[mid].key < lo) lo_i = mid + 1;
-            else hi_i = mid;
+        size_t  len  = (size_t)((*run)[1] - base);
+        size_t  lo   = 0, hi = len;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (base[mid].key < key) lo = mid + 1;
+            else hi = mid;
         }
-        while (lo_i < len && base[lo_i].key >= lo && base[lo_i].key <= hi) {
-            if (DAGType(base[lo_i].key) == DAG_COMMIT_PARENT) {
-                if (total < cap && out) {
-                    out[total] = DAGHashlet(base[lo_i].val);
-                }
-                total++;
-            }
-            lo_i++;
+        size_t end = lo;
+        while (end < len && base[end].key == key) end++;
+        if (end > lo) {
+            wh128cs hit = {base + lo, base + end};
+            if (wh128cssFeed1(hits, hit) != OK) return DAGNOROOM;
         }
     }
-    return total;
+    done;
+}
+
+u64 DAGCommitTree(wh128css runs, u64 commit_h) {
+    wh128cs slots[MSET_MAX_LEVELS] = {};
+    wh128css hits = {slots, slots + MSET_MAX_LEVELS};
+    wh128cs *base = hits[0];
+    if (DAGRange(hits, runs, DAGPack(DAG_T_COMMIT, commit_h)) != OK) return 0;
+    for (wh128cs *r = base; r < hits[0]; r++) {
+        for (wh128cp e = (*r)[0]; e < (*r)[1]; e++) {
+            if (DAGType(e->val) == DAG_T_TREE) return DAGHashlet(e->val);
+        }
+    }
+    return 0;
+}
+
+ok64 DAGParents(wh128css index, wh64s parents, wh64 commit_h) {
+    sane(parents);
+    wh128cs slots[MSET_MAX_LEVELS] = {};
+    wh128css hits = {slots, slots + MSET_MAX_LEVELS};
+    wh128cs *base = hits[0];
+    call(DAGRange, hits, index, commit_h);
+    for (wh128cs *r = base; r < hits[0]; r++) {
+        for (wh128cp e = (*r)[0]; e < (*r)[1]; e++) {
+            if (DAGType(e->val) != DAG_T_COMMIT) continue;
+            if (wh64sFeed1(parents, e->val) != OK) return DAGNOROOM;
+        }
+    }
+    done;
 }
 
 ok64 dag_anc_put(Bwh128 set, u64 commit_h) {
-    wh128 rec = {.key = wh64Pack(0, 0, commit_h), .val = 0};
+    wh128 rec = {.key = DAGPack(0, commit_h), .val = 0};
     wh128s tab = {wh128bHead(set), wh128bTerm(set)};
     return HASHwh128Put(tab, &rec);
 }
 
 b8 DAGAncestorsHas(Bwh128 set, u64 commit_h) {
-    wh128 probe = {.key = wh64Pack(0, 0, commit_h), .val = 0};
+    wh128 probe = {.key = DAGPack(0, commit_h), .val = 0};
     wh128s tab = {wh128bHead(set), wh128bTerm(set)};
     return HASHwh128Get(&probe, tab) == OK;
 }
@@ -192,22 +215,24 @@ ok64 DAGAncestors(Bwh128 set, wh128css runs, u64 tip) {
     call(wh128bMap, queue, cap);
 
     dag_anc_put(set, tip);
-    wh128 q0 = { .key = wh64Pack(0, 0, tip), .val = 0 };
+    wh128 q0 = { .key = DAGPack(0, tip), .val = 0 };
     wh128bFeed1(queue, q0);
 
     size_t head = 0;
-    u64 parents[16];
+    wh64 par_buf[16];
     while (head < wh128bDataLen(queue)) {
         wh128cp cur = wh128bDataHead(queue) + head;
         u64 c = DAGHashlet(cur->key);
         head++;
 
-        u32 np = DAGParents(runs, c, parents, 16);
-        if (np > 16) np = 16;
-        for (u32 i = 0; i < np; i++) {
-            if (DAGAncestorsHas(set, parents[i])) continue;
-            if (dag_anc_put(set, parents[i]) != OK) continue;
-            wh128 qr = { .key = wh64Pack(0, 0, parents[i]), .val = 0 };
+        wh64s parents = {par_buf, par_buf + 16};
+        wh64 *pbase = parents[0];
+        DAGParents(runs, parents, DAGPack(DAG_T_COMMIT, c));
+        for (wh64 *p = pbase; p < parents[0]; p++) {
+            u64 ph = DAGHashlet(*p);
+            if (DAGAncestorsHas(set, ph)) continue;
+            if (dag_anc_put(set, ph) != OK) continue;
+            wh128 qr = { .key = DAGPack(0, ph), .val = 0 };
             if (wh128bFeed1(queue, qr) != OK) break;
         }
     }
@@ -228,12 +253,16 @@ ok64 DAGAncestorsOfMany(Bwh128 set, wh128css runs,
 
 ok64 DAGAllCommits(Bwh128 set, wh128css runs) {
     sane(set);
+    //  Each commit has exactly one (COMMIT, TREE) edge — use it as a
+    //  unique-per-commit witness while skipping (COMMIT, COMMIT)
+    //  parent edges and the new (TREE, *) child edges.
     a_dup(wh128cs, scan, runs);
     $for(wh128cs, run, scan) {
         wh128cp base = (*run)[0];
         wh128cp end  = (*run)[1];
         for (wh128cp p = base; p < end; p++) {
-            if (DAGType(p->key) != DAG_COMMIT_TREE) continue;
+            if (DAGType(p->key) != DAG_T_COMMIT) continue;
+            if (DAGType(p->val) != DAG_T_TREE)   continue;
             dag_anc_put(set, DAGHashlet(p->key));
         }
     }
@@ -255,6 +284,20 @@ typedef struct {
     u32 npar;
     u64 pars[DAG_TOPO_MAX_PARENTS];
 } topo_frame;
+
+//  Thin wrapper: DAGParents (wh64s feed) → u64[] of hashlets, the
+//  shape topo_frame stores.  Capped at `cap` slots.
+static u32 topo_parents_of(wh128css runs, u64 commit_h,
+                           u64 *out, u32 cap) {
+    wh64 buf[DAG_TOPO_MAX_PARENTS];
+    wh64s parents = {buf, buf + DAG_TOPO_MAX_PARENTS};
+    wh64 *base = parents[0];
+    DAGParents(runs, parents, DAGPack(DAG_T_COMMIT, commit_h));
+    u32 n = (u32)(parents[0] - base);
+    if (n > cap) n = cap;
+    for (u32 i = 0; i < n; i++) out[i] = DAGHashlet(base[i]);
+    return n;
+}
 
 u32 DAGTopoSort(u64 *out, u32 cap,
                 Bwh128 set, wh128css runs) {
@@ -290,8 +333,8 @@ u32 DAGTopoSort(u64 *out, u32 cap,
         u32 sp = 0;
         stack[sp].c = root;
         stack[sp].par_i = 0;
-        stack[sp].npar = DAGParents(runs, root, stack[sp].pars,
-                                    DAG_TOPO_MAX_PARENTS);
+        stack[sp].npar = topo_parents_of(runs, root, stack[sp].pars,
+                                       DAG_TOPO_MAX_PARENTS);
         if (stack[sp].npar > DAG_TOPO_MAX_PARENTS)
             stack[sp].npar = DAG_TOPO_MAX_PARENTS;
         sp++;
@@ -309,8 +352,8 @@ u32 DAGTopoSort(u64 *out, u32 cap,
 
                 stack[sp].c = par;
                 stack[sp].par_i = 0;
-                stack[sp].npar = DAGParents(runs, par, stack[sp].pars,
-                                            DAG_TOPO_MAX_PARENTS);
+                stack[sp].npar = topo_parents_of(runs, par, stack[sp].pars,
+                                                 DAG_TOPO_MAX_PARENTS);
                 if (stack[sp].npar > DAG_TOPO_MAX_PARENTS)
                     stack[sp].npar = DAG_TOPO_MAX_PARENTS;
                 sp++;
@@ -416,11 +459,10 @@ static void dag_ingest_free(dag_ingest *g) {
 // --- Emit helpers ---
 
 static void dag_emit(dag_ingest *g,
-                     u8 atype, u32 agen, u64 ahash,
-                     u8 btype, u32 bgen, u64 bhash) {
+                     u8 ktype, u64 khash,
+                     u8 vtype, u64 vhash) {
     if (g->batch_len >= g->batch_cap) return;  // overflow; handled by flush
-    g->batch[g->batch_len++] = DAGEntry(atype, agen, ahash,
-                                        btype, bgen, bhash);
+    g->batch[g->batch_len++] = DAGEntry(ktype, khash, vtype, vhash);
 }
 
 static ok64 dag_flush_batch(dag_ingest *g) {
@@ -498,28 +540,172 @@ ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
 
         u64 commit_h = dag_obj_hashlet(DOG_OBJ_COMMIT, sha, blob);
 
-        u64 tree_h = WHIFFHashlet40(&tree_sha);
+        u64 tree_h = WHIFFHashlet60(&tree_sha);
 
-        //  Emit COMMIT_TREE + COMMIT_PARENT[] tuples.  Generation
-        //  numbers are no longer indexed; the wh128 `id` slot stays
-        //  zero in every record we write here.
-        dag_emit(g, DAG_COMMIT_TREE, 0, commit_h,
-                    DAG_COMMIT_TREE, 0, tree_h);
+        //  (COMMIT, commit_h) → (TREE,   tree_h)    root-tree edge
+        //  (COMMIT, commit_h) → (COMMIT, parent_h)  one per parent
+        dag_emit(g, DAG_T_COMMIT, commit_h,
+                    DAG_T_TREE,   tree_h);
         for (u32 i = 0; i < npar; i++) {
-            u64 parent_h = WHIFFHashlet40(&parents[i]);
-            dag_emit(g, DAG_COMMIT_PARENT, 0, commit_h,
-                        DAG_COMMIT_PARENT, 0, parent_h);
+            u64 parent_h = WHIFFHashlet60(&parents[i]);
+            dag_emit(g, DAG_T_COMMIT, commit_h,
+                        DAG_T_COMMIT, parent_h);
         }
 
         dag_batch_maybe_flush(g);
         done;
     }
 
-    case DOG_OBJ_TREE:
+    case DOG_OBJ_TREE: {
+        //  Fan out (TREE, tree_h ^ seg_h) → (kind, child_h) one per
+        //  entry, where kind comes from the git mode:
+        //    040000          → TREE
+        //    160000          → COMMIT (gitlink/submodule)
+        //    100644/100755/120000 → BLOB
+        //  Unknown modes are skipped — better an absent index entry
+        //  than a wrong-typed one (the keeper-verified scan side will
+        //  fall back to walking the tree blob anyway).
+        u64 tree_h = dag_obj_hashlet(DOG_OBJ_TREE, sha, blob);
+        if (tree_h == 0) done;
+
+        a_dup(u8c, scan, blob);
+        u8cs file = {}, esha = {};
+        u32 mode = 0;
+        while (GITu8sDrainTree(scan, file, esha, &mode) == OK) {
+            //  Split "<mode> <name>" → name slice.
+            u8cs fscan = {file[0], file[1]};
+            if (u8csFind(fscan, ' ') != OK) continue;
+            u8cs name = {fscan[0] + 1, file[1]};
+            if ($empty(name) || u8csLen(esha) != 20) continue;
+
+            u8 kind = 0;
+            switch (mode) {
+                case 040000:  kind = DAG_T_TREE;   break;
+                case 0160000: kind = DAG_T_COMMIT; break;
+                case 0100644: case 0100755: case 0120000:
+                              kind = DAG_T_BLOB;   break;
+                default:      continue;
+            }
+
+            sha1 child_sha = {};
+            memcpy(child_sha.data, esha[0], 20);
+            u64 child_h = WHIFFHashlet60(&child_sha);
+            u64 seg_h   = RAPHashSeed(name, GRAF_SEG_SEED) & DAG_HL_MASK;
+
+            dag_emit(g, DAG_T_TREE, tree_h ^ seg_h,
+                        kind,       child_h);
+            dag_batch_maybe_flush(g);
+        }
+        done;
+    }
+
     case DOG_OBJ_BLOB:
     default:
-        done;  // tree/blob payloads ignored — only commit edges are indexed.
+        done;  // blob payloads carry no graph edges.
     }
+}
+
+// ============================================================
+// Tree-child lookup
+// ============================================================
+
+ok64 DAGTreeChildren(wh128css runs, u64 tree_h, u8cs name,
+                     DAGChildCb cb, void *ctx) {
+    sane(cb && $ok(name));
+    u64 seg_h = RAPHashSeed(name, GRAF_SEG_SEED) & DAG_HL_MASK;
+    wh128cs slots[MSET_MAX_LEVELS] = {};
+    wh128css hits = {slots, slots + MSET_MAX_LEVELS};
+    wh128cs *base = hits[0];
+    call(DAGRange, hits, runs, DAGPack(DAG_T_TREE, tree_h ^ seg_h));
+    for (wh128cs *r = base; r < hits[0]; r++) {
+        for (wh128cp e = (*r)[0]; e < (*r)[1]; e++) {
+            ok64 rc = cb(ctx, DAGHashlet(e->val), DAGType(e->val));
+            if (rc != OK) return rc;
+        }
+    }
+    done;
+}
+
+// ============================================================
+// Path-walk through the tree-shape index
+// ============================================================
+
+//  Find one match for (tree_h, name) preferring `prefer_kind`; falls
+//  back to first hit of any kind.  Returns the val wh64 (kind +
+//  hashlet) or 0 on miss.  Used by DAGCommitPathHashlet — for
+//  intermediate segments we want a TREE; for leaves we accept any.
+//
+//  The "kind preference" matters only when a 60-bit hash collision
+//  produces multiple distinct matches — then we route through the
+//  TREE-kind candidate to keep descending.  In the no-collision case
+//  there's exactly one hit and prefer_kind is moot.
+typedef struct {
+    u8  prefer_kind;     // 0 = no preference (leaf walk)
+    wh64 hit;            // 0 if none yet, non-zero = wh64 val
+} path_hit;
+
+static ok64 path_collect(void *ctx, u64 child_h, u8 kind) {
+    path_hit *p = (path_hit *)ctx;
+    wh64 v = DAGPack(kind, child_h);
+    //  Always remember the first hit (fallback).
+    if (p->hit == 0) p->hit = v;
+    //  Promote to a preferred-kind hit if we see one.
+    if (p->prefer_kind != 0 && kind == p->prefer_kind) {
+        p->hit = v;
+        return DAGFAIL;   // signal "found preferred" — abort iteration
+    }
+    return OK;
+}
+
+wh64 DAGCommitPathHashlet(wh128css index, wh64 commit_h, u8cs path) {
+    //  Anchor at the commit's root tree.
+    u64 tree_h = DAGCommitTree(index, DAGHashlet(commit_h));
+    if (tree_h == 0) return 0;
+
+    //  Empty (or all-trailing-slash) path → root tree wh64.
+    a_dup(u8c, rest, path);
+    while (!$empty(rest) && *rest[0] == '/') u8csUsed1(rest);
+    if ($empty(rest)) return DAGPack(DAG_T_TREE, tree_h);
+
+    //  Descend segment by segment.  Each non-final segment must
+    //  resolve to a TREE; the final one yields whatever kind is
+    //  recorded (BLOB / TREE / COMMIT-gitlink).
+    while (!$empty(rest)) {
+        u8cp slash = rest[0];
+        while (slash < rest[1] && *slash != '/') slash++;
+        u8cs seg = {rest[0], slash};
+
+        //  Skip empty segments (//, trailing /).
+        if ($empty(seg)) {
+            if (slash < rest[1]) rest[0] = slash + 1;
+            else rest[0] = slash;
+            continue;
+        }
+
+        b8 is_last = NO;
+        {
+            u8cp probe = (slash < rest[1]) ? slash + 1 : slash;
+            while (probe < rest[1] && *probe == '/') probe++;
+            if (probe >= rest[1]) is_last = YES;
+        }
+
+        path_hit ph = { .prefer_kind = is_last ? 0 : DAG_T_TREE, .hit = 0 };
+        ok64 rc = DAGTreeChildren(index, tree_h, seg, path_collect, &ph);
+        //  DAGFAIL from path_collect means "found preferred kind, stop"
+        //  — that's success here.  Any other non-OK is fatal.
+        if (rc != OK && rc != DAGFAIL) return 0;
+        if (ph.hit == 0) return 0;
+
+        if (is_last) return ph.hit;
+        if (DAGType(ph.hit) != DAG_T_TREE) return 0;
+        tree_h = DAGHashlet(ph.hit);
+
+        rest[0] = (slash < rest[1]) ? slash + 1 : slash;
+    }
+
+    //  All segments consumed without hitting `is_last` — only happens
+    //  on degenerate inputs we already trimmed; defensive zero.
+    return 0;
 }
 
 ok64 GRAFDagFinish(void) {

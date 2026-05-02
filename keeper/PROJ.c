@@ -124,7 +124,7 @@ static ok64 proj_descend(keeper *k, sha1 const *root_tree, u8cs subpath,
         b8 found = NO;
         sha1 next_sha = {};
         u8 next_kind = 0;
-        while (GITu8sDrainTree(tree_s, file, esha) == OK) {
+        while (GITu8sDrainTree(tree_s, file, esha, NULL) == OK) {
             u8cs fscan = {file[0], file[1]};
             if (u8csFind(fscan, ' ') != OK) continue;
             u8cs mode_s = {file[0], fscan[0]};
@@ -257,7 +257,7 @@ ok64 KEEPProjTree(keeper *k, uricp u, b8 tlv) {
 
     u8cs scan = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
     u8cs file = {}, esha = {};
-    while (GITu8sDrainTree(scan, file, esha) == OK) {
+    while (GITu8sDrainTree(scan, file, esha, NULL) == OK) {
         u8cs fscan = {file[0], file[1]};
         if (u8csFind(fscan, ' ') != OK) continue;
         u8cs mode_s = {file[0], fscan[0]};

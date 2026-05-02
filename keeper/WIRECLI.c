@@ -795,7 +795,7 @@ static ok64 wpush_walk_tree(keeper *k, sha1 const *tree_sha,
     }
     u8cs walk = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
     u8cs file = {}, sha = {};
-    while (GITu8sDrainTree(walk, file, sha) == OK) {
+    while (GITu8sDrainTree(walk, file, sha, NULL) == OK) {
         if ($len(sha) != 20) continue;
         b8 is_tree = NO;
         b8 is_submodule = NO;
