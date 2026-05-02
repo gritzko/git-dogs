@@ -1,9 +1,10 @@
 #!/bin/sh
 #  be-get-overlay-delete-dirty.sh — `be get T2` from a wt at T1 where
 #  T2 has removed `d.txt`, and the wt copy of `d.txt` is dirty.
-#  Strictness increase: the merge classifies this as a real change
-#  (path in baseline only) and refuses, preventing silent loss of dirty
-#  edits to a vanishing file.
+#  Phase 2: the path goes through graf's weave-merge with tgt's
+#  history empty for d.txt — the wt's local edit survives in the
+#  merge output.  GET succeeds; d.txt remains on disk with the
+#  user's edit preserved.
 
 . "$(dirname "$0")/verbcheck.sh"
 . "$(dirname "$0")/setup-primitives.sh"
@@ -26,18 +27,11 @@ T2=$(sp_head_hex)
 sleep 0.1
 echo "d user edit $(date +%N)" >> d.txt
 
-vc_snapshot before
-
-vc_step "be get $T2 — dirty d.txt would vanish → refused"
+vc_step "be get $T2 — dirty d.txt → weave-merged (tgt-empty side preserves wt edit)"
 vc_run delete_dirty "$BE" get "$T2"
 
-vc_snapshot after
-
-vc_assert_exit nonzero
-vc_assert_stderr delete_dirty "GET refused"
-vc_assert_unchanged sniff
-vc_assert_unchanged refs
-vc_assert_unchanged wt
-vc_assert_unchanged baseline
+vc_assert_exit 0
+vc_assert_stderr delete_dirty "weave-merged"
+[ -f d.txt ] || { echo "FAIL: d.txt removed despite dirty edit" >&2; exit 1; }
 
 echo "=== be-get-overlay-delete-dirty: OK ==="

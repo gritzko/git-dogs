@@ -1,12 +1,13 @@
 #!/bin/sh
-#  dirty.sh — sniff GET pre-flight tests for dirty-wt refuse paths.
+#  dirty.sh — sniff GET pre-flight tests.
 #
-#  Verifies the post-Phase-1 GET semantics:
+#  Verifies the post-Phase-2 GET semantics:
 #    * cross-branch GET refused on any unattributed-mtime wt file
 #      (SNIFFDRTY); .sniff and the wt are unchanged on refusal,
 #    * cross-branch GET allowed on a clean wt,
-#    * same-branch GET refused when a target-tree file overlaps a
-#      dirty wt file (SNIFFOVRL),
+#    * same-branch GET on a dirty target-tree overlap is now
+#      weave-merged (wt as an implicit edit on baseline, merged
+#      against tgt's history); GET succeeds and the file stays,
 #    * same-branch GET allowed when the dirty wt file is untracked
 #      (not in the target tree).
 #
@@ -95,9 +96,9 @@ note "cross-branch GET refused as expected"
 note ".sniff and wt left untouched (all-or-nothing rollback)"
 
 # ====================================================================
-# Scenario 3 — same-branch GET refused on dirty overlap with target.
+# Scenario 3 — same-branch GET weave-merges dirty overlap with target.
 # ====================================================================
-echo "=== 3. same-branch GET refused on dirty overlap ==="
+echo "=== 3. same-branch GET weave-merges dirty overlap ==="
 WT="$TMP/wt3"
 mkdir -p "$WT"; cd "$WT"
 echo "a v1" > a.txt
@@ -111,26 +112,19 @@ T2=$(head_hex)
 note "two trunk tips: T1=$T1 T2=$T2"
 
 #  User-edit a.txt on top of T2 — file is now dirty (mtime ∉
-#  stamp-set).  Trying to GET T1 (same branch, different tip) must
-#  refuse because a.txt is in T1's tree and would clobber the dirty.
+#  stamp-set).  GET T1 routes the dirty path through graf's
+#  weave-merge instead of refusing; the merged bytes land in a.txt.
 sleep 0.1
 echo "a uncommitted" > a.txt
-before_tail=$(last_row)
-before_a=$(cat a.txt)
 
-if sniff get "$T1" 2>/tmp/dirty.err; then
+if ! sniff get "$T1" 2>/tmp/dirty.err; then
     cat /tmp/dirty.err
-    fail "same-branch overlap GET should have refused"
+    fail "same-branch overlap GET should have weave-merged, not refused"
 fi
-grep -q "GET refused" /tmp/dirty.err \
-    || fail "expected refusal message; got: $(cat /tmp/dirty.err)"
-note "same-branch overlap GET refused as expected"
-
-[ "$(last_row)" = "$before_tail" ] \
-    || fail ".sniff tail row changed after refused GET"
-[ "$(cat a.txt)" = "$before_a" ] \
-    || fail "a.txt mutated after refused GET"
-note ".sniff and a.txt unchanged after refusal"
+grep -q "weave-merged" /tmp/dirty.err \
+    || fail "expected 'weave-merged' notice; got: $(cat /tmp/dirty.err)"
+[ -f a.txt ] || fail "a.txt vanished across merge GET"
+note "same-branch overlap GET weave-merged as expected"
 
 # ====================================================================
 # Scenario 4 — same-branch GET allowed when the dirty file is

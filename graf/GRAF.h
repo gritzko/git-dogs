@@ -212,6 +212,28 @@ ok64 GRAFDiff2Layer(u8cs name, u8cs ext, u8cs from_data, u8cs to_data);
 // state via &GRAF — callers must have both singletons open.
 ok64 GRAFGet(u8b into, u8csc uri);
 
+// Weave-merge a single file across two commits, treating the wt's
+// on-disk bytes for `path` as an implicit edit attached to `base`.
+// Builds the ancestor-closure weave per tip via `build_tip_weave`,
+// folds the wt bytes as a final WEAVE_WT_SRC layer on the base side,
+// runs WEAVEMerge, and writes the resulting alive-token bytes into
+// `out` (reset before writing).  Reads keeper through `&KEEP`.
+//
+// Both `base` and `tgt` are 20-byte commit SHAs; converted internally
+// via `WHIFFHashlet40` to drive graf's history walks.  Caller writes
+// `out` to disk and stamps the new mtime.
+//
+// Returns OK on success; GRAFFAIL when neither side's history has
+// any alive tokens for `path` (path absent on both); other errors
+// propagated from the weave build / merge / emit steps.
+//
+// Note: divergent regions currently render as base-then-tgt
+// concatenation — WEAVE marker emission is a follow-up.  Callers
+// that need conflict signaling should diff the result against tgt.
+ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
+                     sha1 const *base, sha1 const *tgt,
+                     u8b out);
+
 // Render commit history one-per-line for `be log:[path]?<ref>#<N>`.
 // Branch-only URI (no path) walks the COMMIT_PARENT chain via the DAG
 // index; path-bearing URI uses PATH_VER + ancestor filter.  Output

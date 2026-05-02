@@ -18,6 +18,14 @@ add_test(NAME REBASE01test COMMAND REBASE01test)
 set_tests_properties(REBASE01test PROPERTIES
     ENVIRONMENT "TMP=${DOG_TEST_TMP_ROOT};TEST_ID=REBASE01test")
 
+add_executable(MERGEWT01test MERGEWT01.c)
+target_link_options(MERGEWT01test PRIVATE ${TEST_LDD_FLAGS})
+target_compile_options(MERGEWT01test PRIVATE ${TEST_CXX_FLAGS})
+target_link_libraries(MERGEWT01test graflib dog keeplib abc-core)
+add_test(NAME MERGEWT01test COMMAND MERGEWT01test)
+set_tests_properties(MERGEWT01test PROPERTIES
+    ENVIRONMENT "TMP=${DOG_TEST_TMP_ROOT};TEST_ID=MERGEWT01test")
+
 add_test(NAME GRAFcli_diff_artifact
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/diff_test.sh
         $<TARGET_FILE:graf-cli>

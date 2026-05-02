@@ -30,11 +30,13 @@
 #include "abc/PRO.h"
 #include "abc/RON.h"
 #include "dog/HOME.h"
+#include "graf/GRAF.h"
 #include "keeper/GIT.h"
 #include "keeper/REFS.h"
 #include "keeper/WALK.h"
 
 #include "AT.h"
+#include "SNIFF.h"
 
 typedef struct {
     keeper        *k;
@@ -42,12 +44,17 @@ typedef struct {
     ron60          ts;          // stamp to apply via utimensat
     struct timespec tv;         // same stamp in timespec form
     ok64           error;
-    //  Newline-separated, lex-sorted path list (subset of the target
-    //  tree) where the target sha matches the baseline sha.  WALKTreeLazy
-    //  visits the target in the same order, so we advance this cursor
-    //  in lockstep: a path matching the head means "no-op overlay —
-    //  preserve whatever bytes are on disk" (including dirty user edits).
+    //  Newline-separated, lex-sorted path lists (subsets of the target
+    //  tree).  WALKTreeLazy visits the target in the same order, so we
+    //  advance these cursors in lockstep with the walk.
+    //
+    //   noop_cursor   — target sha matches baseline; preserve whatever
+    //                   bytes are on disk (including dirty user edits).
+    //   merges_cursor — wt has a real local edit; the merge drain will
+    //                   weave-merge wt vs tgt afterwards, so checkout
+    //                   must not clobber the wt content here.
     u8cs           noop_cursor;
+    u8cs           merges_cursor;
 } get_ctx;
 
 //  Write one blob to disk, create dirs as needed, chmod if exec,
@@ -137,6 +144,21 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
         }
     }
 
+    //  Merge path: wt has a real local edit and the merge drain will
+    //  weave-merge it against tgt afterwards.  Skip the write here so
+    //  the wt's edits stay live for the drain to read.  No restamp
+    //  either — the drain stamps after writing the merged bytes.
+    if (!u8csEmpty(g->merges_cursor)) {
+        u8cs head = {};
+        a_dup(u8c, peek, g->merges_cursor);
+        if (u8csDrainLine(peek, head) == OK
+            && $len(head) == $len(path)
+            && memcmp(head[0], path[0], (size_t)$len(head)) == 0) {
+            (void)u8csDrainLine(g->merges_cursor, head);
+            return OK;
+        }
+    }
+
     ok64 o = get_write_one(g, path, kind, esha);
     if (o != OK) g->error = o;
     return o;
@@ -153,18 +175,24 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
 //    * real change / add / delete  → lstat; if mtime ∉ stamp-set,
 //      conflict.  For deletes (baseline-only) where the file is clean
 //      and present on disk, append to `unlink_out`.
+//    * baseline differs from target AND wt has an unattributed mtime:
+//        - if wt content hashes to the baseline sha → clean stamp drift,
+//          let checkout overwrite + restamp (no special bucket).
+//        - else (real local edit) → append to `merges_out`; checkout
+//          skips the path so the merge drain (`GRAFMergeWtFile`) can
+//          weave-merge wt-on-disk against tgt afterwards.
 //
-//  Returns SNIFFOVRL when conflicts > 0 (printing up to 5 paths and a
-//  summary line).  `noop_out` and `unlink_out` are reset on entry; on
+//  `noop_out`, `unlink_out`, and `merges_out` are reset on entry; on
 //  success each carries newline-separated lex-sorted paths.
 
 typedef struct {
     u8cs   reporoot;
     u8bp   noop_out;
     u8bp   unlink_out;
+    u8bp   merges_out;
     ron60  v_base;
     ron60  v_tgt;
-    u32    conflicts;
+    u32    no_base_conflicts;   // dirty wt without a baseline to merge against
 } get_overlap_ctx;
 
 //  Compare two ULOG-row kind (verb's bottom RON64 digit) and
@@ -215,11 +243,56 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
     struct timespec mts = {.tv_sec  = sb.st_mtim.tv_sec,
                            .tv_nsec = sb.st_mtim.tv_nsec};
     ron60 mr = SNIFFAtOfTimespec(mts);
-    if (!SNIFFAtKnown(mr)) {
-        if (c->conflicts < 5)
-            fprintf(stderr, "sniff: dirty overlap %.*s\n",
+
+    //  Unattributed mtime without a baseline to compare against:
+    //  refuse — there's no "clean drift" answer possible, and graf
+    //  has no history to weave-merge with.  Mirrors the prior
+    //  blanket dirty-overlap refusal for this corner.
+    if (!SNIFFAtKnown(mr) && !base) {
+        if (c->no_base_conflicts < 5)
+            fprintf(stderr, "sniff: dirty overlay %.*s\n",
                     (int)$len(path), (char *)path[0]);
-        c->conflicts++;
+        c->no_base_conflicts++;
+        return OK;
+    }
+
+    //  Unattributed mtime: hash wt bytes and compare to baseline.
+    //  Equal → clean stamp drift, let checkout overwrite + restamp
+    //  (silent fall-through).  Different → real local edit, schedule
+    //  a weave-merge after the checkout pass.
+    if (!SNIFFAtKnown(mr) && base) {
+        sha1 wt_sha = {};
+        b8 hashed = NO;
+        if (S_ISREG(sb.st_mode)) {
+            u8bp m = NULL;
+            if (FILEMapRO(&m, $path(fp)) == OK && m) {
+                u8cs body = {u8bDataHead(m), u8bIdleHead(m)};
+                KEEPObjSha(&wt_sha, DOG_OBJ_BLOB, body);
+                FILEUnMap(m);
+                hashed = YES;
+            } else if (sb.st_size == 0) {
+                u8cs empty = {NULL, NULL};
+                KEEPObjSha(&wt_sha, DOG_OBJ_BLOB, empty);
+                hashed = YES;
+            }
+        }
+
+        sha1 base_sha = {};
+        if (u8csLen(base->uri.fragment) == 40) {
+            u8s bin_s = {base_sha.data, base_sha.data + 20};
+            a_dup(u8c, hex_dup, base->uri.fragment);
+            HEXu8sDrainSome(bin_s, hex_dup);
+        }
+        if (hashed && memcmp(wt_sha.data, base_sha.data, 20) == 0) {
+            //  Clean drift — fall through, checkout will restamp.
+            return OK;
+        }
+
+        //  Real local edit: schedule for weave-merge.  The drain
+        //  pass (`get_drain_merges`) will read wt-on-disk after the
+        //  checkout pass skips this path.
+        u8bFeed(c->merges_out, path);
+        u8bFeed1(c->merges_out, '\n');
         return OK;
     }
     if (base && !tgt) {
@@ -231,14 +304,16 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
 }
 
 //  `base_tree` may be NULL — first-checkout / no-baseline case.  Every
-//  walked path then comes from the target side only; both output lists
-//  end up empty.
+//  walked path then comes from the target side only; all three output
+//  lists end up empty.
 static ok64 get_overlap_check(keeper *k, u8cs reporoot,
                               u8cp base_tree, u8cp tgt_tree,
-                              u8bp noop_out, u8bp unlink_out) {
-    sane(k && tgt_tree && noop_out && unlink_out);
+                              u8bp noop_out, u8bp unlink_out,
+                              u8bp merges_out) {
+    sane(k && tgt_tree && noop_out && unlink_out && merges_out);
     u8bReset(noop_out);
     u8bReset(unlink_out);
+    u8bReset(merges_out);
 
     a_cstr(s_base, "base"); a_dup(u8c, db, s_base);
     a_cstr(s_tgt,  "tgt");  a_dup(u8c, dt, s_tgt);
@@ -265,9 +340,10 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
     get_overlap_ctx ctx = {
         .noop_out   = noop_out,
         .unlink_out = unlink_out,
+        .merges_out = merges_out,
         .v_base     = v_base,
         .v_tgt      = v_tgt,
-        .conflicts  = 0,
+        .no_base_conflicts = 0,
     };
     u8csMv(ctx.reporoot, reporoot);
 
@@ -275,11 +351,12 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
     u8bFree(bu); u8bFree(tu);
     if (mr != OK) return mr;
 
-    if (ctx.conflicts > 0) {
+    if (ctx.no_base_conflicts > 0) {
         fprintf(stderr,
-                "sniff: GET refused — %u dirty file(s) overlap with "
-                "incoming changes; commit, stash, or reset before "
-                "checkout\n", ctx.conflicts);
+                "sniff: GET refused — %u dirty file(s) overlay target "
+                "paths and have no baseline to merge against; commit, "
+                "stash, or reset before checkout\n",
+                ctx.no_base_conflicts);
         return SNIFFOVRL;
     }
     done;
@@ -303,6 +380,63 @@ static ok64 get_drain_unlinks(u8cs reporoot, u8cs unlinks) {
     }
     if (dropped > 0)
         fprintf(stderr, "sniff: pruned %u file(s)\n", dropped);
+    done;
+}
+
+//  Drain a newline-separated path list of weave-merge targets.  For
+//  each path, call `GRAFMergeWtFile` (which reads the live wt file as
+//  the implicit edit on `base` and merges against `tgt`'s history),
+//  write the merged bytes back to the wt, and stamp the new mtime.
+//  Best-effort per path: a per-path failure is logged and the rest
+//  continue.
+static ok64 get_drain_merges(u8cs reporoot, u8cs merges,
+                             sha1 const *base, sha1 const *tgt,
+                             ron60 stamp_ts) {
+    sane($ok(reporoot) && base && tgt);
+    if (u8csEmpty(merges)) done;
+
+    Bu8 out = {};
+    call(u8bAllocate, out, 1UL << 24);
+
+    u32 merged = 0, failed = 0;
+    a_dup(u8c, scan, merges);
+    for (;;) {
+        u8cs path = {};
+        if (u8csDrainLine(scan, path) != OK) break;
+        if ($empty(path)) continue;
+
+        ok64 mr = GRAFMergeWtFile(path, reporoot, base, tgt, out);
+        if (mr != OK) {
+            fprintf(stderr,
+                    "sniff: merge failed for %.*s (graf err) — "
+                    "leaving wt content untouched\n",
+                    (int)$len(path), (char *)path[0]);
+            failed++;
+            continue;
+        }
+
+        a_path(fp);
+        if (SNIFFFullpath(fp, reporoot, path) != OK) {
+            failed++; continue;
+        }
+        int fd = -1;
+        if (FILECreate(&fd, $path(fp)) != OK) {
+            failed++; continue;
+        }
+        u8cs body = {u8bDataHead(out), u8bIdleHead(out)};
+        ok64 wo = FILEFeedAll(fd, body);
+        FILEClose(&fd);
+        if (wo != OK) { failed++; continue; }
+
+        (void)SNIFFAtStampPath(fp, stamp_ts);
+        merged++;
+    }
+
+    u8bFree(out);
+    if (merged > 0)
+        fprintf(stderr, "sniff: weave-merged %u file(s)\n", merged);
+    if (failed > 0)
+        fprintf(stderr, "sniff: merge failures: %u file(s)\n", failed);
     done;
 }
 
@@ -388,7 +522,7 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         fail(SNIFFFAIL);
     }
 
-    sha1 tree_sha = {};
+    sha1 tree_sha = {}, tgt_commit_sha = {};
     u8cs commit = {u8bDataHead(buf), u8bIdleHead(buf)};
     fprintf(stderr, "GETDBG commit body (first 120 bytes): %.*s\n",
             (int)($len(commit) < 120 ? $len(commit) : 120),
@@ -397,6 +531,10 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     fprintf(stderr, "GETDBG tree_sha=%02x%02x%02x%02x\n",
             tree_sha.data[0], tree_sha.data[1],
             tree_sha.data[2], tree_sha.data[3]);
+    //  Hash the commit body for the weave-merge drain (its sha is the
+    //  tgt commit hashlet graf walks from).  Must happen before
+    //  u8bFree(buf) — `commit` borrows into the mapping.
+    KEEPObjSha(&tgt_commit_sha, DOG_OBJ_COMMIT, commit);
     u8bFree(buf);
     if (o != OK) {
         fprintf(stderr, "sniff: bad commit (no tree)\n");
@@ -442,8 +580,8 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     //  Used by the overlap pre-flight to distinguish "incoming change"
     //  from "no-op overlay".  Absent baseline (fresh wt) → NULL pointer
     //  passes through, every target path is treated as incoming.
-    sha1 base_tree = {};
-    b8 has_base_tree = NO;
+    sha1 base_tree = {}, base_commit_sha = {};
+    b8 has_base_tree = NO, has_base_commit = NO;
     {
         ron60 bts = 0, bverb = 0;
         uri bu = {};
@@ -451,6 +589,12 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
             u8 hex40[40];
             if (SNIFFAtQueryFirstSha(&bu, hex40) == OK) {
                 u8cs hex_s = {hex40, hex40 + 40};
+                //  Decode the 40-hex baseline tip into a sha1 for the
+                //  weave-merge drain (see get_drain_merges).
+                u8s bin = {base_commit_sha.data, base_commit_sha.data + 20};
+                a_dup(u8c, hex_dup, hex_s);
+                if (HEXu8sDrainSome(bin, hex_dup) == OK) has_base_commit = YES;
+
                 u64 bhashlet = WHIFFHexHashlet60(hex_s);
                 Bu8 cbuf = {};
                 if (u8bAllocate(cbuf, 1UL << 24) == OK) {
@@ -468,30 +612,51 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         }
     }
 
-    Bu8 noop = {}, unlinks = {};
+    Bu8 noop = {}, unlinks = {}, merges = {};
     call(u8bAllocate, noop,    1UL << 20);
     call(u8bAllocate, unlinks, 1UL << 20);
+    call(u8bAllocate, merges,  1UL << 20);
     o = get_overlap_check(k, reporoot,
                           has_base_tree ? base_tree.data : NULL,
-                          tree_sha.data, noop, unlinks);
-    if (o != OK) { u8bFree(noop); u8bFree(unlinks); return o; }
+                          tree_sha.data, noop, unlinks, merges);
+    if (o != OK) { u8bFree(noop); u8bFree(unlinks); u8bFree(merges); return o; }
 
     get_ctx ctx = {.k = k, .error = OK};
     u8csMv(ctx.reporoot, reporoot);
     SNIFFAtNow(&ctx.ts, &ctx.tv);
-    ctx.noop_cursor[0] = u8bDataHead(noop);
-    ctx.noop_cursor[1] = u8bIdleHead(noop);
+    ctx.noop_cursor[0]   = u8bDataHead(noop);
+    ctx.noop_cursor[1]   = u8bIdleHead(noop);
+    ctx.merges_cursor[0] = u8bDataHead(merges);
+    ctx.merges_cursor[1] = u8bIdleHead(merges);
 
     o = WALKTreeLazy(k, tree_sha.data, get_visit, &ctx);
     if (o == OK && ctx.error != OK) o = ctx.error;
-    if (o != OK) { u8bFree(noop); u8bFree(unlinks); return o; }
+    if (o != OK) {
+        u8bFree(noop); u8bFree(unlinks); u8bFree(merges);
+        return o;
+    }
+
+    //  Drain the weave-merge list now that checkout has skipped these
+    //  paths, leaving wt edits live for graf to read.  Open graf
+    //  read-only — already-open is fine (idempotent).
+    if (has_base_commit && u8bDataLen(merges) > 0) {
+        ok64 go = GRAFOpen(SNIFF.h, NO);
+        b8 own_open = (go == OK);
+        if (go == OK || go == GRAFOPEN || go == GRAFOPENRO) {
+            a_dup(u8c, mlist, u8bData(merges));
+            (void)get_drain_merges(reporoot, mlist,
+                                   &base_commit_sha, &tgt_commit_sha,
+                                   ctx.ts);
+            if (own_open) GRAFClose();
+        }
+    }
 
     //  Prune the baseline-only paths the classifier flagged as clean.
     {
         a_dup(u8c, ulist, u8bData(unlinks));
         (void)get_drain_unlinks(reporoot, ulist);
     }
-    u8bFree(noop); u8bFree(unlinks);
+    u8bFree(noop); u8bFree(unlinks); u8bFree(merges);
 
     //  Compose the `get` row URI via abc/URI.  Canonical at-log form:
     //  `?<branch>#<curhash>` — query carries the be-branch path

@@ -12,6 +12,7 @@
 #include "JOIN.h"
 #include "WEAVE.h"
 
+#include "abc/FILE.h"
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "abc/RAP.h"
@@ -273,6 +274,107 @@ cleanup:
     WEAVEFree(&wours);
     WEAVEFree(&wtheirs);
     WEAVEFree(&wmerge);
+    return ret;
+}
+
+//  Fold the wt-on-disk bytes for `path` (relative to `reporoot`) into
+//  the weave `cur` as a final WEAVE_WT_SRC layer, writing the result
+//  into `next` and reporting via `*used_next` whether the fold ran
+//  (NO when the file is missing or byte-identical to the prior layer
+//  — caller keeps `cur`).  `nu_scratch` is used for the WEAVEFromBlob
+//  intermediate.
+static ok64 graf_fold_wt_layer(weave *next, b8 *used_next,
+                               weave const *cur, weave *nu_scratch,
+                               u8cs path, u8cs ext, u8cs reporoot) {
+    sane(next && cur && nu_scratch && used_next);
+    *used_next = NO;
+    if (!$ok(reporoot)) done;
+
+    a_path(wt_path, reporoot, path);
+    u8bp wt_mapped = NULL;
+    ok64 mo = FILEMapRO(&wt_mapped, $path(wt_path));
+    if (mo != OK || !wt_mapped) done;       // missing-file → skip silently
+
+    u8cs wt_data = {u8bDataHead(wt_mapped),
+                    u8bDataHead(wt_mapped) + u8bDataLen(wt_mapped)};
+    ok64 ret = WEAVEFromBlob(nu_scratch, wt_data, ext, WEAVE_WT_SRC);
+    if (ret == OK) {
+        ret = WEAVEDiff(next, cur, nu_scratch, WEAVE_WT_SRC);
+        if (ret == OK) *used_next = YES;
+    }
+    FILEUnMap(wt_mapped);
+    return ret;
+}
+
+//  Weave-merge a single file across two commits, treating the wt's
+//  on-disk bytes for `path` as an implicit edit attached to `base`.
+//  Builds the ancestor-closure weave for each tip, folds the wt
+//  bytes as a final WEAVE_WT_SRC layer on the base side, runs
+//  WEAVEMerge, and emits the resulting alive-token bytes into `out`.
+//
+//  Returns OK on success.  Divergent regions currently render as
+//  base-then-tgt concatenation (WEAVE marker emission lands later);
+//  GRAFFAIL on history-empty-on-both-sides.  Caller writes `out` to
+//  disk and stamps the new mtime.
+ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
+                     sha1 const *base, sha1 const *tgt,
+                     u8b out) {
+    sane($ok(path) && $ok(reporoot) && base && tgt && out);
+    u8bReset(out);
+
+    u64 base_h40 = WHIFFHashlet40(base);
+    u64 tgt_h40  = WHIFFHashlet40(tgt);
+
+    u8cs ext = {};
+    PATHu8sExt(ext, path);
+
+    weave wbase = {}, wbase_wt = {}, wnu = {};
+    weave wtgt = {}, wmerge = {};
+    ok64 ret = OK;
+    if ((ret = WEAVEInit(&wbase))    != OK) return ret;
+    if ((ret = WEAVEInit(&wbase_wt)) != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wnu))      != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wtgt))     != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wmerge))   != OK) goto cleanup;
+
+    //  Base side: ancestor closure of base commit.
+    ret = build_tip_weave(&wbase, path, ext, &base_h40, 1);
+    if (ret != OK) goto cleanup;
+
+    //  Fold wt bytes onto the base side.  When the file is missing or
+    //  byte-equal to the last commit, `used_next` stays NO and `wcur`
+    //  remains `&wbase`.
+    weave const *wcur = &wbase;
+    b8 wt_layered = NO;
+    ret = graf_fold_wt_layer(&wbase_wt, &wt_layered, &wbase, &wnu,
+                             path, ext, reporoot);
+    if (ret != OK) goto cleanup;
+    if (wt_layered) wcur = &wbase_wt;
+
+    //  Target side: ancestor closure of tgt commit.
+    ret = build_tip_weave(&wtgt, path, ext, &tgt_h40, 1);
+    if (ret != OK) goto cleanup;
+
+    //  Empty-side degeneracy: if either side has no alive tokens,
+    //  emit the other side's alive bytes verbatim (mirrors
+    //  `get_merge_2way`).
+    u32 base_n = (u32)((u32cp)wcur->toks[2] - (u32cp)wcur->toks[1]);
+    u32 tgt_n  = (u32)((u32cp)wtgt.toks[2]  - (u32cp)wtgt.toks[1]);
+    if (base_n == 0 && tgt_n == 0) { ret = GRAFFAIL; goto cleanup; }
+    if (base_n == 0) { ret = emit_alive_bytes(out, &wtgt); goto cleanup; }
+    if (tgt_n == 0)  { ret = emit_alive_bytes(out, wcur);  goto cleanup; }
+
+    ret = WEAVEMerge(&wmerge, wcur, &wtgt);
+    if (ret != OK) goto cleanup;
+
+    ret = emit_alive_bytes(out, &wmerge);
+
+cleanup:
+    WEAVEFree(&wmerge);
+    WEAVEFree(&wtgt);
+    WEAVEFree(&wnu);
+    WEAVEFree(&wbase_wt);
+    WEAVEFree(&wbase);
     return ret;
 }
 

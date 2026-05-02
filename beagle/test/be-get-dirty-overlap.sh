@@ -1,8 +1,9 @@
 #!/bin/sh
 #  be-get-dirty-overlap.sh — same-branch `be get T1` from a wt at T2
-#  with x.txt dirty refuses with SNIFFOVRL (target tree contains a
-#  file that on disk has an unattributed mtime).  All-or-nothing:
-#  observables unchanged after the refusal.
+#  with x.txt dirty.  Phase 2: instead of refusing, sniff hands the
+#  dirty path to graf for a weave-merge (wt as an implicit edit on
+#  baseline) and writes the merged bytes back.  GET succeeds; the
+#  baseline + .sniff move to T1.
 
 . "$(dirname "$0")/verbcheck.sh"
 . "$(dirname "$0")/setup-primitives.sh"
@@ -12,18 +13,13 @@ vc_fresh_wt
 sp_seed_two_tips          # exports T1, T2 (wt now at T2)
 sp_make_dirty x.txt
 
-vc_snapshot before
+vc_step "be get $T1 — dirty x.txt → weave-merged in place"
+vc_run merge "$BE" get "$T1"
 
-vc_step "be get $T1 — overlap with dirty file → refused"
-vc_run overlap "$BE" get "$T1"
-
-vc_snapshot after
-
-vc_assert_exit nonzero
-vc_assert_stderr overlap "GET refused"
-vc_assert_unchanged sniff
-vc_assert_unchanged refs
-vc_assert_unchanged wt
-vc_assert_unchanged baseline
+vc_assert_exit 0
+vc_assert_stderr merge "weave-merged"
+vc_assert_stderr merge "checkout done"
+#  x.txt remains on disk (not unlinked / not refused-and-rolled-back).
+[ -f x.txt ] || { echo "FAIL: x.txt missing after merge GET" >&2; exit 1; }
 
 echo "=== be-get-dirty-overlap: OK ==="
