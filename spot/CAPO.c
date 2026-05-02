@@ -1311,6 +1311,11 @@ static ok64 CAPOFlushRun(spot *s) {
     u8cs raw = {(u8cp)data[0], (u8cp)data[0] + bytes};
     call(DOGPupCreate, s->puppies, $path(leafdir), ext, raw);
     u64bReset(s->entries);
+    //  Maintain the 1/8 LSM ladder every flush — same discipline as
+    //  graf's dag_flush_batch and keeper's pack-write sites.  Without
+    //  this, repeated CAPOFlushRun calls in a long session pile up
+    //  equal-sized puppies past the runs[CAPO_MAX_LEVELS] view cap.
+    call(CAPOCompact, s);
     done;
 }
 

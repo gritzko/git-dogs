@@ -1561,6 +1561,10 @@ ok64 KEEPPackClose(keeper *k, keep_pack *p) {
     a_cstr(ext, KEEP_IDX_EXT);
     u8cs raw = {(u8cp)sorted[0], (u8cp)sorted[1]};
     call(DOGPupCreate, k->puppies, $path(kdir), ext, raw);
+    //  Maintain the 1/8 LSM ladder right after every puppy create, so
+    //  the runs[KEEP_MAX_LEVELS] view cap is never reached and reads
+    //  always see the full stack.
+    call(KEEPCompact, k);
 
     wh128bFree(p->entries);
     if (p->delta_base[0])  u8bUnMap(p->delta_base);
@@ -2022,6 +2026,8 @@ ok64 KEEPIngestFile(keeper *k, u8csc bytes) {
     ok64 cr = DOGPupCreate(k->puppies, $path(kdir), ext, raw);
     wh128bFree(entries);
     if (cr != OK) return cr;
+    //  Compact-per-flush keeps the puppy ladder under the 1/8 invariant.
+    call(KEEPCompact, k);
 
     done;
 }
@@ -2876,6 +2882,8 @@ got_pack:
                 wh128bFree(entries);
                 goto sync_fail;
             }
+            //  Compact-per-flush — keeps the 1/8 invariant.
+            (void)KEEPCompact(k);
         }
 
         wh128bFree(entries);

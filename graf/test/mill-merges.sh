@@ -220,5 +220,66 @@ done
 
 echo ""
 echo "=== PASS2: $PATCH_TOTAL merges, $PATCH_FAIL failures ==="
-echo "=== TOTAL: pass1=$FAIL pass2=$PATCH_FAIL ==="
-test "$FAIL" = 0 && test "$PATCH_FAIL" = 0
+
+# --- 4. Pass 3: be log:<path> vs git log <path> -----------------------
+#
+#  The keeper at $TMILL/client has the full history reachable from
+#  $SEED_REF in $REPO; the DAG index was populated by `keeper get`
+#  during the seed step.  Walk a few representative paths via
+#  `be log:<path>#<seed-sha>` and compare the SHA list to
+#  `git log <seed-sha> -- <path>`.  Pinning to the resolved seed SHA
+#  (not the moving ref) keeps both sides walking the same tip
+#  even if upstream advances mid-test.
+#
+#  Paths chosen for breadth, not depth: README.md (~tens of commits),
+#  Makefile (~thousands), Documentation/git.txt (~hundreds, exercises
+#  a multi-component path).  Override with LOG_PATHS=… to widen.
+#
+#  Was prohibitively slow before LOG.c switched to leaf-SHA
+#  comparison + reusable tree-walk scratch — `be log:Makefile` over
+#  ~80k commits used to drown in mmap/munmap of the per-call 1MB
+#  blob buffer.
+
+echo ""
+echo "=== PASS3: be log:<path> vs git log <path> ==="
+
+LOG_PATHS=${LOG_PATHS:-"README.md Makefile Documentation/git.txt"}
+SEED_SHA=$(git -C "$REPO" rev-parse "$SEED_REF")
+echo "  seed=$SEED_SHA"
+
+LOG_TOTAL=0
+LOG_FAIL=0
+for F in $LOG_PATHS; do
+    LOG_TOTAL=$((LOG_TOTAL + 1))
+    GIT_OUT="$TMILL/git.log.$LOG_TOTAL"
+    BE_OUT="$TMILL/be.log.$LOG_TOTAL"
+
+    git -C "$REPO" log --format=%h "$SEED_SHA" -- "$F" > "$GIT_OUT"
+
+    #  `be log:` output: 1-line title ("--- log:… ---") then
+    #  "<sha7> <date> <subject> (<author>)" rows, then a trailing
+    #  blank from HUNK formatting.  Strip the title and the blank,
+    #  keep the leading sha7 column.
+    T0=$(date +%s)
+    (cd "$TMILL/client" && \
+        be log:"$F"\#"$SEED_SHA" 2>/dev/null) \
+        | awk 'NR>1 && NF>0 {print $1}' > "$BE_OUT"
+    T1=$(date +%s)
+
+    if cmp -s "$BE_OUT" "$GIT_OUT"; then
+        printf "PASS:  %s (%s commits, %ss)\n" \
+            "$F" "$(wc -l < "$GIT_OUT")" "$((T1 - T0))"
+    else
+        BE_N=$(wc -l < "$BE_OUT")
+        GIT_N=$(wc -l < "$GIT_OUT")
+        printf "FAIL:  %s (be=%s git=%s, %ss)\n" \
+            "$F" "$BE_N" "$GIT_N" "$((T1 - T0))"
+        diff "$GIT_OUT" "$BE_OUT" | head -8 | sed 's/^/    | /'
+        LOG_FAIL=$((LOG_FAIL + 1))
+    fi
+done
+
+echo ""
+echo "=== PASS3: $LOG_TOTAL paths, $LOG_FAIL failures ==="
+echo "=== TOTAL: pass1=$FAIL pass2=$PATCH_FAIL pass3=$LOG_FAIL ==="
+test "$FAIL" = 0 && test "$PATCH_FAIL" = 0 && test "$LOG_FAIL" = 0

@@ -475,6 +475,11 @@ static ok64 dag_flush_batch(dag_ingest *g) {
     wh128cs run = {g->batch, g->batch + g->batch_len};
     call(dag_index_write_leaf, &GRAF, run);
     g->batch_len = 0;
+    //  Maintain the 1/8 LSM ladder right here, every flush.  Without
+    //  this the puppy stack grows unboundedly during a long ingest,
+    //  exceeds the runs[MSET_MAX_LEVELS] view cap, and older runs go
+    //  silently invisible to both reads and the finish-time compact.
+    call(dag_compact, &GRAF);
     done;
 }
 
