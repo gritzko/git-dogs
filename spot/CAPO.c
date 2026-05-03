@@ -162,13 +162,26 @@ ok64 CAPOIndexBlob(u8csc source, u8csc ext, u64 fn_rap) {
     sane($ok(source) && $ok(ext));
     if ($empty(source)) done;
 
-    // Tokenize
-    Bu32 toks = {};
-    size_t maxlen = $len(source) + 1;  // at most 1 token per byte
-    vcall("mmap toks", u32bMap, toks, maxlen);
-    ok64 o = SPOTTokenize(toks, source, ext);
+    //  Reuse the singleton's per-session token buffer when the blob
+    //  fits.  Falls back to a one-off mmap for the rare oversized
+    //  source (>INGEST_TOKS_CAP tokens).  `owned` carries the fallback
+    //  allocation; `toks` aliases whichever buffer we ended up using.
+    Bu32   owned = {};
+    u32 **toks;
+    size_t maxlen = $len(source) + 1;
+    b8 use_session = (SPOT.ingest_toks[0] != NULL &&
+                      (size_t)(SPOT.ingest_toks[3] - SPOT.ingest_toks[0])
+                          >= maxlen);
+    if (use_session) {
+        u32bReset(SPOT.ingest_toks);
+        toks = (u32 **)SPOT.ingest_toks;
+    } else {
+        vcall("mmap toks", u32bMap, owned, maxlen);
+        toks = (u32 **)owned;
+    }
+    ok64 o = SPOTTokenize((u32 **)toks, source, ext);
     if (o != OK) {
-        u32bUnMap(toks);
+        if (!use_session) u32bUnMap(owned);
         return o;
     }
 
@@ -190,7 +203,7 @@ ok64 CAPOIndexBlob(u8csc source, u8csc ext, u64 fn_rap) {
 
     CAPOTriCtx ctx = { .fn_rap = fn_rap };
     o = CAPOTriExtractToks(tokslice, source[0], CAPOTriCB, &ctx);
-    if (o != OK) { u32bUnMap(toks); return o; }
+    if (o != OK) { if (!use_session) u32bUnMap(owned); return o; }
 
     // Emit symbol mention/definition entries
     int ntoks = (int)$len(tokslice);
@@ -202,10 +215,13 @@ ok64 CAPOIndexBlob(u8csc source, u8csc ext, u64 fn_rap) {
         u8 type = (tag == 'N') ? SPOT64_DEF : SPOT64_MEN;
         u64 entry = spot64Pack(type, spot64SymId(val), fn_rap);
         ok64 er = capo_emit(entry);
-        if (er != OK) { u32bUnMap(toks); return er; }
+        if (er != OK) {
+            if (!use_session) u32bUnMap(owned);
+            return er;
+        }
     }
 
-    u32bUnMap(toks);
+    if (!use_session) u32bUnMap(owned);
     done;
 }
 
@@ -1288,6 +1304,10 @@ ok64 SPOTOpenBranch(home *h, u8cs branch, b8 rw) {
     //  itself (DOGPupCreate picks max+1), so no separate counter.
     if (rw) {
         call(u64bMap, s->entries, CAPO_SCRATCH_LEN);
+        //  Per-session reusable token buffer.  Reset (not unmapped)
+        //  between blobs — the map is anonymous so unused tail pages
+        //  cost nothing until they're touched.
+        call(u32bMap, s->ingest_toks, INGEST_TOKS_CAP);
         //  Blob → (basename RAP, ext_off) map.  Stamped per-tree by
         //  SPOTUpdate(TREE); read at every BLOB to tag postings.
         //  Pack order is trees-before-blobs, so the lookup hits
@@ -1375,6 +1395,7 @@ void SPOTClose(void) {
         //  runs CAPOCompact, so the puppy ladder stays balanced.
         CAPOFlushRun(s);
         u64bUnMap(s->entries);
+        if (s->ingest_toks[0] != NULL) u32bUnMap(s->ingest_toks);
         if (!BNULL(s->blob_to_fn)) kv64bFree(s->blob_to_fn);
         if (!BNULL(s->ext_arena))  u8bUnMap(s->ext_arena);
     }

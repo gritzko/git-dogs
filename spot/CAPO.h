@@ -52,8 +52,20 @@ con ok64 SPOTNOPATH = 0x71961d5d864a751;
 //  hits ~20 % unique) this means many small sorts instead of a few
 //  enormous ones.  `CAPO_SCRATCH_LEN` is the hard cap on scratch
 //  size (anonymous mmap) — generously oversized vs the trigger.
-#define CAPO_SCRATCH_LEN (1UL << 27)  // 128M u64 entries = 1GB
-#define CAPO_FLUSH_AT    (1UL << 20)  // 1M entries (~8MB)
+//  Hash-set scratch sized to fit L3 cache (~16 MB on most x86-64
+//  cores).  Most hash-table accesses are random-strided, so a table
+//  larger than L3 pays DRAM latency on every probe.  When src/git's
+//  ~3 M unique postings overflow the 2 M slots, HASHNOROOM triggers
+//  CAPOFlushRun and the LSM compaction handles cross-flush dedup.
+//  MUST stay a power of 2 — HASHx.h folds hash → slot via bitmask.
+#define CAPO_SCRATCH_LEN (1UL << 21)  // 2M u64 entries = 16MB
+//  Keep CAPO_FLUSH_AT at the old 1M trigger size for source compat —
+//  the hash-set path no longer consults it (HASHNOROOM is the trigger),
+//  and the search path doesn't allocate it.
+//  Per-session reusable token buffer cap.  16 M u32 entries = 64 MB,
+//  larger than any source file we expect to ingest.  Anonymous mmap
+//  pages are zero-fill on demand, so the unused tail costs nothing.
+#define INGEST_TOKS_CAP  (1UL << 24)
 //  Blob → (basename RAP, ext_off) map (rw): 60-bit obj_hl → packed
 //  value `(fn_rap40 << 24) | ext_off24`.  Populated by SPOTUpdate(TREE)
 //  for every blob entry whose basename has a known tokenizer ext;
@@ -231,9 +243,19 @@ struct spot_ {
     Bu8      leaf_branch;           // canonical leaf-branch path
                                     // (trailing '/'; empty for trunk).
 
-    //  Ingestion scratch (rw only): postings accumulated by SPOTUpdate,
-    //  flushed to a new puppy when len >= CAPO_FLUSH_AT or on close.
+    //  Ingestion scratch (rw only): postings hash-set keyed by the
+    //  posting itself.  CAPOIndexBlob inserts via HASHu64Put (skipping
+    //  the 0 sentinel).  HASHNOROOM triggers CAPOFlushRun, which
+    //  compacts non-zero slots, sorts them, writes the puppy and
+    //  memsets the table back to zero.
     Bu64     entries;
+
+    //  Per-session token buffer reused across every CAPOIndexBlob
+    //  call (rw only).  Avoids the mmap+unmap pair we used to do per
+    //  blob — for src/git ingest that's ~160k syscalls saved.
+    //  Sized via INGEST_TOKS_CAP at CAPOOpen; larger blobs fall back
+    //  to a one-off mmap inside CAPOIndexBlob.
+    Bu32     ingest_toks;
 
     //  Blob → (basename RAP, ext offset).  Stamped by SPOTUpdate(TREE)
     //  for every tree entry whose basename has a known tokenizer ext;

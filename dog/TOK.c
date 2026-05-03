@@ -101,150 +101,152 @@ ok64 TOKSplitText(u8 tag, u8cs text, TOKcb cb, void *ctx) {
 typedef ok64 (*TOKfn)(TOKstate *state);
 
 typedef struct {
-    const char *ext;
+    u8cs  ext;     // precomputed slice via u8slit; sentinel = empty
     TOKfn lexer;
 } TOKentry;
 
+#define E(s, fn) {u8slit(s), (TOKfn)fn}
+
 static const TOKentry TOK_TABLE[] = {
-    {"c",          (TOKfn)CTLexer},
-    {"h",          (TOKfn)CTLexer},
-    {"cpp",        (TOKfn)CPPTLexer},
-    {"cc",         (TOKfn)CPPTLexer},
-    {"cxx",        (TOKfn)CPPTLexer},
-    {"hpp",        (TOKfn)CPPTLexer},
-    {"hh",         (TOKfn)CPPTLexer},
-    {"hxx",        (TOKfn)CPPTLexer},
-    {"go",         (TOKfn)GOTLexer},
-    {"py",         (TOKfn)PYTLexer},
-    {"js",         (TOKfn)JSTLexer},
-    {"jsx",        (TOKfn)JSTLexer},
-    {"mjs",        (TOKfn)JSTLexer},
-    {"ts",         (TOKfn)TSTLexer},
-    {"tsx",        (TOKfn)TSTLexer},
-    {"rs",         (TOKfn)RSTLexer},
-    {"java",       (TOKfn)JATLexer},
-    {"kt",         (TOKfn)KTTLexer},
-    {"kts",        (TOKfn)KTTLexer},
-    {"scala",      (TOKfn)SCLTLexer},
-    {"sc",         (TOKfn)SCLTLexer},
-    {"cs",         (TOKfn)CSTLexer},
-    {"fs",         (TOKfn)FSHTLexer},
-    {"fsi",        (TOKfn)FSHTLexer},
-    {"fsx",        (TOKfn)FSHTLexer},
-    {"swift",      (TOKfn)SWFTLexer},
-    {"dart",       (TOKfn)DARTTLexer},
-    {"d",          (TOKfn)DTLexer},
-    {"zig",        (TOKfn)ZIGTLexer},
-    {"html",       (TOKfn)HTMTLexer},
-    {"htm",        (TOKfn)HTMTLexer},
-    {"css",        (TOKfn)CSSTLexer},
-    {"scss",       (TOKfn)SCSSTLexer},
-    {"json",       (TOKfn)JSONTLexer},
-    {"yml",        (TOKfn)YMLTLexer},
-    {"yaml",       (TOKfn)YMLTLexer},
-    {"toml",       (TOKfn)TOMLTLexer},
-    {"sh",         (TOKfn)SHTLexer},
-    {"bash",       (TOKfn)SHTLexer},
-    {"rb",         (TOKfn)RBTLexer},
-    {"lua",        (TOKfn)LUATLexer},
-    {"pl",         (TOKfn)PRLTLexer},
-    {"pm",         (TOKfn)PRLTLexer},
-    {"r",          (TOKfn)RTLexer},
-    {"R",          (TOKfn)RTLexer},
-    {"ex",         (TOKfn)ELXTLexer},
-    {"exs",        (TOKfn)ELXTLexer},
-    {"erl",        (TOKfn)ERLTLexer},
-    {"hrl",        (TOKfn)ERLTLexer},
-    {"hs",         (TOKfn)HSTLexer},
-    {"ml",         (TOKfn)MLTLexer},
-    {"mli",        (TOKfn)MLTLexer},
-    {"jl",         (TOKfn)JLTLexer},
-    {"nim",        (TOKfn)NIMTLexer},
-    {"nims",       (TOKfn)NIMTLexer},
-    {"php",        (TOKfn)PHPTLexer},
-    {"clj",        (TOKfn)CLJTLexer},
-    {"cljs",       (TOKfn)CLJTLexer},
-    {"cljc",       (TOKfn)CLJTLexer},
-    {"edn",        (TOKfn)CLJTLexer},
-    {"nix",        (TOKfn)NIXTLexer},
-    {"sql",        (TOKfn)SQLTLexer},
-    {"graphql",    (TOKfn)GQLTLexer},
-    {"gql",        (TOKfn)GQLTLexer},
-    {"proto",      (TOKfn)PRTTLexer},
-    {"hcl",        (TOKfn)HCLTLexer},
-    {"tf",         (TOKfn)HCLTLexer},
-    {"tex",        (TOKfn)LAXTLexer},
-    {"sty",        (TOKfn)LAXTLexer},
-    {"cls",        (TOKfn)LAXTLexer},
-    {"vim",        (TOKfn)VIMTLexer},
-    {"cmake",      (TOKfn)CMKTLexer},
-    {"dockerfile", (TOKfn)DKFTLexer},
-    {"mk",         (TOKfn)MAKTLexer},
-    {"f90",        (TOKfn)FORTLexer},
-    {"f95",        (TOKfn)FORTLexer},
-    {"f03",        (TOKfn)FORTLexer},
-    {"f08",        (TOKfn)FORTLexer},
-    {"glsl",       (TOKfn)GLSTLexer},
-    {"vert",       (TOKfn)GLSTLexer},
-    {"frag",       (TOKfn)GLSTLexer},
-    {"geom",       (TOKfn)GLSTLexer},
-    {"comp",       (TOKfn)GLSTLexer},
-    {"gleam",      (TOKfn)GLMTLexer},
-    {"odin",       (TOKfn)ODNTLexer},
-    {"ps1",        (TOKfn)PWSTLexer},
-    {"psm1",       (TOKfn)PWSTLexer},
-    {"psd1",       (TOKfn)PWSTLexer},
-    {"sol",        (TOKfn)SOLTLexer},
-    {"typ",        (TOKfn)TYSTLexer},
-    {"agda",       (TOKfn)AGDTLexer},
-    {"v",          (TOKfn)VERTLexer},
-    {"sv",         (TOKfn)VERTLexer},
-    {"ll",         (TOKfn)LLTLexer},
-    {"md",         (TOKfn)MDTLexer},
-    {"markdown",   (TOKfn)MDTLexer},
-    {"mkd",        (TOKfn)MKDTLexer},
-    {"sm",         (TOKfn)MKDTLexer},
-    {"txt",        (TOKfn)TXTTLexer},
-    {"rst",        (TOKfn)TXTTLexer},
-    {NULL,         NULL},
+    E("c",          CTLexer),
+    E("h",          CTLexer),
+    E("cpp",        CPPTLexer),
+    E("cc",         CPPTLexer),
+    E("cxx",        CPPTLexer),
+    E("hpp",        CPPTLexer),
+    E("hh",         CPPTLexer),
+    E("hxx",        CPPTLexer),
+    E("go",         GOTLexer),
+    E("py",         PYTLexer),
+    E("js",         JSTLexer),
+    E("jsx",        JSTLexer),
+    E("mjs",        JSTLexer),
+    E("ts",         TSTLexer),
+    E("tsx",        TSTLexer),
+    E("rs",         RSTLexer),
+    E("java",       JATLexer),
+    E("kt",         KTTLexer),
+    E("kts",        KTTLexer),
+    E("scala",      SCLTLexer),
+    E("sc",         SCLTLexer),
+    E("cs",         CSTLexer),
+    E("fs",         FSHTLexer),
+    E("fsi",        FSHTLexer),
+    E("fsx",        FSHTLexer),
+    E("swift",      SWFTLexer),
+    E("dart",       DARTTLexer),
+    E("d",          DTLexer),
+    E("zig",        ZIGTLexer),
+    E("html",       HTMTLexer),
+    E("htm",        HTMTLexer),
+    E("css",        CSSTLexer),
+    E("scss",       SCSSTLexer),
+    E("json",       JSONTLexer),
+    E("yml",        YMLTLexer),
+    E("yaml",       YMLTLexer),
+    E("toml",       TOMLTLexer),
+    E("sh",         SHTLexer),
+    E("bash",       SHTLexer),
+    E("rb",         RBTLexer),
+    E("lua",        LUATLexer),
+    E("pl",         PRLTLexer),
+    E("pm",         PRLTLexer),
+    E("r",          RTLexer),
+    E("R",          RTLexer),
+    E("ex",         ELXTLexer),
+    E("exs",        ELXTLexer),
+    E("erl",        ERLTLexer),
+    E("hrl",        ERLTLexer),
+    E("hs",         HSTLexer),
+    E("ml",         MLTLexer),
+    E("mli",        MLTLexer),
+    E("jl",         JLTLexer),
+    E("nim",        NIMTLexer),
+    E("nims",       NIMTLexer),
+    E("php",        PHPTLexer),
+    E("clj",        CLJTLexer),
+    E("cljs",       CLJTLexer),
+    E("cljc",       CLJTLexer),
+    E("edn",        CLJTLexer),
+    E("nix",        NIXTLexer),
+    E("sql",        SQLTLexer),
+    E("graphql",    GQLTLexer),
+    E("gql",        GQLTLexer),
+    E("proto",      PRTTLexer),
+    E("hcl",        HCLTLexer),
+    E("tf",         HCLTLexer),
+    E("tex",        LAXTLexer),
+    E("sty",        LAXTLexer),
+    E("cls",        LAXTLexer),
+    E("vim",        VIMTLexer),
+    E("cmake",      CMKTLexer),
+    E("dockerfile", DKFTLexer),
+    E("mk",         MAKTLexer),
+    E("f90",        FORTLexer),
+    E("f95",        FORTLexer),
+    E("f03",        FORTLexer),
+    E("f08",        FORTLexer),
+    E("glsl",       GLSTLexer),
+    E("vert",       GLSTLexer),
+    E("frag",       GLSTLexer),
+    E("geom",       GLSTLexer),
+    E("comp",       GLSTLexer),
+    E("gleam",      GLMTLexer),
+    E("odin",       ODNTLexer),
+    E("ps1",        PWSTLexer),
+    E("psm1",       PWSTLexer),
+    E("psd1",       PWSTLexer),
+    E("sol",        SOLTLexer),
+    E("typ",        TYSTLexer),
+    E("agda",       AGDTLexer),
+    E("v",          VERTLexer),
+    E("sv",         VERTLexer),
+    E("ll",         LLTLexer),
+    E("md",         MDTLexer),
+    E("markdown",   MDTLexer),
+    E("mkd",        MKDTLexer),
+    E("sm",         MKDTLexer),
+    E("txt",        TXTTLexer),
+    E("rst",        TXTTLexer),
+    {{NULL, NULL},  NULL},
 };
 
 // Filename → lexer table for files whose names are their type.
 static const TOKentry TOK_NAME_TABLE[] = {
-    {"CMakeLists.txt", (TOKfn)CMKTLexer},
-    {"Makefile",       (TOKfn)MAKTLexer},
-    {"makefile",       (TOKfn)MAKTLexer},
-    {"GNUmakefile",    (TOKfn)MAKTLexer},
-    {"Dockerfile",     (TOKfn)DKFTLexer},
-    {"Vagrantfile",    (TOKfn)RBTLexer},
-    {"Gemfile",        (TOKfn)RBTLexer},
-    {"Rakefile",       (TOKfn)RBTLexer},
-    {"Justfile",       (TOKfn)MAKTLexer},
-    {".gitignore",     (TOKfn)SHTLexer},
-    {".gitattributes", (TOKfn)SHTLexer},
-    {".gitmodules",    (TOKfn)TOMLTLexer},
-    {".bashrc",        (TOKfn)SHTLexer},
-    {".bash_profile",  (TOKfn)SHTLexer},
-    {".profile",       (TOKfn)SHTLexer},
-    {".zshrc",         (TOKfn)SHTLexer},
-    {".vimrc",         (TOKfn)VIMTLexer},
-    {".clang-format",  (TOKfn)YMLTLexer},
-    {NULL,             NULL},
+    E("CMakeLists.txt", CMKTLexer),
+    E("Makefile",       MAKTLexer),
+    E("makefile",       MAKTLexer),
+    E("GNUmakefile",    MAKTLexer),
+    E("Dockerfile",     DKFTLexer),
+    E("Vagrantfile",    RBTLexer),
+    E("Gemfile",        RBTLexer),
+    E("Rakefile",       RBTLexer),
+    E("Justfile",       MAKTLexer),
+    E(".gitignore",     SHTLexer),
+    E(".gitattributes", SHTLexer),
+    E(".gitmodules",    TOMLTLexer),
+    E(".bashrc",        SHTLexer),
+    E(".bash_profile",  SHTLexer),
+    E(".profile",       SHTLexer),
+    E(".zshrc",         SHTLexer),
+    E(".vimrc",         VIMTLexer),
+    E(".clang-format",  YMLTLexer),
+    {{NULL, NULL},      NULL},
 };
+
+#undef E
 
 const char *TOKExtAt(int i) {
     if (i < 0) return NULL;
     int n = (int)(sizeof(TOK_TABLE) / sizeof(TOK_TABLE[0])) - 1;
     if (i >= n) return NULL;
-    return TOK_TABLE[i].ext;
+    return (const char *)TOK_TABLE[i].ext[0];
 }
 
-static b8 TOKSliceMatch(u8csc s, const char *pat) {
+static b8 TOKSliceMatch(u8csc s, u8csc pat) {
     u64 len = u8csLen(s);
-    u64 plen = 0;
-    while (pat[plen]) ++plen;
-    if (len != plen) return NO;
-    return __builtin_memcmp(s[0], pat, len) == 0;
+    if (len != u8csLen(pat)) return NO;
+    return __builtin_memcmp(s[0], pat[0], len) == 0;
 }
 
 // Wrappers around abc/PATH for basename and extension extraction.
@@ -255,7 +257,7 @@ static TOKfn TOKFindByName(u8csc path) {
     a_dup(u8c, p, path);
     PATHu8sBase(base, p);
     if ($empty(base)) return NULL;
-    for (const TOKentry *e = TOK_NAME_TABLE; e->ext != NULL; ++e)
+    for (const TOKentry *e = TOK_NAME_TABLE; e->ext[0] != NULL; ++e)
         if (TOKSliceMatch(base, e->ext)) return e->lexer;
     return NULL;
 }
@@ -266,7 +268,7 @@ static TOKfn TOKFindByExt(u8csc path) {
     a_dup(u8c, p, path);
     PATHu8sExt(ext, p);
     if ($empty(ext)) return NULL;
-    for (const TOKentry *e = TOK_TABLE; e->ext != NULL; ++e)
+    for (const TOKentry *e = TOK_TABLE; e->ext[0] != NULL; ++e)
         if (TOKSliceMatch(ext, e->ext)) return e->lexer;
     return NULL;
 }
@@ -283,7 +285,7 @@ static TOKfn TOKResolve(u8csc input) {
     }
     if (!has_dot && !has_slash) {
         // Bare extension like "c" or "py" — try ext table first.
-        for (const TOKentry *e = TOK_TABLE; e->ext != NULL; ++e)
+        for (const TOKentry *e = TOK_TABLE; e->ext[0] != NULL; ++e)
             if (TOKSliceMatch(input, e->ext)) return e->lexer;
         // Then name table for extensionless filenames (Makefile, etc.).
         TOKfn fn = TOKFindByName(input);
@@ -300,7 +302,7 @@ static TOKfn TOKResolve(u8csc input) {
         // Then try as dotted ext.
         stripped[0] = input[0] + 1;
         stripped[1] = input[1];
-        for (const TOKentry *e = TOK_TABLE; e->ext != NULL; ++e)
+        for (const TOKentry *e = TOK_TABLE; e->ext[0] != NULL; ++e)
             if (TOKSliceMatch(stripped, e->ext)) return e->lexer;
         return NULL;
     }
