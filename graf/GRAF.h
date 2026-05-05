@@ -52,13 +52,13 @@ typedef struct {
     wh128cs      runs[MSET_MAX_LEVELS];
     u32          runs_n;
 
-    dag_ingest  *ing;        // lazily allocated on first GRAFUpdate
+    dag_ingest  *ing;        // lazily allocated on first GRAFDagUpdate
 } graf;
 
 //  Singleton.  Zero-initialised; populated by GRAFOpen.
 extern graf GRAF;
 
-// --- Internal helpers used by GRAFUpdate (implemented in DAG.c) ---
+// --- Internal helpers used by the indexer (implemented in DAG.c) ---
 ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
 ok64 GRAFDagFinish(void);
 
@@ -105,14 +105,6 @@ void GRAFRefreshView(void);
 //  Run one CLI invocation.
 ok64 GRAFExec(cli *c);
 
-//  Feed a single object (commit/tree/blob) into graf's DAG index.
-//  obj_type uses KEEP_OBJ_* constants.  `sha` is the git-object SHA-1.
-//  May be NULL when the caller does not have it pre-computed (e.g.
-//  the manual reindex path); graf then falls back to hashing `blob`
-//  itself.  On the hot UNPKIndex → keeper_indexer_fanout path, UNPK
-//  passes its already-resolved SHA, skipping a full SHA1DC pass.
-ok64 GRAFUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
-
 //  Close singleton; idempotent.
 ok64 GRAFClose(void);
 
@@ -140,10 +132,18 @@ ok64 GRAFDiff(u8cs old_path, u8cs new_path, u8cs name,
 ok64 GRAFMerge(u8cs base_path, u8cs ours_path, u8cs theirs_path,
                u8cs outpath);
 
-// Drive a full streaming ingest from keeper: iterate every object in
-// the keeper store (commits, trees, blobs), replay DOG.md §8 updates
-// into graf's DAG, and finalize with PATH_VER emission.  Idempotent.
+// Drive a full streaming ingest from keeper: iterate every commit in
+// the keeper store, replay one (COMMIT, sha, body) into graf's DAG,
+// and finalize.  Used by `graf index` (no URI) for forced reindex.
 ok64 GRAFIndex(keeper *k);
+
+// Walk back from each tip in `u` (resolved via GRAFResolveTip) over
+// COMMIT_PARENT edges in keeper, calling GRAFDagUpdate per commit and
+// stopping per-branch when the next commit is already in graf's own
+// index (DAG.md: mention ≡ known).  Multi-tip URIs and ranges are
+// folded together; bare URI (no query) walks the wt's current tip.
+// Used by `graf get URI` under the new arrangement (DOG.md §10a).
+ok64 GRAFIndexFromTips(keeper *k, uricp u);
 
 // Token-level blame (reads blobs from keeper).
 //   tip_h: 40-bit commit hashlet bounding the history (0 = no filter).

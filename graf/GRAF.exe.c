@@ -266,22 +266,45 @@ ok64 GRAFExec(cli *c) {
         ret = GRAFIndex(&KEEP);
 
     } else if ($eq(c->verb, v_get)) {
-        if (c->nuris < 1) {
-            fprintf(stderr, "graf: get requires a URI\n");
-            KEEPClose();
-            return FAILSANITY;
+        //  Two shapes share the verb:
+        //    * `path?sha[&sha...]` → deterministic blob/tree fetch
+        //      or merge (GRAFGet) — single-tip identity is allowed
+        //      per graf/GET.md.
+        //    * any URI without that path+query pair (or none) →
+        //      tip-walk indexer.  Under DOG.md §10a, `be get URI`
+        //      spawns `graf get URI` in parallel with keeper/spot/
+        //      sniff; graf walks back from the URI's tip(s) until
+        //      it hits commits already in its own DAG.
+        //
+        //  Distinguish on the path slot: GRAFGet's URIs always carry
+        //  a blob/tree path, while `be get`'s URIs (`?ref`, `?sha`,
+        //  `//host/path?ref`, bare) target the repo as a whole.
+        b8 is_get_op = NO;
+        if (c->nuris >= 1) {
+            uri *gu = &c->uris[0];
+            if (!u8csEmpty(gu->path) && !u8csEmpty(gu->query) &&
+                u8csEmpty(gu->authority))
+                is_get_op = YES;
         }
-        uri *u = &c->uris[0];
-        Bu8 out = {};
-        ret = u8bMap(out, 16UL << 20);
-        if (ret == OK) {
-            a_dup(u8c, uri_in, u->data);
-            ret = GRAFGet(out, uri_in);
+        if (is_get_op) {
+            uri *u = &c->uris[0];
+            Bu8 out = {};
+            ret = u8bMap(out, 16UL << 20);
             if (ret == OK) {
-                a_dup(u8c, obytes, u8bData(out));
-                ret = FILEFeedAll(STDOUT_FILENO, obytes);
+                a_dup(u8c, uri_in, u->data);
+                ret = GRAFGet(out, uri_in);
+                if (ret == OK) {
+                    a_dup(u8c, obytes, u8bData(out));
+                    ret = FILEFeedAll(STDOUT_FILENO, obytes);
+                }
+                u8bUnMap(out);
             }
-            u8bUnMap(out);
+        } else {
+            //  Tip-walk indexer.  Bare `graf get` (no URI) walks the
+            //  worktree's current tip (via `--at` parked in cur_sha).
+            uri empty = {};
+            uri *u = (c->nuris >= 1) ? &c->uris[0] : &empty;
+            ret = GRAFIndexFromTips(&KEEP, u);
         }
 
     } else if ($eq(c->verb, v_blame)) {

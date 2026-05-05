@@ -12,47 +12,24 @@
 #include <unistd.h>
 
 #include "abc/FILE.h"
-#include "abc/HEX.h"
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "dog/CLI.h"
 #include "dog/DOG.h"
-#include "dog/FRAG.h"
 #include "dog/HOME.h"
 #include "dog/HUNK.h"
 #include "dog/SHA1.h"
-#include "keeper/GIT.h"
 #include "keeper/KEEP.h"
+#include "keeper/REFS.h"
 #include "keeper/WALK.h"
 #include "spot/CAPOi.h"
 #include "spot/LESS.h"
 
-// kv64 hashtable for hashlet32 → (off:32 | len:32)
-#define X(M, name) M##kv64##name
-#include "abc/HASHx.h"
-#undef X
-
-//  Per-session ingest stats — printed at SPOTClose so we can spot
-//  pack-ordering / hash-table issues without per-object noise.
-u64 SPOT_DBG_BLOB_HIT      = 0;
-u64 SPOT_DBG_BLOB_MISS     = 0;
-u64 SPOT_DBG_BLOB_NO_EXT   = 0;
+//  Per-session indexing stats — drained by SPOTClose.  Counts how
+//  many blobs the tip-walker tokenised vs skipped via the BLOBFN memo.
 u64 SPOT_DBG_TOKENISED     = 0;
-//  Object-stream order stats — populated by SPOTUpdate, drained by
-//  SPOTClose.  The miss → "orphan" terminology means: the BLOB arrived
-//  before the TREE that names it, so the blob_to_fn lookup failed and
-//  the blob's trigrams never made it into the index.  A high orphan
-//  ratio indicates the pack producer is interleaving trees and blobs
-//  (typical of git's delta-chain ordering); the search index will be
-//  silently incomplete until the ingest path either two-passes or
-//  buffers orphans.
-u64 SPOT_DBG_TREES         = 0;  // total TREE objects seen
-u64 SPOT_DBG_BLOBS         = 0;  // total BLOB objects seen
-u64 SPOT_DBG_COMMITS       = 0;  // total COMMIT objects seen
-u64 SPOT_DBG_TAGS          = 0;  // total TAG objects seen
-u64 SPOT_DBG_BLOB_PRE_TREE = 0;  // BLOBs arriving before any TREE
-u64 SPOT_DBG_RUN_BLOB_MAX  = 0;  // longest BLOB-only run between TREEs
-u64 SPOT_DBG_RUN_BLOB_CUR  = 0;  // current BLOB-only run length
+u64 SPOT_DBG_MEMO_HIT      = 0;
+u64 SPOT_DBG_BLOB_NO_EXT   = 0;
 
 // --- Verb / flag tables ---
 
@@ -61,9 +38,9 @@ char const *const SPOT_CLI_VERBS[] = {
 };
 
 //  Spot val-flags: -g -s -r -p -C --grep --spot --replace --pcre --context
-//  Pack-add indexing happens as keeper resolves objects (UNPKIndex's
-//  emit hook → SPOTUpdate).  `spot get` is a no-op left in place so
-//  that `be` can still invoke it unconditionally after a keeper fetch.
+//  `spot get URI` walks the URI's tip(s) over keeper's read APIs and
+//  tokenises every leaf blob whose (blob, path) pair isn't already
+//  in the BLOBFN memo (DOG.md §10a).
 char const SPOT_CLI_VAL_FLAGS[] =
     "-g\0-s\0-r\0-p\0-C\0"
     "--grep\0--spot\0--replace\0--pcre\0--context\0--at\0";
@@ -132,12 +109,20 @@ ok64 SPOTExec(cli *c) {
                 nidxfiles, (unsigned long long)total);
         done;
     }
-    //  `spot get` — invoked by `be` after `keeper get`/`sniff get`.
-    //  Indexing is already done per-object via UNPKIndex's emit hook
-    //  (keeper/KEEP.cli.c → SPOTUpdate); any pending scratch flushes
-    //  on SPOTClose.  This verb is kept as an explicit no-op so the
-    //  orchestrator's invocation pattern stays uniform across dogs.
-    if ($eq(c->verb, v_get)) done;
+    //  `spot get URI` — invoked by `be` in parallel with keeper/graf/
+    //  sniff after keeper finishes its own update (DOG.md §10a).
+    //  Walks the URI's tip(s) over keeper's read APIs and tokenises
+    //  every leaf blob whose (blob, path) pair isn't already in the
+    //  BLOBFN memo.  Bare `spot get` (no URI) walks the worktree's
+    //  current tip via `--at`'s fragment.
+    if ($eq(c->verb, v_get)) {
+        uri empty = {};
+        uri *u = (c->nuris > 0) ? &c->uris[0] : &empty;
+        call(KEEPOpen, dog->h, NO);
+        ok64 igr = SPOTIndexFromTips(&KEEP, u);
+        KEEPClose();
+        return igr;
+    }
 
     b8 do_status = CLIHas(c, "--status");
     b8 force_tlv = CLIHas(c, "-t") || CLIHas(c, "--tlv");
@@ -477,18 +462,21 @@ ok64 SPOTExec(cli *c) {
     return ret;
 }
 
-// --- Update: index a single git object during pack ingest ---
+// --- Tip-walk indexer (DOG.md §10a, called from `spot get URI`) ---
 //
-// Driven by keeper's UNPK emit hook.  Pack producers (git, sniff)
-// emit trees before blobs, so each TREE stamps its own children
-// directly into `blob_to_fn` and BLOB lookups hit without buffering.
-// COMMIT objects are ignored.
+// Walks the URI's tip(s) over keeper's read APIs (KEEPLsFiles).  For
+// each leaf blob with a tokenizable extension, looks up the BLOBFN
+// memo (`off=blob_hl40, type=BLOBFN, id=path_h20`); a hit means we
+// already indexed this exact (blob, path) pair on a prior walk —
+// skip both tokenisation and emission.  Otherwise pull the blob via
+// KEEPGetExact, tokenise it via CAPOIndexBlob with the path hash as
+// the posting `id`, and write a fresh BLOBFN row so the next walk
+// can short-circuit.
+//
+// Renames are caught by the path-hash key: same blob + new path =
+// different path_h20 = no memo hit = re-tokenise under the new path.
 
-#define SPOT_FN_VAL_PACK(fn20, ext_off) \
-    (((u64)((fn20) & WHIFF_ID_MASK) << 24) | \
-     ((u64)(ext_off) & 0xFFFFFF))
-#define SPOT_FN_VAL_HASH(v) ((u32)(((v) >> 24) & WHIFF_ID_MASK))
-#define SPOT_FN_VAL_EOFF(v) ((u32)((v) & 0xFFFFFF))
+#include "abc/RAP.h"
 
 // Append `ext` to s->ext_arena if not already present; return its
 // offset (>= 1).  Offset 0 is reserved as a sentinel "missing".
@@ -513,123 +501,205 @@ static u32 capo_ext_intern(spot *s, u8cs ext) {
     return off;
 }
 
-ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
-    sane(1);
-    spotp s = &SPOT;
-    if (!s->rw || !sha) done;
-    if (BNULL(s->blob_to_fn)) done;
-
-    //  Per-type counters and BLOB-run tracking — always on (cheap;
-    //  drained at SPOTClose).  Per-object trace lines stay opt-in
-    //  behind SPOT_TRACE_ORDER to avoid log volume on big packs.
-    switch (obj_type) {
-        case DOG_OBJ_COMMIT: SPOT_DBG_COMMITS++; break;
-        case DOG_OBJ_TAG:    SPOT_DBG_TAGS++;    break;
-        case DOG_OBJ_TREE:
-            SPOT_DBG_TREES++;
-            if (SPOT_DBG_RUN_BLOB_CUR > SPOT_DBG_RUN_BLOB_MAX)
-                SPOT_DBG_RUN_BLOB_MAX = SPOT_DBG_RUN_BLOB_CUR;
-            SPOT_DBG_RUN_BLOB_CUR = 0;
-            break;
-        case DOG_OBJ_BLOB:
-            SPOT_DBG_BLOBS++;
-            SPOT_DBG_RUN_BLOB_CUR++;
-            if (SPOT_DBG_TREES == 0) SPOT_DBG_BLOB_PRE_TREE++;
-            break;
-        default: break;
-    }
-
-    if (getenv("SPOT_TRACE_ORDER")) {
-        static const char H[] = "0123456789abcdef";
-        char ord_hex[15];
-        for (int i = 0; i < 7; i++) {
-            ord_hex[i*2]   = H[(sha->data[i] >> 4) & 0xf];
-            ord_hex[i*2+1] = H[ sha->data[i]       & 0xf];
+//  YES iff a row `(off=blob_hl40, type=BLOBFN, id=path_h20)` already
+//  exists in any open run.  Pure binary search on the natural u64
+//  layout — no allocation.
+static b8 spot_memo_hit(u64css runs, u64 blob_hl40, u32 path_h20) {
+    u64 want = wh64Pack(SPOT_BLOBFN, path_h20, blob_hl40);
+    a_dup(u64cs, scan, runs);
+    $for(u64cs, run, scan) {
+        u64cp base = (*run)[0];
+        size_t len = (size_t)((*run)[1] - base);
+        size_t lo = 0, hi = len;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (base[mid] < want) lo = mid + 1;
+            else hi = mid;
         }
-        ord_hex[14] = 0;
-        char const *tname = (obj_type == DOG_OBJ_COMMIT) ? "C" :
-                            (obj_type == DOG_OBJ_TREE)   ? "T" :
-                            (obj_type == DOG_OBJ_BLOB)   ? "B" :
-                            (obj_type == DOG_OBJ_TAG)    ? "G" : "?";
-        fprintf(stderr, "ORD %s %s\n", tname, ord_hex);
+        if (lo < len && base[lo] == want) return YES;
     }
+    return NO;
+}
 
-    if (obj_type == DOG_OBJ_TREE) {
-        //  For each tree entry whose basename has a known tokenizer
-        //  ext, stamp blob_to_fn[child_hl] = (fn_rap40 << 24) | ext_off.
-        //  Subtrees (mode 040000) and untokenizable blobs are ignored.
-        kv64s tbl = {s->blob_to_fn[0], s->blob_to_fn[3]};
-        a_dup(u8c, scan, blob);
-        u8cs file = {}, esha = {};
-        u32  mode = 0;
-        while (GITu8sDrainTree(scan, file, esha, &mode) == OK) {
-            if (mode != 0100644 && mode != 0100755 && mode != 0120000)
-                continue;
-            u8cs fscan = {file[0], file[1]};
-            if (u8csFind(fscan, ' ') != OK) continue;
-            u8cs name = {fscan[0] + 1, file[1]};
-            if ($empty(name) || u8csLen(esha) != 20) continue;
+typedef struct {
+    spot   *s;
+    keeper *k;
+    u64css  runs;       // pre-opened LSM stack for memo lookups
+} spot_walk_ctx;
 
-            u8cs ext = {};
-            PATHu8sExt(ext, name);
-            if ($empty(ext) || !CAPOKnownExt(ext)) continue;
-            u32 ext_off = capo_ext_intern(s, ext);
-            if (ext_off == 0) continue;
+static ok64 spot_walk_visit(u8cs path, u8 kind, u8cp esha,
+                            u8cs blob, void0p ctx) {
+    (void)blob;       // KEEPLsFiles uses lazy mode — blob is empty
+    spot_walk_ctx *cx = (spot_walk_ctx *)ctx;
+    if (kind != WALK_KIND_REG && kind != WALK_KIND_EXE &&
+        kind != WALK_KIND_LNK) return OK;
+    if ($empty(path)) return OK;
 
-            sha1 csha = {};
-            memcpy(csha.data, esha[0], 20);
-            u64 child_hl = CAPOObjHashlet(&csha);
-            u32 fn_hash20 = CAPOFnRap20(name);
-
-            //  Transient map for in-pack BLOB lookups (single-value;
-            //  last basename within a pack wins).  Used by BLOB
-            //  ingest to recover the ext for tokenization.
-            kv64 e = {.key = child_hl,
-                      .val = SPOT_FN_VAL_PACK(fn_hash20, ext_off)};
-            (void)HASHkv64Put(tbl, &e);
-
-            //  Persisted blob → fn_hash mapping.  Multiple basenames
-            //  for the same blob produce multiple BLOBFN rows; search
-            //  range-scans `(off=blob_hl40, type=BLOBFN)` to recover
-            //  every bucket the blob has lived in (rename-safe).
-            u64 blob_hl40 = WHIFFHashlet40(&csha);
-            u64 blobfn = wh64Pack(SPOT_BLOBFN, fn_hash20, blob_hl40);
-            (void)CAPOEmit(blobfn);
-        }
-        done;
-    }
-
-    if (obj_type != DOG_OBJ_BLOB) done;
-
-    //  BLOB: look up (fn_rap, ext_off); miss = no tokenizable basename
-    //  in any tree we saw → silent skip.
-    u64 blob_hl = CAPOObjHashlet(sha);
-    kv64s tbl = {s->blob_to_fn[0], s->blob_to_fn[3]};
-    kv64 probe = {.key = blob_hl, .val = 0};
-    if (HASHkv64Get(&probe, tbl) != OK) {
-        SPOT_DBG_BLOB_MISS++;
-        done;
-    }
-    SPOT_DBG_BLOB_HIT++;
-
-    u32 fn_hash20 = SPOT_FN_VAL_HASH(probe.val);
-    u32 ext_off   = SPOT_FN_VAL_EOFF(probe.val);
-    if (ext_off == 0 || ext_off >= u8bDataLen(s->ext_arena)) {
+    u8cs ext = {};
+    PATHu8sExt(ext, path);
+    if ($empty(ext) || !CAPOKnownExt(ext)) {
         SPOT_DBG_BLOB_NO_EXT++;
-        done;
+        return OK;
     }
 
-    u8cp ext_start = u8bDataHead(s->ext_arena) + ext_off;
-    u8cp ext_idle  = u8bIdleHead(s->ext_arena);
-    u8cp ext_end   = ext_start;
-    while (ext_end < ext_idle && *ext_end != 0) ext_end++;
-    u8cs ext = {ext_start, ext_end};
+    sha1 bsha = {};
+    memcpy(bsha.data, esha, 20);
+    u64 blob_hl40 = WHIFFHashlet40(&bsha);
+    u32 path_h20  = CAPOFnRap20(path);
 
-    (void)CAPOIndexBlob(blob, ext, fn_hash20);
+    //  Memo: same (blob, path) on a prior walk → nothing to do.
+    if (spot_memo_hit(cx->runs, blob_hl40, path_h20)) {
+        SPOT_DBG_MEMO_HIT++;
+        return OK;
+    }
+
+    u32 ext_off = capo_ext_intern(cx->s, ext);
+    if (ext_off == 0) return OK;
+
+    Bu8 bbuf = {};
+    if (u8bAllocate(bbuf, 1UL << 22) != OK) return OK;
+    u8 btype = 0;
+    ok64 gr = KEEPGetExact(cx->k, &bsha, bbuf, &btype);
+    if (gr != OK || btype != DOG_OBJ_BLOB) {
+        u8bFree(bbuf);
+        return OK;
+    }
+    u8cs source = {u8bDataHead(bbuf), u8bIdleHead(bbuf)};
+
+    (void)CAPOIndexBlob(source, ext, path_h20);
     SPOT_DBG_TOKENISED++;
 
-    //  Hash-set drain is owned by CAPOEmit (it flushes on HASHNOROOM
-    //  and retries) — no per-blob threshold check needed here.
+    //  Persist the (blob, path) row so the next walk can short-circuit.
+    (void)CAPOEmit(wh64Pack(SPOT_BLOBFN, path_h20, blob_hl40));
 
+    u8bFree(bbuf);
+    return OK;
+}
+
+ok64 SPOTIndexFromTips(keeper *k, uricp u) {
+    sane(k && u);
+    spotp s = &SPOT;
+    if (!s->rw) done;
+
+    //  Snapshot the current LSM runs once — used as the per-blob
+    //  memo lookup.  Postings emitted during this walk go through
+    //  the BOX scratch and are not visible here; the walk's own
+    //  visitor would have seen the prior path for any rename.
+    a_path(capodir);
+    a_dup(u8c, reporoot, u8bDataC(s->h->root));
+    if (CAPOResolveDir(capodir, reporoot) != OK) done;
+    a_dup(u8c, dirslice, u8bDataC(capodir));
+
+    u64cs runs[CAPO_MAX_LEVELS] = {};
+    u64css stack = {runs, runs};
+    u8bp mmaps[CAPO_MAX_LEVELS] = {};
+    u32 nidxfiles = 0;
+    (void)CAPOStackOpen(stack, mmaps, &nidxfiles, dirslice);
+    stack[1] = stack[0] + nidxfiles;
+
+    spot_walk_ctx cx = {.s = s, .k = k};
+    cx.runs[0] = stack[0];
+    cx.runs[1] = stack[1];
+
+    //  Promote a 40-hex query (`?<sha>`) or path (`<sha>`) to the
+    //  fragment slot so KEEPResolveTree takes the direct-sha branch
+    //  — its query path only resolves named refs / aliases.
+    uri raw_probe = *u;
+    u8cs hex_src = {};
+    if (u8csEmpty(raw_probe.fragment) &&
+        u8csLen(raw_probe.query) == 40) {
+        $mv(hex_src, raw_probe.query);
+    } else if (u8csEmpty(raw_probe.fragment) &&
+               u8csEmpty(raw_probe.query) &&
+               u8csLen(raw_probe.path) == 40) {
+        $mv(hex_src, raw_probe.path);
+    }
+    if (!u8csEmpty(hex_src)) {
+        b8 hex = YES;
+        for (u8cp p = hex_src[0]; p < hex_src[1]; p++) {
+            u8 ch = *p;
+            b8 d = (ch >= '0' && ch <= '9');
+            b8 l = (ch >= 'a' && ch <= 'f');
+            b8 u_ = (ch >= 'A' && ch <= 'F');
+            if (!(d || l || u_)) { hex = NO; break; }
+        }
+        if (hex) {
+            raw_probe.fragment[0] = hex_src[0];
+            raw_probe.fragment[1] = hex_src[1];
+            raw_probe.query[0] = raw_probe.query[1] = NULL;
+            raw_probe.path[0]  = raw_probe.path[1]  = NULL;
+        }
+    }
+    u = &raw_probe;
+
+    //  Pick a URI that KEEPLsFiles can resolve to a tip.  Strategy:
+    //
+    //    1. Caller URI has a fragment / non-empty query / path?ref
+    //       shape that KEEPResolveTree handles → use it as-is.
+    //    2. `--at` parked a 40-hex sha in `h->cur_sha` (BE forwards
+    //       this) → synthesise `#<cur_sha>` so KEEPResolveTree takes
+    //       the fragment branch.
+    //    3. Try REFSResolve on the original URI's data slice — this
+    //       picks up keeper's just-written `?#<sha>` trunk row after
+    //       a fresh remote fetch (URI = `ssh://host/path`, query
+    //       empty, but keeper has the resolved tip on file).
+    //    4. Last resort: probe `?` as a trunk lookup (legacy shape
+    //       sniff's GET also uses post-fetch).
+    //
+    //  Each fallback synthesises a `#<sha>` URI and dispatches to
+    //  KEEPLsFiles.  No-op silently when none of the above resolves.
+    uri probe = *u;
+    a_pad(u8, frag_buf, 64);
+    b8 has_resolvable =
+        !u8csEmpty(u->fragment) ||
+        (!u8csEmpty(u->query) && u8csLen(u->query) > 0) ||
+        (!u8csEmpty(u->path)   && !u8csEmpty(u->query));
+
+    if (!has_resolvable && u8bDataLen(k->h->cur_sha) == 40) {
+        a_dup(u8c, cs, u8bData(k->h->cur_sha));
+        u8bFeed(frag_buf, cs);
+        probe.fragment[0] = u8bDataHead(frag_buf);
+        probe.fragment[1] = u8bIdleHead(frag_buf);
+        probe.query[0] = probe.query[1] = NULL;
+        probe.data[0] = probe.data[1] = NULL;
+        has_resolvable = YES;
+    }
+
+    if (!has_resolvable) {
+        //  Fall back to keeper REFS — picks up the `?#<sha>` trunk
+        //  row keeper writes after a fresh fetch, even when the
+        //  caller's URI has no explicit query.
+        a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+        a_pad(u8, arena_buf, 1024);
+        uri resolved = {};
+        static u8c const q_lit[] = "?";
+        u8cs probe_uri = {q_lit, q_lit + 1};
+        if (!u8csEmpty(u->data)) {
+            probe_uri[0] = u->data[0];
+            probe_uri[1] = u->data[1];
+        }
+        a_dup(u8c, in_uri, probe_uri);
+        if (REFSResolve(&resolved, arena_buf, $path(keepdir), in_uri) == OK
+            && u8csLen(resolved.query) >= 40) {
+            u8bFeed(frag_buf, resolved.query);
+            probe.fragment[0] = u8bDataHead(frag_buf);
+            probe.fragment[1] = u8bIdleHead(frag_buf);
+            probe.query[0] = probe.query[1] = NULL;
+            probe.data[0] = probe.data[1] = NULL;
+            has_resolvable = YES;
+        }
+    }
+
+    //  TODO: same swallow as graf/INDEX.c — KEEPLsFiles failures are
+    //  silently treated as "nothing to walk" so BE's parallel reindex
+    //  doesn't abort on relative refs (`?..`) it forwards before sniff
+    //  rewrites them, or on a fresh-clone bootstrap with no REFS yet.
+    //  Right fix is for BE to pre-resolve and skip the reindex when
+    //  there's nothing to walk.
+    if (has_resolvable) {
+        (void)KEEPLsFiles(k, &probe, spot_walk_visit, &cx);
+    }
+
+    CAPOStackClose(mmaps, nidxfiles);
     done;
 }

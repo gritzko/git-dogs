@@ -521,7 +521,15 @@ static ok64 wcli_send_request(int wfd, sha1 const *want_sha,
         wcli_sha_to_hex(hex, want_sha);
         u8csc hexs = {hex, hex + 40};
         u8bFeed(line, hexs);
-        a_cstr(caps_s, " no-progress ofs-delta\n");
+        //  Request side-band-64k so the server multiplexes its
+        //  "Counting/Compressing/Receiving objects…" progress text
+        //  onto band-2; the demuxer in `wcli_demux_pack` below
+        //  forwards band-2 to our stderr and concatenates band-1
+        //  into the pack stream KEEPIngestFile sees.  We DROP
+        //  `no-progress` for the same reason — keeping it would
+        //  ask the server not to bother emitting any of those
+        //  messages in the first place.
+        a_cstr(caps_s, " side-band-64k ofs-delta\n");
         u8bFeed(line, caps_s);
         a_dup(u8c, payload, u8bData(line));
         ok64 po = PKTu8sFeed(u8bIdle(frame), payload);
@@ -573,35 +581,72 @@ static ok64 wcli_drain_response(int rfd, Bu8 buf) {
     }
 }
 
-//  Walk past any leading pkt-lines (NAK / ACK / progress) inside
-//  `data`, writing the slice that starts at the raw pack bytes into
-//  `out`.  A pkt-line whose payload starts with "PACK" is the pack's
-//  first 4 bytes inlined into a side-band frame the way some servers
-//  do it; treat that case the same as raw bytes.
-static void wcli_strip_status(u8cs out, u8cs data) {
-    out[0] = data[0];
-    out[1] = data[1];
+//  Demux a side-band-64k upload-pack response.  The server emits
+//  pkt-lines whose first payload byte is the band:
+//    0x01  pack data — append to `pack` (caller-owned Bu8).
+//    0x02  progress — write to stderr verbatim ("Receiving objects:…").
+//    0x03  fatal error — write to stderr, then return WIRECLFL.
+//  Bare ACK/NAK lines (no band byte, length 3) are absorbed silently;
+//  a flush-pkt ends the stream.  Servers that didn't honour our
+//  side-band-64k request (or fell back) emit the pack as a single
+//  "PACK"-prefixed pkt-line OR raw bytes — both are detected as
+//  fallback paths and copied straight through.
+//
+//  Returns OK on clean stream end, WIRECLFL on band-3 / corruption.
+static ok64 wcli_demux_pack(u8cs data, Bu8 pack) {
+    u8cs probe = {data[0], data[1]};
     for (;;) {
         u8cs line = {};
-        u8cs probe = {out[0], out[1]};
         ok64 d = PKTu8sDrain(probe, line);
-        if (d == PKTFLUSH) {
-            out[0] = probe[0];
-            return;
+        if (d == PKTFLUSH) return OK;
+        if (d != OK) {
+            //  Not a pkt-line — server fell back to raw pack bytes
+            //  (no-side-band path).  Append the rest verbatim.
+            u8cs rest = {probe[0], data[1]};
+            if (!$empty(rest)) u8bFeed(pack, rest);
+            return OK;
         }
-        if (d != OK) return;
-        if (u8csLen(line) >= 4 && memcmp(line[0], "PACK", 4) == 0) {
-            out[0] = line[0];
-            out[1] = line[1];
-            return;
-        }
+        if ($empty(line)) continue;
+
+        //  Bare ACK/NAK status (no band byte) — absorb.
         if (u8csLen(line) >= 3 &&
             (memcmp(line[0], "NAK", 3) == 0 ||
-             memcmp(line[0], "ACK", 3) == 0)) {
-            out[0] = probe[0];
-            continue;
+             memcmp(line[0], "ACK", 3) == 0)) continue;
+
+        //  Server-without-sideband fallback: a pkt-line whose payload
+        //  starts with "PACK" is the pack header; the line plus
+        //  whatever follows is the raw pack body.
+        if (u8csLen(line) >= 4 && memcmp(line[0], "PACK", 4) == 0) {
+            u8cs rest = {line[0], data[1]};
+            u8bFeed(pack, rest);
+            return OK;
         }
-        return;
+
+        //  Side-band frame: first byte is the band tag.
+        u8 band = line[0][0];
+        u8cs body = {line[0] + 1, line[1]};
+        switch (band) {
+        case 0x01:  // pack data
+            if (!$empty(body)) u8bFeed(pack, body);
+            break;
+        case 0x02:  // progress — write verbatim to stderr
+            if (!$empty(body)) {
+                ssize_t n;
+                do {
+                    n = write(STDERR_FILENO, body[0],
+                              (size_t)(body[1] - body[0]));
+                } while (n < 0 && errno == EINTR);
+            }
+            break;
+        case 0x03:  // fatal error
+            if (!$empty(body))
+                (void)write(STDERR_FILENO, body[0],
+                            (size_t)(body[1] - body[0]));
+            return WIRECLFL;
+        default:
+            //  Unknown band — best-effort skip.
+            break;
+        }
     }
 }
 
@@ -701,18 +746,30 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     }
     close(rfd); rfd = -1;
 
-    //  5.  Strip leading status lines, then ingest.
+    //  5.  Demux side-band-64k frames: progress text → stderr,
+    //  band-1 bytes → packbuf; then ingest.
     u8cs all = {u8bDataHead(respbuf), u8bIdleHead(respbuf)};
-    u8cs pack = {};
-    wcli_strip_status(pack, all);
+    Bu8 packbuf = {};
+    if (u8bMap(packbuf, 1ULL << 30) != OK) {
+        u8bUnMap(respbuf);
+        goto fetch_close;
+    }
+    if (wcli_demux_pack(all, packbuf) != OK) {
+        u8bUnMap(packbuf);
+        u8bUnMap(respbuf);
+        goto fetch_close;
+    }
+    u8cs pack = {u8bDataHead(packbuf), u8bIdleHead(packbuf)};
     if (u8csLen(pack) >= 12) {
         a_dup(u8c, packdup, pack);
         ok64 io = KEEPIngestFile(k, packdup);
         if (io != OK) {
+            u8bUnMap(packbuf);
             u8bUnMap(respbuf);
             goto fetch_close;
         }
     }
+    u8bUnMap(packbuf);
     u8bUnMap(respbuf);
 
     //  6.  Record the ref locally under the actually-matched name,

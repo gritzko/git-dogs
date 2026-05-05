@@ -66,16 +66,11 @@ typedef struct {
 //  `k` supplies scratch buffers (buf1..buf4) and is used for thin-pack
 //  REF_DELTA resolution via KEEPGet against previously-loaded packs.
 //  If `in->emit` is non-NULL, every resolved object triggers a callback
-//  with its type, sha, derived path, and content bytes.
+//  with its type, sha, and content bytes.  No caller installs an emit
+//  in production any more (DOG.md §10a — graf/spot pull from keeper
+//  rather than receive pushed objects); the field is kept for the
+//  UNPK unit tests that exercise the streaming emit path directly.
 ok64 UNPKIndex(keeper *k, unpk_in const *in,
                Bwh128 out, unpk_stats *stats);
-
-//  Process-wide indexer hook.  When set, KEEPIngestFile threads these
-//  into UNPKIndex's emit so a CLI (or embedder) can fan every resolved
-//  object out to whatever indexes live in the same process — graf/spot
-//  etc.  NULL by default; the keeper library never installs anything
-//  itself, to avoid pulling graflib/spotlib into keeplib.
-extern unpk_emit_fn keep_indexer_emit;
-extern void        *keep_indexer_ctx;
 
 #endif

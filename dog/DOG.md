@@ -9,7 +9,7 @@
  6. If `.dogs/keeper` is present, keeper has the data; if
     not, `git` has the data
  7. Last-seen-commit tracking is in `.dogs/name/COMMIT`.
- 8. The static lib has a `name` control struct and four uniform
+ 8. The static lib has a `name` control struct and three uniform
     entry points:
       - `ok64 DOGOpen(u8cs branch, b8 rw)`
            open the dog's shards for `branch` in the process-wide
@@ -21,22 +21,45 @@
       - `ok64 DOGExec(name* state, cli* c)`
            execute a parsed CLI (verb + flags + URIs) against
            the open state; equivalent to invoking `name ...` as
-           a process
-      - `ok64 DOGUpdate(name* state, u8 obj_type, sha1 const *sha, u8cs blob)`
-           feed a single git object (type + raw blob) into the
-           dog's index; payload-ingestion path used by fetch and
-           checkout.  Path is not delivered here — consumers that
-           need a path (e.g. spot) parse trees themselves at
-           Close-pass time, since keeper no longer derives paths
-           during pack ingestion.  Updates always land in
-           `HOMEWriteBranch()` — the branch that won slot 0 at the
-           first rw open.
+           a process.  Indexing dogs (spot, graf) pull what they
+           need from keeper via keeper's URI- and ULOG-based read
+           APIs; nothing is pushed into them.
       - `ok64 DOGClose(name* state)`
            close every shard opened by this dog.
  9. `be` links every dog's static lib directly — no subprocess
     fork/exec. It parses one CLI, opens the dogs it needs, calls
-    `NAMEExec` on each in order, and closes them.
+    `NAMEExec` on each in order, and closes them.  Exception: see
+    `be get` in §10a.
 10. `be` dispatches the HTTP-like verb vocabulary below to other dogs.
+
+10a. `be get URI` is the one verb that uses subprocesses.  `be`
+    `posix_spawn`s keeper first and waits — keeper clones/updates
+    the repo and builds keeper's own index.  Then `be` spawns
+    spot, graf, and sniff in parallel, each with the same verb and
+    URI, and waits for all three.  Each child opens keeper
+    read-only via its own mmaps and pulls what it needs.  No
+    shared state across the three; every dog for himself.
+
+##  Indexing (post-DOGUpdate)
+
+There is no push path into a dog's index.  Each indexing dog runs
+its own pass driven by the URI it was invoked with (whatever `be`
+forwarded from the user — trunk, a branch, a sha, a range).
+
+  - **spot** — indexes the *current tip versions* and the files
+    in them.  Keys content by the hash of the full repo-relative
+    path (no more hashlet → fn_hashlet split — spot recurses the
+    tree itself).  To avoid reindexing unchanged blobs across
+    runs, spot keeps a per-blob memo: 40-bit blob hashlet → 20-bit
+    *path* hashlet.  On a later pass, equal path hashlet ⇒ skip;
+    different ⇒ reindex (catches renames).  Same shard slot the
+    old hashlet → fn_hashlet record used; format redefined.
+  - **graf** — indexes the commit graph.  Walks back from each
+    tip in the URI; stops at any commit already present in graf's
+    own index (mention ≡ known).  Own shard family.
+  - **sniff** — no index.  Updates the worktree and writes its
+    attribution rows to ULOG; reads come from the worktree and
+    ULOG, never from a shard graph.
 
 ##  URI convention
 

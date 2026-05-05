@@ -235,13 +235,6 @@ ok64 GRAFOpen(home *h, b8 rw) {
     return GRAFOpenBranch(h, trunk, rw);
 }
 
-// --- Update: feed a single object (commit/tree/blob) into graf's DAG index ---
-
-ok64 GRAFUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
-    sane(1);
-    return GRAFDagUpdate(obj_type, sha, blob);
-}
-
 ok64 GRAFClose(void) {
     sane(1);
     if (!graf_is_open()) return OK;

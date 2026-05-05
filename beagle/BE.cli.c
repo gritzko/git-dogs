@@ -80,6 +80,33 @@ static ok64 BERun(u8csc tool, u8css argv, b8 bg) {
     done;
 }
 
+//  Spawn a sibling tool without waiting; caller reaps later via
+//  BEReap.  Used by `be get` to run spot/graf/sniff in parallel
+//  after keeper completes (DOG.md §10a).
+static ok64 BESpawn(u8csc tool, u8css argv, pid_t *out_pid) {
+    sane($ok(tool) && !$empty(tool) && out_pid);
+    a_path(path);
+    a$rg(a0, 0);
+    HOMEResolveSibling(NULL, path, tool, a0);
+    return FILESpawn($path(path), argv, NULL, NULL, out_pid);
+}
+
+//  Wait on a previously-spawned child and translate its exit into
+//  the BEDOG* code surface that `BERun` uses.
+static ok64 BEReap(pid_t pid, u8csc tool) {
+    int rc = 0;
+    ok64 r = FILEReap(pid, &rc);
+    if (r == FILESIGNAL) {
+        char const *sname = strsignal(rc);
+        fprintf(stderr, "be: " U8SFMT " killed by signal %d (%s)\n",
+                u8sFmt(tool), rc, sname ? sname : "?");
+        return BEDOGSIG;
+    }
+    if (r != OK) return r;
+    if (rc != 0) return BEDOGEXIT;
+    return OK;
+}
+
 // --- Run two tools as a producer → pager pipeline ---
 //
 //  Used to route view-projector output (e.g. `sniff ls --tlv`) into
@@ -175,17 +202,16 @@ static u32 BEReadDogs(char out[][64], u32 maxn) {
 // --- Verb dispatch: forward URI to dogs in order ---
 //
 // Each dog parses the URI and handles its part:
-//   get:    keeper (fetch) → sniff (checkout)
-//   put:    sniff (stage tree)
-//             [local only — no HEAD move, no ref push]
-//   delete: sniff (stage removal)
-//             [local only — same as put]
+//   get:    keeper (fetch + own index) → spot+graf+sniff in parallel
+//             (each pulls from keeper's read APIs and updates its own
+//              state — see DOG.md §10a "Indexing").
+//   put:    sniff (stage tree)            [local only]
+//   delete: sniff (stage removal)         [local only]
 //   post:   sniff (commit, HEAD move) → keeper (push ref)
 //
-// spot and graf are NOT invoked as standalone steps here.  They
-// receive objects exclusively through keeper's streaming DOGUpdate
-// callbacks during fetch/push, so a separate reindex pass is redundant
-// (and raced against keeper's own writes).
+// Other verbs (post/put/delete/patch/diff) keep their historical
+// shape for now; the get-style fork-keeper-then-parallel pattern is
+// expected to generalise but is committed only for `get`.
 
 typedef struct {
     u8cs dog;
@@ -209,37 +235,39 @@ static u8cs const be_at_flag = {
     be_at_flag_lit, be_at_flag_lit + sizeof(be_at_flag_lit) - 1
 };
 
+//  Build a `<dog> <verb> [--at <uri>] [flags...] [URIs...]` argv
+//  slice into `args`.  Caller-owned: `args` must be a u8cs Bbuf with
+//  space for `4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS` slots.
+static void be_build_argv(u8csb args, u8cs dog, u8cs verb, cli *c) {
+    a_dup(u8c, ldog,  dog);
+    a_dup(u8c, lverb, verb);
+    u8csbFeed1(args, ldog);
+    u8csbFeed1(args, lverb);
+    if (u8bDataLen(be_at_buf) > 0) {
+        a_dup(u8c, at_flag, be_at_flag);
+        a_dup(u8c, at_val,  u8bData(be_at_buf));
+        u8csbFeed1(args, at_flag);
+        u8csbFeed1(args, at_val);
+    }
+    //  Flags come as {flag, val} pairs; val is the empty-string
+    //  sentinel for booleans.  Forward the flag name always; only
+    //  forward its value if it's genuinely non-empty, otherwise the
+    //  callee's CLIParse would pick it up as a spurious URI.
+    for (u32 j = 0; j + 1 < c->nflags; j += 2) {
+        u8csbFeed1(args, c->flags[j]);
+        if (!u8csEmpty(c->flags[j + 1]))
+            u8csbFeed1(args, c->flags[j + 1]);
+    }
+    for (u32 j = 0; j < c->nuris; j++)
+        u8csbFeed1(args, c->uris[j].data);
+}
+
 static ok64 BEDispatch(cli *c, dog_step const *steps, u32 nsteps,
                         b8 seq) {
     sane(c && steps);
-    b8 have_at = u8bDataLen(be_at_buf) > 0;
     for (u32 i = 0; i < nsteps; i++) {
-        // argv: dog verb [--at <uri>] [flags...] [URIs...]
-        // cli.flags and cli.uris[].data already are u8cs slices.
         a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
-        // Local copies: const dog_step's u8cs fields are deeply const and
-        // can't be passed by value to the mutable-pointer Feed1 param.
-        a_dup(u8c, dog, steps[i].dog);
-        a_dup(u8c, verb, steps[i].verb);
-        u8csbFeed1(args, dog);
-        u8csbFeed1(args, verb);
-        if (have_at) {
-            a_dup(u8c, at_flag, be_at_flag);
-            a_dup(u8c, at_val,  u8bData(be_at_buf));
-            u8csbFeed1(args, at_flag);
-            u8csbFeed1(args, at_val);
-        }
-        // Flags come as {flag, val} pairs; val is the empty-string
-        // sentinel for booleans.  Forward the flag name always; only
-        // forward its value if it's genuinely non-empty, otherwise the
-        // callee's CLIParse would pick it up as a spurious URI.
-        for (u32 j = 0; j + 1 < c->nflags; j += 2) {
-            u8csbFeed1(args, c->flags[j]);
-            if (!u8csEmpty(c->flags[j + 1]))
-                u8csbFeed1(args, c->flags[j + 1]);
-        }
-        for (u32 j = 0; j < c->nuris; j++)
-            u8csbFeed1(args, c->uris[j].data);
+        be_build_argv(args, steps[i].dog, steps[i].verb, c);
         a_dup(u8cs, argv, u8csbData(args));
         call(BERun, steps[i].dog, argv, seq ? NO : steps[i].bg);
     }
@@ -380,21 +408,26 @@ static ok64 BEProjector(cli *c, uri *u) {
     return BERunPipe($path(dogpath), dargv, $path(bropath), bargv);
 }
 
-//  `be get` is a flat forward to sniff.  Sniff is the verb owner and
-//  calls KEEPGetRemote internally on a remote URI before checkout.
-//  be only does URI normalisation and the fresh-clone .dogs/ bootstrap
-//  (a pre-routing step both keeper and sniff need a cwd-rooted store
-//  to land in).
+//  `be get URI` (DOG.md §10a):
+//
+//    1. keeper get URI  — synchronous.  Fetches/clones (remote URI),
+//       writes the pack to .dogs/keeper, builds keeper's own index.
+//    2. spot get URI, graf get URI, sniff get URI — in parallel.
+//       Each dog opens keeper read-only, walks the URI's tip(s), and
+//       updates its own state (spot/graf indexes; sniff worktree).
+//
+//  `--seq` (debugging) collapses step 2 to sequential keeper-order
+//  execution — same dispatch shape as the other verbs.
+//
+//  Pre-flight: URI normalisation (worktree wiring + fresh-clone
+//  .dogs/ bootstrap so the downstream dogs have a place to land).
 static ok64 BEGet(cli *c, b8 seq) {
     sane(c);
-    //  GET is ref-expecting (checkout, fetch, switch branch): promote
-    //  bare `be get other/branch` to query=other/branch just like POST
-    //  and PATCH.  Path views (`be VERBS.md`) are the verbless form,
-    //  not GET — so promotion here is unambiguous.
+    //  GET is ref-expecting: promote bare `be get other/branch` to
+    //  query=other/branch just like POST and PATCH.  Path views
+    //  (`be VERBS.md`) are the verbless form, not GET.
     for (u32 i = 0; i < c->nuris; i++) be_promote_to_ref(&c->uris[i]);
-    static dog_step const steps[] = {
-        {u8slit("sniff"), u8slit("get"), NO},
-    };
+
     uri *u = (c->nuris > 0) ? &c->uris[0] : NULL;
     b8  remote = (u != NULL && !$empty(u->authority));
 
@@ -403,7 +436,7 @@ static ok64 BEGet(cli *c, b8 seq) {
 
     //  Fresh-clone bootstrap: a remote URI with no .dogs/ anywhere up
     //  to / needs an empty .dogs/ in cwd so the downstream dog can
-    //  place its subdir.  Local URIs already have a HOME.
+    //  place its subdir.
     if (remote) {
         home probe_h = {};
         uri at = {};
@@ -418,12 +451,142 @@ static ok64 BEGet(cli *c, b8 seq) {
             }
         }
     }
-    return BEDispatch(c, steps, 1, seq);
+
+    //  Step 1: keeper get URI — synchronous.  Only meaningful when
+    //  the URI carries a remote authority (fetch/clone path); for a
+    //  local-only checkout (`?ref`, `?<sha>`, bare `?`) keeper has
+    //  nothing to do — its index is already current — so skip it.
+    a_cstr(get_s,    "get");
+    a_cstr(keeper_s, "keeper");
+    if (remote) {
+        a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
+        a_dup(u8c, keeper_d, keeper_s);
+        a_dup(u8c, get_d,    get_s);
+        be_build_argv(args, keeper_d, get_d, c);
+        a_dup(u8cs, argv, u8csbData(args));
+        call(BERun, keeper_d, argv, NO);
+    }
+
+    //  Step 2: spot, graf, sniff in parallel.
+    static u8c const spot_lit[]  = "spot";
+    static u8c const graf_lit[]  = "graf";
+    static u8c const sniff_lit[] = "sniff";
+    u8cs const dogs[3] = {
+        {spot_lit,  spot_lit  + 4},
+        {graf_lit,  graf_lit  + 4},
+        {sniff_lit, sniff_lit + 5},
+    };
+
+    if (seq) {
+        for (int i = 0; i < 3; i++) {
+            a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
+            a_dup(u8c, dog_d, dogs[i]);
+            a_dup(u8c, get_d, get_s);
+            be_build_argv(args, dog_d, get_d, c);
+            a_dup(u8cs, argv, u8csbData(args));
+            call(BERun, dog_d, argv, NO);
+        }
+        done;
+    }
+
+    pid_t pids[3] = {0};
+    ok64  spawn_err[3] = {OK, OK, OK};
+    for (int i = 0; i < 3; i++) {
+        a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
+        a_dup(u8c, dog_d, dogs[i]);
+        a_dup(u8c, get_d, get_s);
+        be_build_argv(args, dog_d, get_d, c);
+        a_dup(u8cs, argv, u8csbData(args));
+        spawn_err[i] = BESpawn(dog_d, argv, &pids[i]);
+        if (spawn_err[i] != OK) {
+            fprintf(stderr, "be: spawn " U8SFMT ": %s\n",
+                    u8sFmt(dog_d), ok64str(spawn_err[i]));
+        }
+    }
+    ok64 worst = OK;
+    for (int i = 0; i < 3; i++) {
+        if (spawn_err[i] != OK) { worst = spawn_err[i]; continue; }
+        a_dup(u8c, dog_d, dogs[i]);
+        ok64 r = BEReap(pids[i], dog_d);
+        if (r != OK) worst = r;
+    }
+    return worst;
+}
+
+//  Fork spot + graf in parallel against the worktree's current tip
+//  (via `--at`).  Used by verbs that move a ref locally — post,
+//  patch — so the user-facing indexes stay current without a manual
+//  `be get` step.  `be_at_buf` is refreshed from `.sniff` first
+//  (the calling verb may have just moved the tip).
+static ok64 be_reindex(cli *c) {
+    sane(c);
+    //  Re-derive the wt root: a post that just bootstrapped a fresh
+    //  `.dogs/` (`be post` in an empty dir) leaves `c->repo` empty
+    //  because CLIParse's cwd-walk happened before the post created
+    //  the store.  Walk again here so SNIFFAtTailOf can read `.sniff`.
+    u8cs repo = {};
+    if ($ok(c->repo) && !u8csEmpty(c->repo)) {
+        $mv(repo, c->repo);
+    } else {
+        home rh = {};
+        uri none = {};
+        if (HOMEOpen(&rh, &none, NO) == OK) {
+            //  HOMEOpen owns its `rh` storage; copy the slice into the
+            //  cli's `_repo` buffer (still alive on the parent stack)
+            //  and re-export via c->repo.
+            size_t rlen = u8bDataLen(rh.root);
+            if (rlen >= sizeof(c->_repo)) rlen = sizeof(c->_repo) - 1;
+            memcpy(c->_repo, u8bDataHead(rh.root), rlen);
+            c->_repo[rlen] = 0;
+            c->repo[0] = (u8cp)c->_repo;
+            c->repo[1] = (u8cp)c->_repo + rlen;
+            $mv(repo, c->repo);
+        }
+        HOMEClose(&rh);
+    }
+    if (!u8csEmpty(repo)) {
+        u8bReset(be_at_buf);
+        (void)SNIFFAtTailOf(repo, be_at_buf);
+    }
+    static u8c const spot_lit[] = "spot";
+    static u8c const graf_lit[] = "graf";
+    u8cs const dogs[2] = {
+        {spot_lit, spot_lit + 4},
+        {graf_lit, graf_lit + 4},
+    };
+    a_cstr(get_s, "get");
+
+    pid_t pids[2] = {0};
+    ok64  spawn_err[2] = {OK, OK};
+    for (int i = 0; i < 2; i++) {
+        a_pad(u8cs, args, 4);
+        a_dup(u8c, dog_d, dogs[i]);
+        a_dup(u8c, get_d, get_s);
+        u8csbFeed1(args, dog_d);
+        u8csbFeed1(args, get_d);
+        if (u8bDataLen(be_at_buf) > 0) {
+            a_dup(u8c, at_flag, be_at_flag);
+            a_dup(u8c, at_val,  u8bData(be_at_buf));
+            u8csbFeed1(args, at_flag);
+            u8csbFeed1(args, at_val);
+        }
+        a_dup(u8cs, argv, u8csbData(args));
+        spawn_err[i] = BESpawn(dog_d, argv, &pids[i]);
+    }
+    ok64 worst = OK;
+    for (int i = 0; i < 2; i++) {
+        if (spawn_err[i] != OK) { worst = spawn_err[i]; continue; }
+        a_dup(u8c, dog_d, dogs[i]);
+        ok64 r = BEReap(pids[i], dog_d);
+        if (r != OK) worst = r;
+    }
+    return worst;
 }
 
 //  `be put` stages a new base tree locally — no commit object and no
-//  ref push.  spot/graf pick up the new blobs from sniff/keeper's
-//  DOGUpdate callbacks; no standalone reindex step is dispatched.
+//  ref push.  spot/graf indexes go stale until the next `be get` (or
+//  follow-on parallel reindex when post/put grow the same shape as
+//  get under DOG.md §10a).
 static ok64 BEPut(cli *c, b8 seq) {
     sane(c);
     static dog_step const steps[] = {
@@ -502,7 +665,10 @@ static ok64 BEPatch(cli *c, b8 seq) {
     u32 nsteps = sizeof(steps) / sizeof(steps[0]);
     uri *u = (c->nuris > 0) ? &c->uris[0] : NULL;
     u32 start = (u != NULL && !$empty(u->authority)) ? 0 : 1;
-    return BEDispatch(c, steps + start, nsteps - start, seq);
+    call(BEDispatch, c, steps + start, nsteps - start, seq);
+    //  Patch may move the wt's HEAD via 3-way merge; refresh spot+graf.
+    (void)be_reindex(c);
+    done;
 }
 
 //  `be post`:
@@ -581,13 +747,24 @@ static ok64 BEPost(cli *c, b8 seq) {
     //  Sniff runs whenever we have something to commit, a label URI
     //  (`?ref`), or nothing — bare invocation prints the would-be
     //  change-set and exits.
+    b8 ran_sniff = NO;
     if (has_msg || c->nuris > 0 || !has_remote) {
         steps[nsteps++] = (dog_step){u8slit("sniff"),  u8slit("post"), NO};
+        ran_sniff = YES;
     }
     if (has_remote) {
         steps[nsteps++] = (dog_step){u8slit("keeper"), u8slit("post"), NO};
     }
-    return BEDispatch(c, steps, nsteps, seq);
+    call(BEDispatch, c, steps, nsteps, seq);
+
+    //  Local reindex: a successful sniff post moved the wt's HEAD;
+    //  refresh spot/graf so subsequent log/diff/search see the new
+    //  tip without a manual `be get`.  Skip the bare-dry-run case
+    //  (no commit, no message, no URI) — sniff just printed the
+    //  would-be change-set and `.sniff` baseline is unchanged.
+    b8 dry_run = !has_msg && c->nuris == 0;
+    if (ran_sniff && !dry_run) (void)be_reindex(c);
+    done;
 }
 
 // --- Bare `be`: --update all dogs, then --status each ---

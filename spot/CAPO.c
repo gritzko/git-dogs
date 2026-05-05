@@ -233,12 +233,12 @@ ok64 CAPOIndexBlob(u8csc source, u8csc ext, u32 fn_hash20) {
     done;
 }
 
-//  Search-time wrapper: takes a basename slice, hashes it, delegates.
-//  Ingest goes through CAPOIndexBlob directly (fn_hash20 is already
-//  on hand from the SPOTUpdate(TREE) stamp).
-ok64 CAPOIndexFile(u8csc source, u8csc ext, u8csc basename) {
-    sane($ok(basename));
-    return CAPOIndexBlob(source, ext, CAPOFnRap20(basename));
+//  Search-time wrapper: takes the full repo-relative path, hashes
+//  it, delegates.  Ingest goes through CAPOIndexBlob directly
+//  (path_h20 is already on hand from the tip-walker's visitor).
+ok64 CAPOIndexFile(u8csc source, u8csc ext, u8csc full_path) {
+    sane($ok(full_path));
+    return CAPOIndexBlob(source, ext, CAPOFnRap20(full_path));
 }
 
 // --- Stack management ---
@@ -971,10 +971,10 @@ static ok64 capo_class_step(class_step const *step, void *ctx_) {
 
     if (apply_filter && cx->opts->has_trigrams &&
         !$empty(cx->opts->tri_hashes)) {
-        u8cs base = {};
-        PATHu8sBase(base, path);
-        if ($empty(base)) $mv(base, path);
-        u64 fn_hash = (u64)CAPOFnRap20(base);
+        //  Postings are keyed on the full repo-relative path's RAP
+        //  hash (DOG.md §"Indexing").  Reject any worktree path
+        //  whose hash isn't in the trigram-candidate set.
+        u64 fn_hash = (u64)CAPOFnRap20(path);
         u64s th = {(u64p)cx->opts->tri_hashes[0],
                    (u64p)cx->opts->tri_hashes[1]};
         if (!u64sBsearch(&fn_hash, th)) {
@@ -1470,16 +1470,6 @@ ok64 SPOTOpenBranch(home *h, u8cs branch, b8 rw) {
         //  between blobs — the map is anonymous so unused tail pages
         //  cost nothing until they're touched.
         call(u32bMap, s->ingest_toks, INGEST_TOKS_CAP);
-        //  Blob → (basename RAP, ext_off) map.  Stamped per-tree by
-        //  SPOTUpdate(TREE); read at every BLOB to tag postings.
-        //  Pack order is trees-before-blobs, so the lookup hits
-        //  without buffering.  Absent ⇒ silent skip.
-        call(kv64bAllocate, s->blob_to_fn, CAPO_BLOB_FN_CAP);
-        memset(s->blob_to_fn[0], 0,
-               (size_t)(s->blob_to_fn[3] - s->blob_to_fn[0])
-                   * sizeof(kv64));
-        s->blob_to_fn[1] = s->blob_to_fn[0];
-        s->blob_to_fn[2] = s->blob_to_fn[3];
         //  Ext arena — offset 0 reserved as a sentinel ("missing"),
         //  so seed with a single NUL.
         call(u8bMap, s->ext_arena, CAPO_EXT_ARENA_LEN);
@@ -1525,52 +1515,32 @@ ok64 CAPOFlushRun(spot *s) {
     done;
 }
 
-extern u64 SPOT_DBG_BLOB_HIT, SPOT_DBG_BLOB_MISS,
-           SPOT_DBG_BLOB_NO_EXT, SPOT_DBG_TOKENISED,
-           SPOT_DBG_TREES, SPOT_DBG_BLOBS, SPOT_DBG_COMMITS,
-           SPOT_DBG_TAGS, SPOT_DBG_BLOB_PRE_TREE,
-           SPOT_DBG_RUN_BLOB_MAX, SPOT_DBG_RUN_BLOB_CUR;
+extern u64 SPOT_DBG_TOKENISED, SPOT_DBG_MEMO_HIT,
+           SPOT_DBG_BLOB_NO_EXT;
 
 void SPOTClose(void) {
     if (!spot_is_open()) return;
     spot *s = &SPOT;
-    //  Ingest stats — gated behind SPOT_TRACE_ORDER so the per-test
-    //  stderr captures stay byte-stable.  High `orphan` ratio means
-    //  the pack producer interleaved trees and blobs and the
-    //  "trees-before-blobs" assumption in SPOTUpdate broke down; large
-    //  `max-B-run` (relative to total blobs) is the same signal.
+    //  Tip-walk indexer stats — gated behind SPOT_TRACE_ORDER so per-
+    //  test stderr captures stay byte-stable.  `memo` is the BLOBFN
+    //  hit count: how many (blob, path) pairs were unchanged since
+    //  the prior walk and skipped without re-tokenisation.
     if (s->rw && getenv("SPOT_TRACE_ORDER") &&
-        (SPOT_DBG_BLOBS + SPOT_DBG_TREES) > 0) {
-        if (SPOT_DBG_RUN_BLOB_CUR > SPOT_DBG_RUN_BLOB_MAX)
-            SPOT_DBG_RUN_BLOB_MAX = SPOT_DBG_RUN_BLOB_CUR;
-        u64 blobs = SPOT_DBG_BLOBS;
-        u64 orphan = SPOT_DBG_BLOB_MISS;
-        unsigned pct = blobs ? (unsigned)((orphan * 100) / blobs) : 0;
+        (SPOT_DBG_TOKENISED + SPOT_DBG_MEMO_HIT) > 0) {
         fprintf(stderr,
-            "spot: ingest order  C=%llu T=%llu B=%llu G=%llu  "
-            "pre-tree-B=%llu  max-B-run=%llu\n"
-            "spot: blob lookups  hit=%llu miss(orphan)=%llu (%u%%)  "
-            "no_ext=%llu  tokenised=%llu\n",
-            (unsigned long long)SPOT_DBG_COMMITS,
-            (unsigned long long)SPOT_DBG_TREES,
-            (unsigned long long)SPOT_DBG_BLOBS,
-            (unsigned long long)SPOT_DBG_TAGS,
-            (unsigned long long)SPOT_DBG_BLOB_PRE_TREE,
-            (unsigned long long)SPOT_DBG_RUN_BLOB_MAX,
-            (unsigned long long)SPOT_DBG_BLOB_HIT,
-            (unsigned long long)orphan, pct,
-            (unsigned long long)SPOT_DBG_BLOB_NO_EXT,
-            (unsigned long long)SPOT_DBG_TOKENISED);
+            "spot: walk  tokenised=%llu  memo-hit=%llu  no_ext=%llu\n",
+            (unsigned long long)SPOT_DBG_TOKENISED,
+            (unsigned long long)SPOT_DBG_MEMO_HIT,
+            (unsigned long long)SPOT_DBG_BLOB_NO_EXT);
     }
     if (s->rw && !BNULL(s->entries_mem)) {
         //  Final flush of any postings still in the BOX.  Tokenisation
-        //  happened inline in SPOTUpdate(BLOB).  CAPOFlushRun also
-        //  runs CAPOCompact, so the puppy ladder stays balanced.
+        //  happened inline in the tip-walker's visitor.  CAPOFlushRun
+        //  also runs CAPOCompact, so the puppy ladder stays balanced.
         CAPOFlushRun(s);
         u8bUnMap(s->entries_mem);
         if (!BNULL(s->flush_buf)) u8bUnMap(s->flush_buf);
         if (s->ingest_toks[0] != NULL) u32bUnMap(s->ingest_toks);
-        if (!BNULL(s->blob_to_fn)) kv64bFree(s->blob_to_fn);
         if (!BNULL(s->ext_arena))  u8bUnMap(s->ext_arena);
     }
     for (u32 i = 0; i < s->nmaps; i++) {

@@ -1,6 +1,6 @@
 //  DAG: graf's commit-graph index, streaming ingest.
 //
-//  Fed via GRAFUpdate one COMMIT object at a time (TREE/BLOB
+//  Fed via GRAFDagUpdate one COMMIT object at a time (TREE/BLOB
 //  callbacks are accepted but ignored — only commit→parent and
 //  commit→tree edges are recorded).  Finish flushes the pending
 //  batch and triggers compaction.  No historical keeper lookups.
@@ -498,13 +498,12 @@ static ok64 dag_finish(dag_ingest *g) {
 }
 
 // ============================================================
-// Public entry: GRAFUpdate
+// Public entry: GRAFDagUpdate
 // ============================================================
 
-// This is the real meat the GRAFUpdate wrapper calls into.  `state`
-// is graf's own state (struct graf from GRAF.h).  We reach into
-// state->ing to lazily allocate the ingest context.  Forward-decl
-// of struct graf comes from GRAF.h include above.
+// `state` is graf's own state (struct graf from GRAF.h).  We reach
+// into state->ing to lazily allocate the ingest context.  Forward-
+// decl of struct graf comes from GRAF.h include above.
 
 ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
     sane(1);

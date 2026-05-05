@@ -11,6 +11,7 @@
 #include "dog/DOG.h"
 #include "dog/SHA1.h"
 #include "dog/WHIFF.h"
+#include "keeper/KEEP.h"
 
 con ok64 CAPONOROOM = 0x30a6585d86d8616;
 con ok64 CAPONODIFF = 0x30a6585d83523cf;  // no usable saved commit → full reindex
@@ -58,47 +59,39 @@ con ok64 SPOTNOPATH = 0x71961d5d864a751;
 //  larger than any source file we expect to ingest.  Anonymous mmap
 //  pages are zero-fill on demand, so the unused tail costs nothing.
 #define INGEST_TOKS_CAP  (1UL << 24)
-//  Blob → (basename RAP, ext_off) map (rw): 60-bit obj_hl → packed
-//  value `(fn_rap40 << 24) | ext_off24`.  Populated by SPOTUpdate(TREE)
-//  for every blob entry whose basename has a known tokenizer ext;
-//  consulted by SPOTUpdate(BLOB) to tag postings inline.  Absent ⇒
-//  silent skip (binary, image, ext we can't tokenize).  ~16 B per
-//  entry × every tokenizable blob in the ingest closure.
-#define CAPO_BLOB_FN_CAP    (1u << 22)        // 4 M slots → ~64 MB
 //  Per-session arena for ext strings ("c", "h", "py", …).  Offset 0
 //  is reserved as a sentinel; ~50 distinct exts fit easily in 4 KB.
 #define CAPO_EXT_ARENA_LEN  (1u << 12)        // 4 KB
 
 #define CAPOTriChar(c) (RON64_REV[(u8)(c)] != 0xff)
 
-// 60-bit object-id key for `blob_to_fn`.  Same shape as keeper's
-// WHIFFHashlet60; named here to make spot's SPOTUpdate dispatch
-// readable on its own.
+// 60-bit object-id key.  Same shape as keeper's WHIFFHashlet60.
 fun u64 CAPOObjHashlet(sha1 const *sha) { return WHIFFHashlet60(sha); }
 
-// Basename → 20-bit posting key.  Truncated `RAPHash(basename)`,
-// computed at SPOTUpdate(TREE) for ingest and at search time over
-// every worktree path's basename.  20 bits is enough as a filter
-// (filtering 1 file out of ~1 M); two files sharing a bucket pass
-// the filter and the worktree scan rescans both.
-fun u32 CAPOFnRap20(u8csc basename) {
-    return (u32)(RAPHash(basename) & WHIFF_ID_MASK);
+// Full repo-relative path → 20-bit posting key.  Truncated
+// `RAPHash(full_path)`.  Under the new arrangement (DOG.md §"Indexing")
+// spot recurses tip trees itself, so it knows the full path of every
+// blob it indexes and keys postings on the path hash directly.  20
+// bits is enough as a filter (~1/1 M rejection); two paths sharing a
+// bucket both pass the filter and the worktree scan rescans both.
+fun u32 CAPOFnRap20(u8csc full_path) {
+    return (u32)(RAPHash(full_path) & WHIFF_ID_MASK);
 }
 
-// Index a streaming blob whose basename hash was already stamped via
-// SPOTUpdate(TREE).  Tokenises and emits postings into the SPOT
-// singleton's hash-set scratch (`SPOT.entries`).
-ok64 CAPOIndexBlob(u8csc source, u8csc ext, u32 fn_hash20);
+// Index a streaming blob.  Tokenises and emits postings into the
+// SPOT singleton's hash-set scratch (`SPOT.entries`).  `path_hash20`
+// is the truncated RAP of the full repo-relative path.
+ok64 CAPOIndexBlob(u8csc source, u8csc ext, u32 path_hash20);
 
 // Append one wh64 posting to the SPOT singleton's hash-set scratch.
 // Skips the zero sentinel.  HASHNOROOM triggers CAPOFlushRun (sort
 // + write puppy + memset table) and the put is retried.
 ok64 CAPOEmit(u64 entry);
 
-// Index a single on-disk source file.  Hashes `basename` and
-// delegates to CAPOIndexBlob.  Used by the search-time (re)tokenize
-// path; ingest goes through CAPOIndexBlob directly.
-ok64 CAPOIndexFile(u8csc source, u8csc ext, u8csc basename);
+// Index a single on-disk source file.  Hashes the full repo-relative
+// path and delegates to CAPOIndexBlob.  Used by the search-time
+// (re)tokenize path; ingest goes through CAPOIndexBlob directly.
+ok64 CAPOIndexFile(u8csc source, u8csc ext, u8csc full_path);
 
 typedef struct spot_ spot;
 
@@ -117,8 +110,9 @@ ok64 CAPOStackClose(u8bp *maps, u32 nfiles);
 ok64 CAPOCompact(spot *s);
 
 // Flush in-memory postings (s->entries) as a new puppy and run
-// CAPOCompact to keep the 1/8 invariant.  Called by SPOTUpdate(BLOB)
-// when scratch exceeds CAPO_FLUSH_AT, and by SPOTClose at end of run.
+// CAPOCompact to keep the 1/8 invariant.  Called by the tip-walk
+// visitor when scratch exceeds CAPO_FLUSH_AT, and by SPOTClose at
+// end of run.
 ok64 CAPOFlushRun(spot *s);
 
 // Next available sequence number (max existing + 1)
@@ -252,13 +246,9 @@ struct spot_ {
     //  to a one-off mmap inside CAPOIndexBlob.
     Bu32     ingest_toks;
 
-    //  Blob → (basename RAP, ext offset).  Stamped by SPOTUpdate(TREE)
-    //  for every tree entry whose basename has a known tokenizer ext;
-    //  consulted by SPOTUpdate(BLOB) to tag postings inline.  Value
-    //  layout: `(fn_rap40 << 24) | ext_off24`.  Absent ⇒ silent skip
-    //  (binary, image, untokenizable ext).  Pack producers (git, sniff)
-    //  emit trees before blobs, so the lookup hits without buffering.
-    Bkv64    blob_to_fn;            // 60-bit blob_hl → packed (fn_rap, ext_off)
+    //  Per-session ext intern arena (NUL-separated).  Populated by
+    //  the tip-walker's visitor; consumed by CAPOIndexBlob to pick a
+    //  tokenizer.  Offset 0 reserved as a sentinel.
     Bu8      ext_arena;             // NUL-separated ext strings,
                                     // offset 0 reserved as sentinel.
 
@@ -292,20 +282,16 @@ ok64 SPOTOpenBranch(home *h, u8cs branch, b8 rw);
 //  Run one CLI invocation.
 ok64 SPOTExec(cli *c);
 
-//  Feed a single git object into spot during pack ingest.  Pack
-//  producers (git, sniff) emit trees before blobs, so each TREE
-//  stamps its own children independently — no chain, no buffering.
+//  Walk the URI's tip(s) over keeper's read APIs (KEEPLsFiles).
+//  For each leaf blob with a tokenizable extension, look up the
+//  BLOBFN memo (`off=blob_hl40, type=BLOBFN, id=path_h20`); if a
+//  prior row already records this (blob, path) pair → skip both
+//  tokenisation and emission.  Otherwise pull the blob via
+//  KEEPGetExact, tokenise, emit postings keyed on the full-path
+//  hash, and write a fresh BLOBFN row for the dedup memo.
 //
-//    COMMIT: ignored.
-//    TREE:   for each (mode, name, child_sha) entry whose basename
-//            has a known tokenizer ext, stamp blob_to_fn[hashlet(
-//            child_sha)] = (CAPOFnRap40(name) << 24) | ext_off.
-//    BLOB:   look up (fn_rap, ext_off); on hit, tokenize inline and
-//            emit postings via CAPOIndexBlob.  Miss = blob with no
-//            tokenizable basename in any tree we saw → silent skip.
-//
-//  `sha` is the caller's pre-computed git-object SHA-1.
-ok64 SPOTUpdate(u8 obj_type, sha1 const *sha, u8cs blob);
+//  Used by `spot get URI` under the new arrangement (DOG.md §10a).
+ok64 SPOTIndexFromTips(keeper *k, uricp u);
 
 void SPOTClose(void);
 

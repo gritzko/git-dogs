@@ -29,13 +29,6 @@
 #include "dog/HOME.h"
 #include "UNPK.h"
 
-//  Indexer fan-out hook — see UNPK.h.  A CLI that wants spot/graf to
-//  track every object keeper writes installs these before performing
-//  any fetch/post; KEEPIngestFile (via UNPKIndex) and KEEPPackFeed
-//  both call through them.
-unpk_emit_fn keep_indexer_emit = NULL;
-void        *keep_indexer_ctx  = NULL;
-
 // wh128 templates for LSM index runs and waiter buffers
 #define X(M, name) M##wh128##name
 #include "abc/QSORTx.h"
@@ -1499,10 +1492,6 @@ ok64 KEEPPackFeed(keeper *k, keep_pack *p,
 
     p->nobjs++;
 
-    //  Indexer fan-out: same hook UNPKIndex uses on the fetch path.
-    if (keep_indexer_emit)
-        keep_indexer_emit(keep_indexer_ctx, type, sha_out, content);
-
     done;
 }
 
@@ -2010,8 +1999,6 @@ ok64 KEEPIngestFile(keeper *k, u8csc bytes) {
         .scan_end = log_len,
         .count = ph.count,
         .file_id = file_id,
-        .emit = keep_indexer_emit,
-        .emit_ctx = keep_indexer_ctx,
     };
     unpk_stats ust = {};
     call(UNPKIndex, k, &uin, entries, &ust);
@@ -2854,8 +2841,6 @@ got_pack:
             .scan_end   = scan_end,
             .count      = hdr.count,
             .file_id    = file_id,
-            .emit       = keep_indexer_emit,
-            .emit_ctx   = keep_indexer_ctx,
         };
         unpk_stats ust = {};
         ok64 ux = UNPKIndex(k, &uin, entries, &ust);

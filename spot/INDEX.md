@@ -35,41 +35,40 @@ the pipe. Otherwise it writes plain ASCII directly to stdout via
 | `CAPOPcreGrep` | Regex grep via Thompson NFA + trigram filtering (GREP.c) |
 | `CAPOCompact` / `CAPOCompactAll` | Compact LSM index runs |
 | `CAPOResolveDir` | Resolve `<workspace>/.dogs/spot` dir |
-| `CAPOIndexBlob` | Tokenize a streaming blob, emit `spot64` postings keyed by precomputed `fn_rap40` |
-| `CAPOIndexFile` | Search-time wrapper: hash basename, delegate to `CAPOIndexBlob` |
-| `CAPOFnRap40` | `RAPHash(basename) & ((1<<40)-1)` — the 40-bit posting key |
+| `CAPOIndexBlob` | Tokenize a streaming blob, emit `spot64` postings keyed by precomputed `path_h20` (truncated full-path RAP) |
+| `CAPOIndexFile` | Search-time wrapper: hash full repo-relative path, delegate to `CAPOIndexBlob` |
+| `CAPOFnRap20` | `RAPHash(full_path) & ((1<<20)-1)` — the 20-bit posting key |
+| `SPOTIndexFromTips` | `spot get URI` entry — walks tip tree(s) via keeper, dedups against the BLOBFN memo, tokenises new (blob, path) pairs |
 
-Ingestion is driven by keeper's UNPK emit hook (`SPOTUpdate` per
-resolved object), so a `keeper get` / `sniff get` indexes every blob
-inline.  `spot get` is a no-op kept for orchestration uniformity.
-The dispatch is order-tolerant beyond a single guarantee:
+Ingestion is driven by `spot get URI` (DOG.md §10a): under the new
+arrangement `be get URI` spawns spot in parallel with keeper, and
+spot walks the URI's tip(s) over keeper's read APIs (KEEPLsFiles +
+KEEPGetExact).  For each leaf blob with a tokenizable extension:
 
-- `COMMIT` — ignored.
-- `TREE` — for each `(name, child_sha)` entry whose basename has a
-  known tokenizer ext, stamp `blob_to_fn[hashlet60(child_sha)] =
-  (CAPOFnRap40(name) << 24) | ext_off`.  Subtrees and untokenizable
-  blobs are skipped — no chain, no parent state.
-- `BLOB` — look up `(fn_rap, ext_off)`; on hit, tokenize inline and
-  emit postings via `CAPOIndexBlob`.  Miss = no tokenizable basename
-  in any tree we've seen → silent skip.
+- Compute `blob_hl40 = WHIFFHashlet40(blob_sha)` and
+  `path_h20 = CAPOFnRap20(full_repo_relative_path)`.
+- Look up the `BLOBFN` memo (`off=blob_hl40, type=BLOBFN, id=path_h20`)
+  in the open LSM runs.  A hit means we already indexed this exact
+  (blob, path) pair on a prior walk — skip.
+- Otherwise pull the blob via `KEEPGetExact`, tokenise via
+  `CAPOIndexBlob` keying postings on `path_h20`, then emit a fresh
+  `BLOBFN` row so the next walk can short-circuit.
 
-Pack producers (git, sniff) emit trees before blobs, so the lookup
-always hits.  No buffering, no deferred-tree replay, no commit-root
-seeding.
+Renames are caught automatically: same blob bytes + new path → new
+`path_h20` → no memo hit → re-tokenise under the new path.  No
+TREE/BLOB chain, no buffering, no order assumptions.
 
 Historic search (`spot … ?ref`) goes through `CAPOScanRef`: resolves
 the ref via keeper, walks the tree, pulls each blob-of-matching-ext,
 and runs the usual grep/pcre/snippet callbacks on the blob content.
 `spot --replace` is refused when `?ref` is set (no on-disk file).
 
-Worktree search uses the basename-RAP filter for speed: paths whose
-basename's `fn_rap40` carries no needle-trigram entry are skipped.
-Two files with the same basename in different directories share one
-posting bucket; both pass the filter and the worktree scan rescans
-each.  Strictly-untracked brand-new files with novel trigrams are
-still candidates as long as their basename appears in any indexed
-blob — sniff-changed-file enumeration could bypass the filter
-explicitly; not currently wired.
+Worktree search uses the path-RAP filter for speed: paths whose
+full-path `fn_rap20` carries no needle-trigram entry are skipped.
+Two paths sharing a 20-bit bucket both pass the filter and the
+worktree scan rescans each.  Strictly-untracked brand-new files
+with novel trigrams stay candidates as long as their full path
+hashes into the indexed posting set.
 
 ## Key functions (SPOT.h)
 
@@ -99,10 +98,10 @@ layout
 
 | `type` | `off` payload | `id` payload |
 |--------|---------------|--------------|
-| `SPOT_TRI`    (0) | 18-bit packed RON64 trigram (top 22 bits zero) | `CAPOFnRap20` |
-| `SPOT_MEN`    (1) | `RAPHash(symbol_name) & ((1<<40)-1)` (S/C tags) | `CAPOFnRap20` |
-| `SPOT_DEF`    (2) | `RAPHash(symbol_name) & ((1<<40)-1)` (N tag)    | `CAPOFnRap20` |
-| `SPOT_BLOBFN` (3) | `WHIFFHashlet40(blob_sha)`                       | `CAPOFnRap20` |
+| `SPOT_TRI`    (0) | 18-bit packed RON64 trigram (top 22 bits zero) | `path_h20` |
+| `SPOT_MEN`    (1) | `RAPHash(symbol_name) & ((1<<40)-1)` (S/C tags) | `path_h20` |
+| `SPOT_DEF`    (2) | `RAPHash(symbol_name) & ((1<<40)-1)` (N tag)    | `path_h20` |
+| `SPOT_BLOBFN` (3) | `WHIFFHashlet40(blob_sha)`                       | `path_h20` (memo: this blob lived at this path) |
 | 4..15             | reserved                                         |              |
 
 `id` carries the 20-bit basename hash for every record type — the
@@ -113,11 +112,12 @@ posting set.  Sorting clusters by `off` first (so range-scan by an
 out TRI vs MEN vs DEF (rare cross-type collisions when a symbol
 hash's top 22 bits happen to match a trigram value).
 
-The `BLOBFN` record persists the blob → basename mapping across
-puppy flushes: when a blob shows up under multiple basenames (rename,
-copy, vendored duplicate), every basename gets its own row, and a
-search-time range scan over `(off=blob_hashlet40, type=BLOBFN)`
-recovers every bucket the blob has lived in.
+The `BLOBFN` record is the dedup memo: `(blob_hl40, path_h20)`
+records "this blob has been indexed at this full path".  When a blob
+shows up at multiple paths (rename, copy, vendored duplicate), every
+path gets its own row, and the tip-walker's per-blob lookup uses an
+exact-key bsearch on `wh64Pack(SPOT_BLOBFN, path_h20, blob_hl40)` to
+short-circuit unchanged (blob, path) pairs without re-tokenisation.
 
 ### LSM stack
 
