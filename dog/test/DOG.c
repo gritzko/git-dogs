@@ -1,6 +1,8 @@
 #include "dog/DOG.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "abc/PRO.h"
 #include "abc/TEST.h"
@@ -304,6 +306,11 @@ static DateCase const DATE_CASES[] = {
 
 ok64 DOGTestFeedDate() {
     sane(1);
+    //  DATE_CASES expectations are anchored to UTC wall-clock; pin
+    //  TZ so localtime() in DOGutf8sFeedDate matches regardless of
+    //  the build host's locale.
+    setenv("TZ", "UTC", 1);
+    tzset();
     for (size_t i = 0; i < NDATE; i++) {
         DateCase const *tc = &DATE_CASES[i];
         a_pad(u8, buf, 16);

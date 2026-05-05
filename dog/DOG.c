@@ -498,13 +498,15 @@ ok64 DOGutf8sFeedDate(u8s into, i64 ts, i64 now) {
         i64 diff = now - ts;
         time_t t  = (time_t)ts;
         time_t tn = (time_t)now;
-        //  gmtime returns a pointer to a shared static buffer; copy
-        //  each result before the next call clobbers it.
+        //  localtime so HH:MM and the day-boundary for today/weekday
+        //  follow the user's wall clock.  Returns a pointer to a
+        //  shared static buffer; copy each result before the next call
+        //  clobbers it.
         struct tm tt = {}, tnn = {};
         b8 ok_t = NO, ok_n = NO;
-        struct tm *p = gmtime(&t);
+        struct tm *p = localtime(&t);
         if (p) { tt = *p; ok_t = YES; }
-        p = gmtime(&tn);
+        p = localtime(&tn);
         if (p) { tnn = *p; ok_n = YES; }
 
         b8 same_day  = ok_t && ok_n &&
