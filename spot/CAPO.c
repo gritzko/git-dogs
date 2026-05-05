@@ -44,11 +44,19 @@ static void capo_abrt_handler(int sig) {
 #include "abc/HASHx.h"
 #undef X
 
-// u64 BOX (LSM memtable) for the ingest-side scratch: postings cascade
-// into a 1/8 ladder of sorted runs.  CAPOFlushRun BOXu64Flushes the
-// merged dedup'd output into a temp buffer, writes the puppy, leaves
-// the BOX empty.
+// u64 BOX (LSM memtable) for the ingest-side scratch.  Dirty runs in
+// HASH mode (BOX_DIRTY_HASH=1, 256 KB region = 32 K u64 slots) so
+// duplicate trigrams from the same blob collapse at insert — without
+// that the cascade re-sorts every raw emit and write-amp blows up
+// (~240× on src/git scale).  HASHx line-bound probing drains at
+// ~25–50% load → ~10–16 K unique entries absorbed per drain.
+// CAPOFlushRun BOXu64Flushes the merged dedup'd output into a temp
+// buffer, writes the puppy, leaves the BOX empty.  HASHu64 is
+// co-instantiated below (BOXx hash mode calls HASHu64Put internally).
 #define X(M, name) M##u64##name
+#include "abc/HASHx.h"
+#define BOX_DIRTY_HASH 1
+#define BOX_DIRTY_BYTES (1UL << 18)
 #include "abc/BOXx.h"
 #undef X
 

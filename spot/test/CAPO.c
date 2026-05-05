@@ -8,8 +8,15 @@
 #include "abc/SORT.h"
 #include "abc/TEST.h"
 
-//  BOXu64 instantiation: BOXx.h's `sane()` requires PRO.h in scope.
+//  BOXu64 in hash mode — must match CAPO.c so the SPOT singleton's
+//  dirty descriptor (set up by box_test_open below via this TU's
+//  BOXu64Open) and the CAPOEmit hot path in CAPO.c agree on what
+//  dirty[1] means.  HASHu64 must be co-instantiated for Feed1's
+//  HASH Put.  PRO.h is required for sane()/done.
 #define X(M, name) M##u64##name
+#include "abc/HASHx.h"
+#define BOX_DIRTY_HASH 1
+#define BOX_DIRTY_BYTES (1UL << 18)
 #include "abc/BOXx.h"
 #undef X
 
@@ -92,7 +99,7 @@ ok64 CAPO2() {
     u8cs ext = $u8str(".c");
     a_cstr(name, "test.c");
 
-    call(box_test_open, 32 * 1024);
+    call(box_test_open, (8UL << 20));
 
     call(CAPOIndexFile, source, ext, name);
 
@@ -108,7 +115,7 @@ ok64 CAPO2() {
     size_t nentries = 0;
     b8 found_foo = NO, found_int = NO;
     u64 *p = (u64 *)u8bDataHead(SPOT.entries_mem);
-    u64 *e = (u64 *)(u8bDataHead(SPOT.entries_mem) + 32 * 1024);
+    u64 *e = (u64 *)(u8bDataHead(SPOT.entries_mem) + (8UL << 20));
     for (; p < e; p++) {
         if (*p == 0) continue;
         nentries++;
@@ -244,14 +251,14 @@ ok64 CAPO7() {
     u8cs ext = $u8str(".c");
     a_cstr(name, "test.c");
 
-    call(box_test_open, 32 * 1024);
+    call(box_test_open, (8UL << 20));
 
     call(CAPOIndexFile, source, ext, name);
 
     u32 fn_hash = CAPOFnRap20(name);
     size_t nentries = 0, ntri = 0, nmen = 0, ndef = 0;
     u64 *p = (u64 *)u8bDataHead(SPOT.entries_mem);
-    u64 *e = (u64 *)(u8bDataHead(SPOT.entries_mem) + 32 * 1024);
+    u64 *e = (u64 *)(u8bDataHead(SPOT.entries_mem) + (8UL << 20));
     for (; p < e; p++) {
         if (*p == 0) continue;
         nentries++;

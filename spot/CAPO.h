@@ -42,16 +42,18 @@ extern b8 CAPO_TERM;   // stderr is a terminal
 #define SPOT_LEAF_BRANCH_MAX 1024
 //  Missing prefix dir along the trunk → leaf branch path.
 con ok64 SPOTNOPATH = 0x71961d5d864a751;
-//  In-RAM scratch sized to keep the BOX memtable cache-resident and
-//  the per-lookup binary-search count low.  With the default 1 KB
-//  dirty / 2× ratio, a 128 KB BOX gives 7 sorted levels (1, 2, 4,
-//  8, 16, 32, 64 KB) plus dirty — every level fits in L1, every
-//  cascade fills its target perfectly (1/2 + 1/4 + … = 1), and a
-//  full ingest passes through all 7 binary searches in well under a
-//  microsecond.  Tuned to bound peak RAM, not throughput: large
-//  packs flush more often, but each flush is cheap and the on-disk
-//  puppy ladder absorbs the run count.
-#define CAPO_SCRATCH_LEN (1UL << 14)  // 16 K u64 entries = 128 KB
+//  In-RAM BOX scratch.  Dirty runs in HASH mode (BOX_DIRTY_HASH=1
+//  in CAPO.c) at 256 KB / 32 K u64 slots — enough headroom that
+//  HASHx line-bound probing absorbs ~10–16 K unique trigrams per
+//  drain, so a clone of src/git's ~3 M unique trigrams costs O(100s)
+//  of cascade drains instead of the 390 K the 1 KB-append default
+//  would produce.  At 2× ratio that gives the layout
+//  [dirty 256K | L0 256K | L1 512K | L2 1M | L3 2M | L4 4M] —
+//  6 sorted levels totalling 8 MB, top level 4 MB = ~512 K unique
+//  entries before BOXFULL forces an external puppy emit.  Tuned to
+//  trade peak RAM for cascade frequency, the cache footprint that
+//  matters at search time is the per-puppy run count, not the BOX.
+#define CAPO_SCRATCH_LEN (1UL << 20)  // 1 M u64 entries = 8 MB
 //  Per-session reusable token buffer cap.  16 M u32 entries = 64 MB,
 //  larger than any source file we expect to ingest.  Anonymous mmap
 //  pages are zero-fill on demand, so the unused tail costs nothing.
