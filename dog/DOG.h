@@ -206,20 +206,18 @@ fun u32 DOGPupSeqno(kv32b pups, u32 i) {
 }
 
 // Append a short human date for unix timestamp `ts` (seconds) into
-// `into`, picking the shortest representation that conveys the right
-// resolution for `now - ts`:
+// `into`, picking the coarsest representation that still resolves
+// `now - ts` unambiguously:
 //
-//   < 60s past         → "now"
-//   < 1hr past         → "-Nm"    (e.g. "-15m")
-//   < 24hr past        → "-Nhr"   (e.g. "-1hr", "-23hr")
-//   < 7 days past      → weekday  ("Mon".."Sun")
-//   same calendar year → "DDMon"  ("23Apr")
-//   different year     → "MonYY"  ("Apr25")
-//   future / ts <= 0   → fall through to date form ("DDMon"/"MonYY")
-//                        or "?" when gmtime fails.
+//   < 12hr past, or same calendar day → "HH:MM"   ("12:34")
+//   < 7 days past                     → "WdyDD"   ("Tue05")
+//   < ~6 months past, or same year    → "DDMon"   ("01Jan")
+//   else                              → "DDMonYY" ("01Jan25")
+//   ts <= 0                           → "?"
 //
-// All outputs are ≤5 ASCII chars and always non-empty.  `now` is
-// caller-supplied (typically `time(NULL)`) so tests can pin a moment.
+// Output is always centred-padded to exactly 7 ASCII columns so a
+// column of dates lines up cleanly.  `now` is caller-supplied
+// (typically `time(NULL)`) so tests can pin a moment.
 ok64 DOGutf8sFeedDate(u8s into, i64 ts, i64 now);
 
 // Classify a CLI arg: parse it as a URI, and when the parse is

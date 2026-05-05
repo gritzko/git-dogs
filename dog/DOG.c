@@ -491,54 +491,58 @@ ok64 DOGutf8sFeedDate(u8s into, i64 ts, i64 now) {
 
     char buf[8];
     int n = 0;
-    i64 diff = now - ts;
 
-    if (ts > 0 && diff >= 0 && diff < 60) {
-        n = snprintf(buf, sizeof(buf), "now");
-    } else if (ts > 0 && diff > 0 && diff < 3600) {
-        int m = (int)(diff / 60);
-        if (m < 1) m = 1;
-        n = snprintf(buf, sizeof(buf), "-%dm", m);
-    } else if (ts > 0 && diff > 0 && diff < 86400) {
-        n = snprintf(buf, sizeof(buf), "-%dhr", (int)(diff / 3600));
-    } else if (ts > 0 && diff > 0 && diff < 7 * 86400) {
-        time_t t = (time_t)ts;
-        struct tm *tm = gmtime(&t);
-        n = tm ? snprintf(buf, sizeof(buf), "%s", DOG_WDAYS[tm->tm_wday])
-               : snprintf(buf, sizeof(buf), "?");
-    } else if (ts > 0) {
+    if (ts <= 0) {
+        n = snprintf(buf, sizeof(buf), "?");
+    } else {
+        i64 diff = now - ts;
         time_t t  = (time_t)ts;
         time_t tn = (time_t)now;
         //  gmtime returns a pointer to a shared static buffer; copy
-        //  the result of the first call before invoking the second
-        //  or it gets clobbered.
+        //  each result before the next call clobbers it.
         struct tm tt = {}, tnn = {};
         b8 ok_t = NO, ok_n = NO;
         struct tm *p = gmtime(&t);
         if (p) { tt = *p; ok_t = YES; }
         p = gmtime(&tn);
         if (p) { tnn = *p; ok_n = YES; }
+
+        b8 same_day  = ok_t && ok_n &&
+                       tt.tm_year == tnn.tm_year &&
+                       tt.tm_yday == tnn.tm_yday;
+        b8 less_12h  = diff >= 0 && diff < 12 * 3600;
+        b8 less_7d   = diff >= 0 && diff < 7 * 86400;
+        //  ~6 months as 183 days — coarse threshold is fine, the
+        //  same-year fallback catches the rest.
+        b8 less_6mo  = diff >= 0 && diff < 183 * 86400;
+        b8 same_year = ok_t && ok_n && tt.tm_year == tnn.tm_year;
+
         if (!ok_t) {
             n = snprintf(buf, sizeof(buf), "?");
-        } else if (ok_n && tt.tm_year == tnn.tm_year) {
-            n = snprintf(buf, sizeof(buf), "%d%s",
+        } else if (less_12h || same_day) {
+            n = snprintf(buf, sizeof(buf), "%02d:%02d",
+                         tt.tm_hour, tt.tm_min);
+        } else if (less_7d) {
+            n = snprintf(buf, sizeof(buf), "%s%02d",
+                         DOG_WDAYS[tt.tm_wday], tt.tm_mday);
+        } else if (less_6mo || same_year) {
+            n = snprintf(buf, sizeof(buf), "%02d%s",
                          tt.tm_mday, DOG_MONS[tt.tm_mon]);
         } else {
-            n = snprintf(buf, sizeof(buf), "%s%02d",
-                         DOG_MONS[tt.tm_mon], tt.tm_year % 100);
+            n = snprintf(buf, sizeof(buf), "%02d%s%02d",
+                         tt.tm_mday, DOG_MONS[tt.tm_mon],
+                         tt.tm_year % 100);
         }
-    } else {
-        n = snprintf(buf, sizeof(buf), "?");
     }
 
     if (n < 0) n = 0;
     if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
 
-    //  Pad to exactly 5 columns, centred — so a row of dates lines up
-    //  cleanly when stacked.  Width-3 ("now", "Wed") gets one space
-    //  on each side; width-4 ("-1hr") gets a trailing space; width-5
-    //  ("23Apr") prints as-is.  Width-1 ("?") gets two spaces each side.
-    int pad_total = 5 - n;
+    //  Pad to exactly 7 columns, centred — so a column of dates lines
+    //  up cleanly.  Widths emitted are 1 ("?"), 5 ("HH:MM" / "WdyDD" /
+    //  "DDMon"), or 7 ("DDMonYY"); all share parity with 7, so centred
+    //  padding is symmetric.
+    int pad_total = 7 - n;
     if (pad_total < 0) pad_total = 0;
     int pad_left  = pad_total / 2;
     int pad_right = pad_total - pad_left;

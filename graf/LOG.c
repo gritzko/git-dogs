@@ -10,7 +10,7 @@
 //                               emits a row only when the blob bytes
 //                               differ from the next-walked commit.
 //
-//  Output: one line per commit, "<sha7> <5-date> <message> (<author>)".
+//  Output: one line per commit, "<sha7> <7-date> <message> (<author>)".
 //
 //  Streaming model: every commit is emitted as its own small hunk,
 //  not one fat hunk at the end.  GRAFHunkEmit's `write()` to the bro
@@ -150,7 +150,7 @@ static void graflog_pack(u32b toks, u8b out, u8 tag) {
     (void)u32bFeed1(toks, tok32Pack(tag, (u32)u8bDataLen(out)));
 }
 
-//  Emit "<sha7> <5-date> <summary> (<author>)\n" with matching tok32
+//  Emit "<sha7> <7-date> <summary> (<author>)\n" with matching tok32
 //  spans (toks may be the zero slice for plain-ASCII paths).  Tags
 //  borrow dog/TOK.h: 'L' literal-shaped columns (sha + date), 'S'
 //  message word, 'P' parens, 'D' de-emphasised author, 'W' whitespace.

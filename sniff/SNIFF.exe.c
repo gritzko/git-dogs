@@ -297,8 +297,8 @@ static ok64 sniff_stop(u8cs reporoot) {
 //  Bare `sniff` — overview of the working tree via the unified
 //  4-way ULOG-merge classifier (`SNIFFClassify`).  Output follows
 //  the ULOG row shape — `<time>\t<status>\t<path>` — except the
-//  time is rendered human-readable via DOGutf8sFeedDate (5-char
-//  relative form: `now`, `-15m`, `-1hr`, `Tue`, `23Apr`, `Apr25`).
+//  time is rendered human-readable via DOGutf8sFeedDate (7-char
+//  relative form: `12:34`, `Tue`, `01Jan`, `01Jan25`).
 //
 //  Seven statuses, 3-char marker + colour on a tty (groups in
 //  output order — clean state first, then staged, then unstaged,
@@ -325,7 +325,7 @@ static ok64 sniff_stop(u8cs reporoot) {
 #define STATUS_ANSI_OFF "\033[0m"
 
 typedef struct {
-    //  Each listed row buffered as `<5-char-date>\t<path>\n`.  The
+    //  Each listed row buffered as `<7-char-date>\t<path>\n`.  The
     //  `ok` group never lists rows — clean tracked files would
     //  flood the output — so it's a counter only.
     Bu8 put_buf, new_buf, mod_buf, del_buf, mis_buf, unk_buf;
@@ -346,7 +346,7 @@ static i64 status_ron60_to_secs(ron60 ts) {
 
 static void status_push(Bu8 buf, u8csc path, ron60 ts, i64 now,
                         u32 *count) {
-    //  DOGutf8sFeedDate emits exactly 5 chars (centred-padded) — no
+    //  DOGutf8sFeedDate emits exactly 7 chars (centred-padded) — no
     //  per-caller padding needed.
     u8 date_buf[8];
     u8s date_into = {date_buf, date_buf + sizeof(date_buf)};

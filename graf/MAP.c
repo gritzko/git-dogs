@@ -15,7 +15,7 @@
 //  commit gets its spine glyph; others render as a single space.
 //  The commit's owner column (the deepest branch claiming it) gets
 //  the same spine — no separate marker today; fork glyphs are a
-//  later layer.  Trailing fields: <sha7> <5-date> <branch> <summary>.
+//  later layer.  Trailing fields: <sha7> <7-date> <branch> <summary>.
 //
 #include "GRAF.h"
 #include "DAG.h"
@@ -338,7 +338,7 @@ ok64 GRAFMap(uricp u) {
     qsort(commits, ncommits, sizeof(*commits), map_commit_cmp_desc);
 
     //  Render.  Each row: per-column glyph (spine if commit ∈ branch's
-    //  ancestor set, space otherwise) + sha7 + 5-date + branch + summary.
+    //  ancestor set, space otherwise) + sha7 + 7-date + branch + summary.
     //  Plain text only for now — bro pager hookup follows once the
     //  rendering is settled.
     Bu8 text = {};
@@ -369,7 +369,7 @@ ok64 GRAFMap(uricp u) {
         u8cs sha7 = {hex, hex + 7};
         (void)u8bFeed(text, sha7);
         (void)u8bFeed1(text, ' ');
-        //  5-char date
+        //  7-char date
         u8 date_buf[8];
         u8s date_into = {date_buf, date_buf + sizeof(date_buf)};
         u8cp date_start = date_into[0];
