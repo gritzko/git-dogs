@@ -69,33 +69,37 @@ static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
     a_path(fp);
     call(SNIFFFullpath, fp, g->reporoot, path);
 
+    //  256 MB cap (mmap'd, COW): linux.git has generated headers
+    //  >20 MB (drivers/gpu/drm/amd/include/asic_reg/dcn/*) that
+    //  blew through the previous 16 MB malloc.  Anonymous mmap
+    //  pages on demand, so cost is what's actually written.
     Bu8 bbuf = {};
-    call(u8bAllocate, bbuf, 1UL << 24);
+    call(u8bMap, bbuf, 1UL << 28);
     u8 bt = 0;
     sha1 entry_sha = {};
     sha1Mv(&entry_sha, (sha1 const *)esha);
     ok64 o = KEEPGetExact(k, &entry_sha, bbuf, &bt);
-    if (o != OK) { u8bFree(bbuf); return o; }
+    if (o != OK) { u8bUnMap(bbuf); return o; }
 
     if (kind == WALK_KIND_LNK) {
         FILEUnLink($path(fp));
         u8bFeed1(bbuf, 0);   // NUL-terminate so $path(bbuf) is C-string-safe
         if (FILESymLink($path(bbuf), $path(fp)) != OK) {
-            u8bFree(bbuf);
+            u8bUnMap(bbuf);
             fail(SNIFFFAIL);
         }
     } else {
         int fd = -1;
         o = FILECreate(&fd, $path(fp));
-        if (o != OK) { u8bFree(bbuf); return o; }
+        if (o != OK) { u8bUnMap(bbuf); return o; }
         u8cs data = {u8bDataHead(bbuf), u8bIdleHead(bbuf)};
         o = FILEFeedAll(fd, data);
         FILEClose(&fd);
-        if (o != OK) { u8bFree(bbuf); return o; }
+        if (o != OK) { u8bUnMap(bbuf); return o; }
         if (kind == WALK_KIND_EXE)
             FILEChmod($path(fp), 0755);
     }
-    u8bFree(bbuf);
+    u8bUnMap(bbuf);
 
     call(SNIFFAtStampPath, fp, g->ts);
     done;
@@ -330,14 +334,18 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
     call(RONutf8sDrain, &v_base, db);
     call(RONutf8sDrain, &v_tgt,  dt);
 
+    //  ULOG row buffers, one per side.  Linux's tip has ~80 K
+    //  leaves at ~80 B per row ≈ 6 MB; older 1 MB caps NOROOM'd
+    //  on big repos.  256 MB cap (mmap'd, COW) covers ~3 M leaves
+    //  without paging beyond what's actually written.
     Bu8 bu = {}, tu = {};
-    call(u8bAllocate, bu, 1UL << 20);
-    call(u8bAllocate, tu, 1UL << 20);
+    call(u8bMap, bu, 1UL << 28);
+    call(u8bMap, tu, 1UL << 28);
 
     ok64 r = OK;
     if (base_tree) r = KEEPTreeULog(k, base_tree, 0, v_base, bu);
     if (r == OK)   r = KEEPTreeULog(k, tgt_tree,  0, v_tgt,  tu);
-    if (r != OK) { u8bFree(bu); u8bFree(tu); return r; }
+    if (r != OK) { u8bUnMap(bu); u8bUnMap(tu); return r; }
 
     a_dup(u8c, view_b, u8bData(bu));
     a_dup(u8c, view_t, u8bData(tu));
@@ -357,7 +365,7 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
     u8csMv(ctx.reporoot, reporoot);
 
     ok64 mr = SNIFFMergeWalk(cursors, get_overlap_step, &ctx);
-    u8bFree(bu); u8bFree(tu);
+    u8bUnMap(bu); u8bUnMap(tu);
     if (mr != OK) return mr;
 
     if (ctx.no_base_conflicts > 0) {

@@ -738,11 +738,22 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     close(wfd); wfd = -1;
 
     //  4.  Drain the response (NAK + pack).
+    //  Buffer the whole upload-pack response.  16 GiB cap leaves
+    //  headroom for repos like linux.git (~6 GB pack + side-band
+    //  framing).  Anonymous mmap is COW zero-fill, so the unused
+    //  tail costs no physical memory.  TODO: stream-demux during
+    //  read to avoid the double-buffer (also lets us cap memory).
     Bu8 respbuf = {};
-    if (u8bMap(respbuf, 1ULL << 30) != OK) goto fetch_close;
-    if (wcli_drain_response(rfd, respbuf) != OK) {
-        u8bUnMap(respbuf);
-        goto fetch_close;
+    if (u8bMap(respbuf, 1ULL << 34) != OK) goto fetch_close;
+    {
+        ok64 dr = wcli_drain_response(rfd, respbuf);
+        if (dr != OK) {
+            fprintf(stderr, "be: wcli_drain_response failed: %s "
+                    "drained=%zu\n", ok64str(dr),
+                    (size_t)u8bDataLen(respbuf));
+            u8bUnMap(respbuf);
+            goto fetch_close;
+        }
     }
     close(rfd); rfd = -1;
 
@@ -750,32 +761,53 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     //  band-1 bytes → packbuf; then ingest.
     u8cs all = {u8bDataHead(respbuf), u8bIdleHead(respbuf)};
     Bu8 packbuf = {};
-    if (u8bMap(packbuf, 1ULL << 30) != OK) {
+    if (u8bMap(packbuf, 1ULL << 34) != OK) {
         u8bUnMap(respbuf);
         goto fetch_close;
     }
-    if (wcli_demux_pack(all, packbuf) != OK) {
-        u8bUnMap(packbuf);
-        u8bUnMap(respbuf);
-        goto fetch_close;
+    {
+        ok64 dx = wcli_demux_pack(all, packbuf);
+        if (dx != OK) {
+            fprintf(stderr,
+                    "be: wcli_demux_pack failed: %s drained=%zu "
+                    "pack=%zu\n",
+                    ok64str(dx), (size_t)u8bDataLen(respbuf),
+                    (size_t)u8bDataLen(packbuf));
+            u8bUnMap(packbuf);
+            u8bUnMap(respbuf);
+            goto fetch_close;
+        }
     }
     u8cs pack = {u8bDataHead(packbuf), u8bIdleHead(packbuf)};
     if (u8csLen(pack) >= 12) {
         a_dup(u8c, packdup, pack);
         ok64 io = KEEPIngestFile(k, packdup);
         if (io != OK) {
+            fprintf(stderr,
+                    "be: KEEPIngestFile failed: %s pack=%zu\n",
+                    ok64str(io), (size_t)u8csLen(pack));
             u8bUnMap(packbuf);
             u8bUnMap(respbuf);
             goto fetch_close;
         }
+    } else {
+        fprintf(stderr,
+                "be: pack too short: %zu bytes\n",
+                (size_t)u8csLen(pack));
     }
     u8bUnMap(packbuf);
     u8bUnMap(respbuf);
 
     //  6.  Record the ref locally under the actually-matched name,
     //  attributed to the peer URI.
-    if (wcli_record_ref(k, remote_uri, matched_ref, &want_sha) != OK)
-        goto fetch_close;
+    {
+        ok64 rr = wcli_record_ref(k, remote_uri, matched_ref, &want_sha);
+        if (rr != OK) {
+            fprintf(stderr,
+                    "be: wcli_record_ref failed: %s\n", ok64str(rr));
+            goto fetch_close;
+        }
+    }
 
     rv = OK;
 

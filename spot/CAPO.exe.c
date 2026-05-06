@@ -12,13 +12,16 @@
 #include <unistd.h>
 
 #include "abc/FILE.h"
+#include "abc/HEX.h"
 #include "abc/PATH.h"
 #include "abc/PRO.h"
+#include "abc/RON.h"
 #include "dog/CLI.h"
 #include "dog/DOG.h"
 #include "dog/HOME.h"
 #include "dog/HUNK.h"
 #include "dog/SHA1.h"
+#include "dog/ULOG.h"
 #include "keeper/KEEP.h"
 #include "keeper/REFS.h"
 #include "keeper/WALK.h"
@@ -521,89 +524,38 @@ static b8 spot_memo_hit(u64css runs, u64 blob_hl40, u32 path_h20) {
     return NO;
 }
 
+//  One row in the post-filter TODO list (rows that actually need
+//  tokenising — blobs whose (blob_h40, path_h20) pair isn't already
+//  in the BLOBFN memo).  Stored in a flat `u8b` slab so the slab
+//  itself is mmap-backed and walk-friendly.
 typedef struct {
-    spot   *s;
-    keeper *k;
-} spot_walk_ctx;
+    sha1 sha;        //  blob's git sha-1 (20 bytes)
+    u32  ext_off;    //  offset into SPOT.ext_arena
+    u32  path_h20;   //  20-bit RAPHash of the full repo-relative path
+    u32  path_off;   //  offset into ulog_buf where the path lives
+    u32  path_len;
+} spot_todo;
 
-static ok64 spot_walk_visit(u8cs path, u8 kind, u8cp esha,
-                            u8cs blob, void0p ctx) {
-    (void)blob;       // KEEPLsFiles uses lazy mode — blob is empty
-    spot_walk_ctx *cx = (spot_walk_ctx *)ctx;
-    if (kind != WALK_KIND_REG && kind != WALK_KIND_EXE &&
-        kind != WALK_KIND_LNK) return OK;
-    if ($empty(path)) return OK;
+//  Build a probe URI that KEEPResolveTree can resolve to a commit
+//  tree.  Mirrors the previous resolution policy: caller's URI as-
+//  is, falling back to `--at`'s cur_sha, then REFSResolve on the
+//  raw URI data, then `?` (trunk).  Result lands in `*out`; the
+//  fragment-buffer caller owns must outlive `*out`.  Returns YES
+//  when something resolved; NO when there's nothing to walk.
+static b8 spot_probe_uri(keeper *k, uricp u, uri *out, u8b frag_buf) {
+    *out = *u;
 
-    u8cs ext = {};
-    PATHu8sExt(ext, path);
-    if ($empty(ext) || !CAPOKnownExt(ext)) {
-        SPOT_DBG_BLOB_NO_EXT++;
-        return OK;
-    }
-
-    sha1 bsha = {};
-    memcpy(bsha.data, esha, 20);
-    u64 blob_hl40 = WHIFFHashlet40(&bsha);
-    u32 path_h20  = CAPOFnRap20(path);
-
-    //  Memo: same (blob, path) on a prior walk → nothing to do.
-    //  Reads SPOT.runs live; CAPOFlushRun / CAPOCompact re-publish
-    //  the view via CAPORefreshView before returning, so this is
-    //  safe across mid-walk emits (no stale-pointer window).
-    u64css live_runs = {};
-    CAPORuns(live_runs);
-    if (spot_memo_hit(live_runs, blob_hl40, path_h20)) {
-        SPOT_DBG_MEMO_HIT++;
-        return OK;
-    }
-
-    u32 ext_off = capo_ext_intern(cx->s, ext);
-    if (ext_off == 0) return OK;
-
-    Bu8 bbuf = {};
-    if (u8bAllocate(bbuf, 1UL << 22) != OK) return OK;
-    u8 btype = 0;
-    ok64 gr = KEEPGetExact(cx->k, &bsha, bbuf, &btype);
-    if (gr != OK || btype != DOG_OBJ_BLOB) {
-        u8bFree(bbuf);
-        return OK;
-    }
-    u8cs source = {u8bDataHead(bbuf), u8bIdleHead(bbuf)};
-
-    (void)CAPOIndexBlob(source, ext, path_h20);
-    SPOT_DBG_TOKENISED++;
-
-    //  Persist the (blob, path) row so the next walk can short-circuit.
-    (void)CAPOEmit(wh64Pack(SPOT_BLOBFN, path_h20, blob_hl40));
-
-    u8bFree(bbuf);
-    return OK;
-}
-
-ok64 SPOTIndexFromTips(keeper *k, uricp u) {
-    sane(k && u);
-    spotp s = &SPOT;
-    if (!s->rw) done;
-
-    //  No caller snapshot of the puppy stack: `spot_walk_visit` reads
-    //  `SPOT.runs` live via `CAPORuns()` on each blob, and
-    //  `CAPOFlushRun` / `CAPOCompact` re-publish the view before
-    //  returning so reads on the same thread always see a current,
-    //  unmap-safe set.
-    spot_walk_ctx cx = {.s = s, .k = k};
-
-    //  Promote a 40-hex query (`?<sha>`) or path (`<sha>`) to the
-    //  fragment slot so KEEPResolveTree takes the direct-sha branch
-    //  — its query path only resolves named refs / aliases.
-    uri raw_probe = *u;
+    //  Promote a 40-hex `?<sha>` query or `<sha>` path into the
+    //  fragment slot so the resolution path takes the direct-sha
+    //  branch — KEEPResolveTree's query-only path only resolves
+    //  named refs / aliases.
     u8cs hex_src = {};
-    if (u8csEmpty(raw_probe.fragment) &&
-        u8csLen(raw_probe.query) == 40) {
-        $mv(hex_src, raw_probe.query);
-    } else if (u8csEmpty(raw_probe.fragment) &&
-               u8csEmpty(raw_probe.query) &&
-               u8csLen(raw_probe.path) == 40) {
-        $mv(hex_src, raw_probe.path);
+    if (u8csEmpty(out->fragment) && u8csLen(out->query) == 40) {
+        $mv(hex_src, out->query);
+    } else if (u8csEmpty(out->fragment) &&
+               u8csEmpty(out->query) &&
+               u8csLen(out->path) == 40) {
+        $mv(hex_src, out->path);
     }
     if (!u8csEmpty(hex_src)) {
         b8 hex = YES;
@@ -611,55 +563,33 @@ ok64 SPOTIndexFromTips(keeper *k, uricp u) {
             u8 ch = *p;
             b8 d = (ch >= '0' && ch <= '9');
             b8 l = (ch >= 'a' && ch <= 'f');
-            b8 u_ = (ch >= 'A' && ch <= 'F');
-            if (!(d || l || u_)) { hex = NO; break; }
+            b8 U_ = (ch >= 'A' && ch <= 'F');
+            if (!(d || l || U_)) { hex = NO; break; }
         }
         if (hex) {
-            raw_probe.fragment[0] = hex_src[0];
-            raw_probe.fragment[1] = hex_src[1];
-            raw_probe.query[0] = raw_probe.query[1] = NULL;
-            raw_probe.path[0]  = raw_probe.path[1]  = NULL;
+            out->fragment[0] = hex_src[0];
+            out->fragment[1] = hex_src[1];
+            out->query[0] = out->query[1] = NULL;
+            out->path[0]  = out->path[1]  = NULL;
         }
     }
-    u = &raw_probe;
 
-    //  Pick a URI that KEEPLsFiles can resolve to a tip.  Strategy:
-    //
-    //    1. Caller URI has a fragment / non-empty query / path?ref
-    //       shape that KEEPResolveTree handles → use it as-is.
-    //    2. `--at` parked a 40-hex sha in `h->cur_sha` (BE forwards
-    //       this) → synthesise `#<cur_sha>` so KEEPResolveTree takes
-    //       the fragment branch.
-    //    3. Try REFSResolve on the original URI's data slice — this
-    //       picks up keeper's just-written `?#<sha>` trunk row after
-    //       a fresh remote fetch (URI = `ssh://host/path`, query
-    //       empty, but keeper has the resolved tip on file).
-    //    4. Last resort: probe `?` as a trunk lookup (legacy shape
-    //       sniff's GET also uses post-fetch).
-    //
-    //  Each fallback synthesises a `#<sha>` URI and dispatches to
-    //  KEEPLsFiles.  No-op silently when none of the above resolves.
-    uri probe = *u;
-    a_pad(u8, frag_buf, 64);
     b8 has_resolvable =
-        !u8csEmpty(u->fragment) ||
-        (!u8csEmpty(u->query) && u8csLen(u->query) > 0) ||
-        (!u8csEmpty(u->path)   && !u8csEmpty(u->query));
+        !u8csEmpty(out->fragment) ||
+        (!u8csEmpty(out->query) && u8csLen(out->query) > 0) ||
+        (!u8csEmpty(out->path)   && !u8csEmpty(out->query));
 
     if (!has_resolvable && u8bDataLen(k->h->cur_sha) == 40) {
         a_dup(u8c, cs, u8bData(k->h->cur_sha));
         u8bFeed(frag_buf, cs);
-        probe.fragment[0] = u8bDataHead(frag_buf);
-        probe.fragment[1] = u8bIdleHead(frag_buf);
-        probe.query[0] = probe.query[1] = NULL;
-        probe.data[0] = probe.data[1] = NULL;
+        out->fragment[0] = u8bDataHead(frag_buf);
+        out->fragment[1] = u8bIdleHead(frag_buf);
+        out->query[0] = out->query[1] = NULL;
+        out->data[0]  = out->data[1]  = NULL;
         has_resolvable = YES;
     }
 
     if (!has_resolvable) {
-        //  Fall back to keeper REFS — picks up the `?#<sha>` trunk
-        //  row keeper writes after a fresh fetch, even when the
-        //  caller's URI has no explicit query.
         a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
         a_pad(u8, arena_buf, 1024);
         uri resolved = {};
@@ -673,22 +603,296 @@ ok64 SPOTIndexFromTips(keeper *k, uricp u) {
         if (REFSResolve(&resolved, arena_buf, $path(keepdir), in_uri) == OK
             && u8csLen(resolved.query) >= 40) {
             u8bFeed(frag_buf, resolved.query);
-            probe.fragment[0] = u8bDataHead(frag_buf);
-            probe.fragment[1] = u8bIdleHead(frag_buf);
-            probe.query[0] = probe.query[1] = NULL;
-            probe.data[0] = probe.data[1] = NULL;
+            out->fragment[0] = u8bDataHead(frag_buf);
+            out->fragment[1] = u8bIdleHead(frag_buf);
+            out->query[0] = out->query[1] = NULL;
+            out->data[0]  = out->data[1]  = NULL;
             has_resolvable = YES;
         }
     }
+    return has_resolvable;
+}
 
-    //  TODO: same swallow as graf/INDEX.c — KEEPLsFiles failures are
-    //  silently treated as "nothing to walk" so BE's parallel reindex
-    //  doesn't abort on relative refs (`?..`) it forwards before sniff
-    //  rewrites them, or on a fresh-clone bootstrap with no REFS yet.
-    //  Right fix is for BE to pre-resolve and skip the reindex when
-    //  there's nothing to walk.
-    if (has_resolvable) {
-        (void)KEEPLsFiles(k, &probe, spot_walk_visit, &cx);
+//  Index one TODO row: KEEPGetExact the blob, look up its ext,
+//  tokenise via CAPOIndexBlob, emit one BLOBFN posting.  Best-
+//  effort per row — failures (oversized blob, wrong type, etc.)
+//  are silently skipped; the next walk will re-evaluate.
+static ok64 spot_index_one(keeper *k, spot_todo const *row,
+                            u8cs path, Bu8 bbuf) {
+    spotp s = &SPOT;
+    u8 btype = 0;
+    u8bReset(bbuf);
+    sha1 sha = row->sha;
+    if (KEEPGetExact(k, &sha, bbuf, &btype) != OK) return OK;
+    if (btype != DOG_OBJ_BLOB) return OK;
+    u8cs source = {u8bDataHead(bbuf), u8bIdleHead(bbuf)};
+
+    //  Resolve the ext slice from arena.
+    u8cp ext_start = u8bDataHead(s->ext_arena) + row->ext_off;
+    u8cp ext_idle  = u8bIdleHead(s->ext_arena);
+    u8cp ext_end   = ext_start;
+    while (ext_end < ext_idle && *ext_end != 0) ext_end++;
+    u8cs ext = {ext_start, ext_end};
+
+    (void)path;   // path is currently unused at index time; reserved
+                  // for future per-path diagnostics.
+    (void)CAPOIndexBlob(source, ext, row->path_h20);
+    SPOT_DBG_TOKENISED++;
+
+    u64 blob_hl40 = WHIFFHashlet40(&sha);
+    (void)CAPOEmit(wh64Pack(SPOT_BLOBFN, row->path_h20, blob_hl40));
+    return OK;
+}
+
+ok64 SPOTIndexFromTips(keeper *k, uricp u) {
+    sane(k && u);
+    spotp s = &SPOT;
+    if (!s->rw) done;
+
+    //  Phase 0 — pick a URI keeper can resolve to a commit/tree.
+    a_pad(u8, frag_buf, 64);
+    uri probe = {};
+    if (!spot_probe_uri(k, u, &probe, frag_buf)) done;
+
+    sha1 tree_sha = {};
+    if (KEEPResolveTree(k, &probe, &tree_sha) != OK) done;
+
+    //  Phase 1 — get the tip's ULOG: one row per leaf, sorted by
+    //  path, fragment carries the leaf's hex sha.  Single ~big
+    //  buffer; cheap O(tree-size) keeper walk.
+    Bu8 ulog_buf = {};
+    if (u8bMap(ulog_buf, 1UL << 28) != OK) done;
+    a_cstr(s_tgt, "tgt"); a_dup(u8c, dt, s_tgt);
+    ron60 v_tgt = 0; (void)RONutf8sDrain(&v_tgt, dt);
+    if (KEEPTreeULog(k, tree_sha.data, 0, v_tgt, ulog_buf) != OK) {
+        u8bUnMap(ulog_buf);
+        done;
     }
+
+    //  Phase 2 — filter: walk rows, drop subs/no-ext, drop memo
+    //  hits.  Build a flat `spot_todo[]` slab of rows that actually
+    //  need indexing.  Memo lookups read `SPOT.runs` live (safe
+    //  across in-walk mutations because `CAPOFlushRun` /
+    //  `CAPOCompact` re-publish the view before returning).
+    Bu8 todo_buf = {};
+    if (u8bMap(todo_buf, 1UL << 28) != OK) {
+        u8bUnMap(ulog_buf);
+        done;
+    }
+
+    {
+        a_dup(u8c, scan, u8bData(ulog_buf));
+        while (!$empty(scan)) {
+            ulogrec rec = {};
+            if (ULOGu8sDrain(scan, &rec) != OK) break;
+            //  Last RON64 letter of the verb encodes the kind:
+            //  f=file, x=exec, l=symlink, s=submodule.
+            u8 kletter = ok64Lit(rec.verb, 0);
+            if (kletter != RON_f && kletter != RON_x &&
+                kletter != RON_l) continue;
+
+            u8cs path = {rec.uri.path[0], rec.uri.path[1]};
+            if ($empty(path)) continue;
+
+            u8cs ext = {};
+            PATHu8sExt(ext, path);
+            if ($empty(ext) || !CAPOKnownExt(ext)) {
+                SPOT_DBG_BLOB_NO_EXT++;
+                continue;
+            }
+
+            //  Decode the leaf sha from the row's fragment.
+            u8cs hex = {rec.uri.fragment[0], rec.uri.fragment[1]};
+            if (u8csLen(hex) != 40) continue;
+            sha1 sha = {};
+            u8s sb = {sha.data, sha.data + 20};
+            if (HEXu8sDrainSome(sb, hex) != OK) continue;
+
+            u64 blob_hl40 = WHIFFHashlet40(&sha);
+            u32 path_h20  = CAPOFnRap20(path);
+
+            u64css live_runs = {};
+            CAPORuns(live_runs);
+            if (spot_memo_hit(live_runs, blob_hl40, path_h20)) {
+                SPOT_DBG_MEMO_HIT++;
+                continue;
+            }
+
+            u32 ext_off = capo_ext_intern(s, ext);
+            if (ext_off == 0) continue;
+
+            //  Stash the path slice as offset+length into ulog_buf
+            //  (its bytes are alive for the rest of this function).
+            u32 path_off = (u32)(path[0] - u8bDataHead(ulog_buf));
+            u32 path_len = (u32)$len(path);
+
+            spot_todo row = {
+                .sha = sha,
+                .ext_off = ext_off,
+                .path_h20 = path_h20,
+                .path_off = path_off,
+                .path_len = path_len,
+            };
+            if (u8bIdleLen(todo_buf) < sizeof(row)) break;
+            u8bFeed(todo_buf,
+                    (u8cs){(u8cp)&row, (u8cp)&row + sizeof(row)});
+        }
+    }
+
+    spot_todo *todos =
+        (spot_todo *)(void *)u8bDataHead(todo_buf);
+    size_t ntodo = u8bDataLen(todo_buf) / sizeof(spot_todo);
+
+    //  Phase 3 — index the TODO rows.
+    //
+    //  Decide single-thread vs fork-workers based on size.  Fork()
+    //  is the right model here: each child inherits keeper's mmaps
+    //  plus a COW-private copy of `k->buf1..buf4`, so KEEPGetExact
+    //  in the worker doesn't need keeper to be thread-safe.  Each
+    //  child does its own filter/index slice, writes ONE pup run
+    //  with a parent-assigned seqno, then exits.  Parent re-opens
+    //  the leaf-branch dir post-join so `SPOT.puppies` /
+    //  `SPOT.runs` pick up every worker's run, then compacts.
+    //
+    //  Threshold: at least 1000 rows per worker.  Below that, the
+    //  fork+merge overhead dwarfs the parallel win.
+    if (ntodo == 0) {
+        u8bUnMap(todo_buf);
+        u8bUnMap(ulog_buf);
+        done;
+    }
+
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < 1) ncpu = 1;
+    size_t nw_by_size = ntodo / 1000;
+    if (nw_by_size > (size_t)ncpu) nw_by_size = (size_t)ncpu;
+    if (nw_by_size < 1) nw_by_size = 1;
+    char const *thr_env = getenv("SPOT_WORKERS");
+    if (thr_env != NULL && *thr_env) {
+        long t = atol(thr_env);
+        if (t >= 1) nw_by_size = (size_t)t;
+    }
+    u32 nw = (u32)nw_by_size;
+
+    if (nw == 1) {
+        Bu8 bbuf = {};
+        if (u8bMap(bbuf, 1UL << 28) == OK) {
+            for (size_t i = 0; i < ntodo; i++) {
+                u8cp pbase = u8bDataHead(ulog_buf) + todos[i].path_off;
+                u8cs path = {pbase, pbase + todos[i].path_len};
+                (void)spot_index_one(k, &todos[i], path, bbuf);
+            }
+            u8bUnMap(bbuf);
+        }
+        u8bUnMap(todo_buf);
+        u8bUnMap(ulog_buf);
+        done;
+    }
+
+    //  Multi-worker fork path.  Parent flushes any in-flight BOX
+    //  state first (children inherit a COW-clean slate that way),
+    //  then forks `nw` children and waits.  Children re-walk their
+    //  slice into their own BOX, BOXu64Flush at end, write a pup
+    //  run with their pre-assigned seqno, exit.
+    (void)CAPOFlushRun(s);
+
+    a_pad(u8, leafdir, FILE_PATH_MAX_LEN);
+    {
+        a_dup(u8c, leaf, u8bDataC(s->leaf_branch));
+        if (spot_branch_dir(leafdir, s->h, leaf) != OK) {
+            //  Can't compute leaf dir → fall back to serial.
+            Bu8 bbuf = {};
+            if (u8bMap(bbuf, 1UL << 28) == OK) {
+                for (size_t i = 0; i < ntodo; i++) {
+                    u8cp pbase = u8bDataHead(ulog_buf) +
+                                 todos[i].path_off;
+                    u8cs path = {pbase, pbase + todos[i].path_len};
+                    (void)spot_index_one(k, &todos[i], path, bbuf);
+                }
+                u8bUnMap(bbuf);
+            }
+            u8bUnMap(todo_buf);
+            u8bUnMap(ulog_buf);
+            done;
+        }
+    }
+
+    pid_t pids[64] = {};
+    if (nw > 64) nw = 64;
+    for (u32 w = 0; w < nw; w++) {
+        size_t lo = (ntodo * w)     / nw;
+        size_t hi = (ntodo * (w+1)) / nw;
+        pid_t pid = fork();
+        if (pid < 0) {
+            //  Fork failed — fall back to inline serial for the
+            //  remaining slice in the parent.
+            Bu8 bbuf = {};
+            if (u8bMap(bbuf, 1UL << 28) == OK) {
+                for (size_t i = lo; i < hi; i++) {
+                    u8cp pbase = u8bDataHead(ulog_buf) +
+                                 todos[i].path_off;
+                    u8cs path = {pbase, pbase + todos[i].path_len};
+                    (void)spot_index_one(k, &todos[i], path, bbuf);
+                }
+                u8bUnMap(bbuf);
+            }
+            continue;
+        }
+        if (pid == 0) {
+            //  Child: index our slice into our COW-private BOX,
+            //  flush it, exit.  CAPOFlushRun goes through the
+            //  normal DOGPupCreate path, picking a fresh seqno
+            //  off the inherited puppies snapshot — works because
+            //  every child sees the SAME parent state and all the
+            //  potential collisions are between sibling children
+            //  writing in parallel.  We dodge that by stamping the
+            //  child's worker id into the file's seqno via a quick
+            //  pre-pump of synthetic puppies (see below).
+            Bu8 bbuf = {};
+            if (u8bMap(bbuf, 1UL << 28) != OK) _exit(1);
+            for (size_t i = lo; i < hi; i++) {
+                u8cp pbase = u8bDataHead(ulog_buf) +
+                             todos[i].path_off;
+                u8cs path = {pbase, pbase + todos[i].path_len};
+                (void)spot_index_one(k, &todos[i], path, bbuf);
+            }
+            u8bUnMap(bbuf);
+
+            //  Bump the inherited puppies stack by `w` synthetic
+            //  rows so DOGPupCreate's `1 + max(seqno)` lands on a
+            //  worker-unique seqno.  Sibling children write to
+            //  distinct files; parent rescans afterwards.
+            for (u32 pad = 0; pad < w; pad++) {
+                kv32 fake = {.key = (u32)(1u << 30) + pad,
+                             .val = 0};
+                (void)kv32bPush(s->puppies, &fake);
+            }
+            (void)CAPOFlushRun(s);
+            _exit(0);
+        }
+        pids[w] = pid;
+    }
+
+    //  Wait for every child.  Their pup files now exist on disk;
+    //  we need to fold them into our `SPOT.puppies` view.
+    for (u32 w = 0; w < nw; w++) {
+        if (pids[w] > 0) {
+            int status = 0;
+            (void)waitpid(pids[w], &status, 0);
+        }
+    }
+
+    //  Re-open the leaf branch dir to absorb the children's
+    //  freshly-written `<seqno>.spot.idx` files into puppies, then
+    //  refresh the typed view and compact down to the LSM ladder.
+    {
+        a_cstr(ext, CAPO_IDX_EXT);
+        (void)DOGPupOpenAll(s->puppies, $path(leafdir), ext);
+        CAPORefreshView();
+        (void)CAPOCompact(s);
+    }
+
+    u8bUnMap(todo_buf);
+    u8bUnMap(ulog_buf);
     done;
 }

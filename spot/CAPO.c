@@ -14,7 +14,11 @@ b8 CAPO_TERM = NO;
 
 // --- Forward decls used before their definitions further below ---
 static b8   spot_is_open(void);
-static ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch);
+//  Compose `<root>/.dogs/spot/<leaf>` into `out` (NUL-term).
+//  Exposed (non-static) so the parallel-worker dispatcher in
+//  CAPO.exe.c can compute the leaf-branch dir without copy-pasting
+//  the 5-line PATHu8b dance.  Internal: not part of CAPO.h.
+ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch);
 
 // Guard against assert() crashes in library code
 static sigjmp_buf capo_jmpbuf;
@@ -1307,7 +1311,7 @@ static b8 spot_is_rw = NO;
 //  Compose `<root>/.dogs/spot/<leaf_branch>` into `out`
 //  (NUL-terminated).  Mirrors `keep_branch_dir` /
 //  `graf_branch_dir`.
-static ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch) {
+ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch) {
     sane(h && out);
     u8bReset(out);
     a_dup(u8c, root_s, u8bDataC(h->root));

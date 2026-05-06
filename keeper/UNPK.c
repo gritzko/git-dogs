@@ -7,11 +7,13 @@
 //  Phase A (serial) — resolve every base object: inflate, hash, emit
 //  one wh128 entry, drain waiters.
 //
-//  Phase B (parallel) — DFS each base's subtree applying deltas.
-//  Round-robin roots across `nproc` workers; per-worker scratch
-//  bufs and emit slabs.  Each worker only writes nodes within its
-//  own subtree, so resolved[] / wh128 emit / stats are race-free
-//  without locks.
+//  Phase B (parallel via fork) — DFS each base's subtree applying
+//  deltas.  Round-robin roots across `nproc` workers; per-worker
+//  scratch bufs are allocated pre-fork so each child gets a COW-
+//  private copy of `buf_a` / `buf_b` and its own resolved[] view.
+//  No locks needed: each child mutates its own COW pages of nodes/
+//  resolved, and emits go to a per-worker SHARED-mmap'd slab so
+//  the parent can collect them after waitpid.
 //
 //  Phase C (serial) — thin-pack REF_DELTA fallback for waiters whose
 //  base lives in an earlier pack.
@@ -21,10 +23,11 @@
 #include "PACK.h"
 #include "ZINF.h"
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "abc/PRO.h"
@@ -81,7 +84,16 @@ static void unpk_dispatch(unpk_in const *in,
     in->emit(in->emit_ctx, type, sha, content);
 }
 
-//  Worker payload for parallel phase B.
+//  Per-worker shared region (MAP_SHARED|MAP_ANONYMOUS).  The child's
+//  writes here survive its `_exit(0)`; the parent reads after wait.
+//  Layout: nemit (count of entries written) + 8-byte pad to align
+//  the wh128 flexible array (16-byte alignment), then entries[].
+typedef struct {
+    u64   nemit;
+    u64   _pad;
+    wh128 entries[];
+} unpk_shared;
+
 typedef struct {
     u8cp     packbase;
     u64      packlen;
@@ -95,20 +107,34 @@ typedef struct {
     b8      *resolved;
     wh128cs  waiters;
     unpk_in const *in;
-    Bu8      buf_a;
-    Bu8      buf_b;
-    Bwh128   emit_buf;
-    u32      indexed;
-    u32      skipped;
+    Bu8      buf_a;       // private (COW per fork)
+    Bu8      buf_b;       // private (COW per fork)
+    unpk_shared *shared;  // shared mmap (parent reads post-wait)
+    size_t   shared_bytes;
+    u32      entries_cap;
 } unpk_worker;
+
+//  Append one resolved entry to the worker's shared slab.  No
+//  Bwh128 wrapper here — direct array index + counter; the parent
+//  reads `shared->nemit` after waitpid to know how many entries
+//  the child wrote.  Returns 0 on overflow (silent drop, mirrors
+//  the prior `wh128bPush != OK ⇒ skipped++` behaviour).
+static b8 unpk_worker_emit(unpk_worker *w, u32 file_id,
+                            u8 type, sha1 const *sha, u64 obj_off) {
+    if (w->shared->nemit >= w->entries_cap) return 0;
+    wh128 *slot = &w->shared->entries[w->shared->nemit++];
+    slot->key = keepKeyPack(type, WHIFFHashlet60(sha));
+    slot->val = wh64Pack(KEEP_VAL_FLAGS, file_id, obj_off);
+    return 1;
+}
 
 //  Per-worker DFS over its slice of root indices (round-robin
 //  `worker_id` modulo `nworkers`).  Same algorithm as the original
 //  serial phase B — just operates on the worker's own scratch
-//  buffers and emit slab.  Each worker only mutates nodes within
-//  its own subtrees, so concurrent runs are race-free.
-static void *unpk_worker_main(void *arg) {
-    unpk_worker *w = (unpk_worker *)arg;
+//  buffers (private/COW) and a shared emit slab the parent will
+//  drain post-wait.  Each worker only mutates nodes within its own
+//  subtrees, so concurrent runs are race-free.
+static void unpk_worker_main(unpk_worker *w) {
     u8cp packbase = w->packbase;
     u64  packlen  = w->packlen;
     u64 *offsets  = w->offsets;
@@ -131,11 +157,11 @@ static void *unpk_worker_main(void *arg) {
         u8bReset(w->buf_a);
         pack_obj robj = {};
         u8cs rfrom = {packbase + offsets[root_idx - 1], packbase + packlen};
-        if (PACKDrainObjHdr(rfrom, &robj) != OK) { w->skipped++; continue; }
-        if (robj.size > u8bIdleLen(w->buf_a)) { w->skipped++; continue; }
+        if (PACKDrainObjHdr(rfrom, &robj) != OK) continue;
+        if (robj.size > u8bIdleLen(w->buf_a)) continue;
         u8p rs = u8bIdleHead(w->buf_a);
         u8s rinto = {rs, u8bTerm(w->buf_a)};
-        if (PACKInflate(rfrom, rinto, robj.size) != OK) { w->skipped++; continue; }
+        if (PACKInflate(rfrom, rinto, robj.size) != OK) continue;
         u8bFed(w->buf_a, robj.size);
 
         int top = 0;
@@ -154,36 +180,33 @@ static void *unpk_worker_main(void *arg) {
             }
             nodes[cur].child = nodes[child].sibling;
 
-            if (top + 1 >= UNPK_MAX_CHAIN) { w->skipped++; continue; }
+            if (top + 1 >= UNPK_MAX_CHAIN) continue;
 
             u8p  base_s  = stk[top].d_start;
             u64  base_sz = (u64)(stk[top].d_end - stk[top].d_start);
 
             pack_obj dobj = {};
             u8cs dfrom = {packbase + offsets[child - 1], packbase + packlen};
-            if (PACKDrainObjHdr(dfrom, &dobj) != OK) { w->skipped++; continue; }
-            if (dobj.size > u8bIdleLen(w->buf_b)) { w->skipped++; continue; }
+            if (PACKDrainObjHdr(dfrom, &dobj) != OK) continue;
+            if (dobj.size > u8bIdleLen(w->buf_b)) continue;
 
             u8bReset(w->buf_b);
             u8s dinto = {u8bIdleHead(w->buf_b), u8bTerm(w->buf_b)};
-            if (PACKInflate(dfrom, dinto, dobj.size) != OK) { w->skipped++; continue; }
+            if (PACKInflate(dfrom, dinto, dobj.size) != OK) continue;
 
             u8cs delta_sl = {u8bIdleHead(w->buf_b), u8bIdleHead(w->buf_b) + dobj.size};
             u8cs base_sl  = {base_s, base_s + base_sz};
             u8p rstart = u8bIdleHead(w->buf_a);
             u8g aout = {rstart, rstart, u8bTerm(w->buf_a)};
-            if (DELTApply(delta_sl, base_sl, aout) != OK) { w->skipped++; continue; }
+            if (DELTApply(delta_sl, base_sl, aout) != OK) continue;
             u64 rsz = u8gLeftLen(aout);
             u8bFed(w->buf_a, rsz);
 
             sha1 sha = {};
             u8csc content = {rstart, rstart + rsz};
             KEEPObjSha(&sha, stk[0].base_type, content);
-            if (unpk_emit(w->emit_buf, w->file_id, stk[0].base_type, &sha,
-                          offsets[child - 1]) != OK) {
-                w->skipped++; continue;
-            }
-            w->indexed++;
+            if (!unpk_worker_emit(w, w->file_id, stk[0].base_type,
+                                  &sha, offsets[child - 1])) continue;
             resolved[child] = YES;
 
             {
@@ -202,7 +225,6 @@ static void *unpk_worker_main(void *arg) {
             stk[top].base_type = stk[0].base_type;
         }
     }
-    return NULL;
 }
 
 ok64 UNPKIndex(keeper *k, unpk_in const *in,
@@ -367,10 +389,18 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     u32 nw = (u32)nw_l;
 
     unpk_worker workers[UNPK_MAX_WORKERS] = {};
-    pthread_t   tids[UNPK_MAX_WORKERS]    = {};
+    pid_t       pids[UNPK_MAX_WORKERS]    = {};
     b8          buf_a_ok[UNPK_MAX_WORKERS] = {};
     b8          buf_b_ok[UNPK_MAX_WORKERS] = {};
-    b8          emit_ok [UNPK_MAX_WORKERS] = {};
+    b8          shared_ok[UNPK_MAX_WORKERS] = {};
+
+    //  Each worker's emit slab caps at `count` (worst case every
+    //  resolved object lands in one worker).  MAP_SHARED|ANON pages
+    //  are demand-faulted, so the unused tail costs no RAM.
+    u32 entries_cap = (count ? count : 1);
+    size_t shared_bytes = sizeof(unpk_shared) +
+                          (size_t)entries_cap * sizeof(wh128);
+
     for (u32 w = 0; w < nw; w++) {
         workers[w] = (unpk_worker){
             .packbase  = packbase,
@@ -384,62 +414,74 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
             .nodes     = nodes,
             .resolved  = resolved,
             .in        = in,
+            .entries_cap = entries_cap,
+            .shared_bytes = shared_bytes,
         };
-        //  `waiters` is a 2-pointer array — can't be set via
-        //  designated initializer (the standard forbids assigning
-        //  arrays).  Copy element-wise.
         workers[w].waiters[0] = waiters[0];
         workers[w].waiters[1] = waiters[1];
         if (u8bMap(workers[w].buf_a, UNPK_WORKER_BUFSZ) != OK) goto worker_alloc_fail;
         buf_a_ok[w] = YES;
         if (u8bMap(workers[w].buf_b, UNPK_WORKER_BUFSZ) != OK) goto worker_alloc_fail;
         buf_b_ok[w] = YES;
-        //  Per-worker emit slab: cap at `count` entries per worker
-        //  (worst case every child winds up here); zero-cost virtually.
-        if (wh128bAllocate(workers[w].emit_buf,
-                            count ? count : 1) != OK)
-            goto worker_alloc_fail;
-        emit_ok[w] = YES;
+        void *p = mmap(NULL, shared_bytes,
+                       PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) goto worker_alloc_fail;
+        workers[w].shared = (unpk_shared *)p;
+        workers[w].shared->nemit = 0;
+        shared_ok[w] = YES;
     }
     goto worker_alloc_ok;
 worker_alloc_fail:
     for (u32 w = 0; w < nw; w++) {
-        if (buf_a_ok[w]) u8bUnMap(workers[w].buf_a);
-        if (buf_b_ok[w]) u8bUnMap(workers[w].buf_b);
-        if (emit_ok[w])  wh128bFree(workers[w].emit_buf);
+        if (buf_a_ok[w])  u8bUnMap(workers[w].buf_a);
+        if (buf_b_ok[w])  u8bUnMap(workers[w].buf_b);
+        if (shared_ok[w]) munmap(workers[w].shared, workers[w].shared_bytes);
     }
     wh128bFree(waiters_buf);
     free(resolved); free(nodes); free(offsets); free(types);
     return UNPKNOROOM;
 worker_alloc_ok:;
 
-    //  Spawn workers 1..nw-1; main thread runs worker 0 in-place so
-    //  the common nproc=1 case has zero pthread overhead.
+    //  Spawn workers 1..nw-1 via fork(); the parent runs worker 0
+    //  in-place so the common nproc=1 case has no fork overhead.
+    //  Each child inherits keeper's mmaps + a COW-private copy of
+    //  buf_a / buf_b, writes its emits into the shared slab, and
+    //  _exit(0)s.  Parent reads back via the shared mmap.
     for (u32 w = 1; w < nw; w++) {
-        if (pthread_create(&tids[w], NULL, unpk_worker_main,
-                           &workers[w]) != 0) {
-            //  Spawn failed — fall back to inline run for this slice.
-            tids[w] = 0;
-            (void)unpk_worker_main(&workers[w]);
+        pid_t pid = fork();
+        if (pid < 0) {
+            //  Fork failed — run this worker inline in the parent.
+            pids[w] = 0;
+            unpk_worker_main(&workers[w]);
+            continue;
         }
+        if (pid == 0) {
+            unpk_worker_main(&workers[w]);
+            _exit(0);
+        }
+        pids[w] = pid;
     }
-    (void)unpk_worker_main(&workers[0]);
+    unpk_worker_main(&workers[0]);
     for (u32 w = 1; w < nw; w++) {
-        if (tids[w]) pthread_join(tids[w], NULL);
+        if (pids[w] > 0) {
+            int status = 0;
+            (void)waitpid(pids[w], &status, 0);
+        }
     }
 
-    //  Merge per-worker output into the caller's `out` buffer; sum
-    //  per-worker stats into st.
+    //  Merge per-worker output into the caller's `out` buffer.
+    //  Phase B's `indexed` count = sum of per-worker `nemit`s.
     for (u32 w = 0; w < nw; w++) {
-        a_dup(wh128c, slab, wh128bData(workers[w].emit_buf));
-        for (wh128cp p = slab[0]; p < slab[1]; p++) {
-            if (wh128bPush(out, p) != OK) { st.skipped++; break; }
+        u64 nemit = workers[w].shared->nemit;
+        wh128 const *src = workers[w].shared->entries;
+        for (u64 i = 0; i < nemit; i++) {
+            if (wh128bPush(out, &src[i]) != OK) { st.skipped++; break; }
         }
-        st.indexed += workers[w].indexed;
-        st.skipped += workers[w].skipped;
+        st.indexed += (u32)nemit;
         u8bUnMap(workers[w].buf_a);
         u8bUnMap(workers[w].buf_b);
-        wh128bFree(workers[w].emit_buf);
+        munmap(workers[w].shared, workers[w].shared_bytes);
     }
 
     //  Thin-pack fallback: REF_DELTAs whose base lives in an earlier

@@ -20,6 +20,11 @@
         }                                                \
     } while (0)
 
+// --- Internal: leaf branch dir composer (definition in CAPO.c) ---
+//  Compose `<root>/.dogs/spot/<leaf>` into `out` (NUL-terminated).
+//  Used by CAPO.exe.c's parallel-worker dispatcher.
+ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch);
+
 // --- Display helpers ---
 void CAPOProgress(const char *line);
 b8 CAPOExtIs(u8csc ext, const char *a, const char *b);

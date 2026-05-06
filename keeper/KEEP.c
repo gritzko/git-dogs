@@ -1946,7 +1946,12 @@ ok64 KEEPIngestFile(keeper *k, u8csc bytes) {
         pack_offset = u8bDataLen(log);
     } else {
         test(kv32bDataLen(k->packs) < KEEP_MAX_FILES, KEEPNOROOM);
-        call(FILEBookCreate, &log, $path(packpath), 1ULL << 30, 4096);
+        //  16 GiB cap matches the append path above; keeps fresh
+        //  clones of multi-GB repos (linux.git ~6 GB, ~3.4 GB after
+        //  side-band demux) from BNOROOM'ing inside u8bFeed.  The
+        //  file is `posix_fallocate`d sparsely — physical bytes
+        //  follow `u8bFeed`, so the unused tail costs nothing.
+        call(FILEBookCreate, &log, $path(packpath), 16ULL << 30, 4096);
         //  Lay down the one-and-only file-level PACK header with
         //  count=0; patched below after the append.
         call(PACKu8sFeedHdr, u8bIdle(log), 0);
