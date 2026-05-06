@@ -334,10 +334,37 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     //  drain_waiters mutates parent.child for late-arriving REF_DELTA
     //  waiters — that parent is the worker's own current node, so
     //  same-thread, no lock needed.
+    //  Worker count: scale with pack size, not just nproc.  Each
+    //  worker pays a fixed cost (pthread create + 2× 1 GB anon mmap
+    //  for buf_a/buf_b) which only amortises when the worker has
+    //  real work to do.  Toy-repo tests (a few KB) and small
+    //  refspec deltas should run single-threaded; multi-MB packs
+    //  scale up to nproc.
+    //
+    //  Threshold = `UNPK_MB_PER_WORKER` MB per worker (default 16),
+    //  capped at `_SC_NPROCESSORS_ONLN` and UNPK_MAX_WORKERS.
+    //  `UNPK_THREADS=N` env override wins for ad-hoc benchmarking.
+    u64 packbytes = packlen;
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpu < 1) ncpu = 1;
-    if (ncpu > UNPK_MAX_WORKERS) ncpu = UNPK_MAX_WORKERS;
-    u32 nw = (u32)ncpu;
+    u64 mb_per_worker = 16;
+    char const *mbpw_env = getenv("UNPK_MB_PER_WORKER");
+    if (mbpw_env != NULL && *mbpw_env) {
+        u64 m = (u64)atol(mbpw_env);
+        if (m > 0) mb_per_worker = m;
+    }
+    u64 nw_by_size = packbytes / (mb_per_worker << 20);
+    if (nw_by_size < 1) nw_by_size = 1;
+    long nw_l = (long)nw_by_size;
+    if (nw_l > ncpu) nw_l = ncpu;
+    char const *thr_env = getenv("UNPK_THREADS");
+    if (thr_env != NULL && *thr_env) {
+        long t = atol(thr_env);
+        if (t >= 1) nw_l = t;
+    }
+    if (nw_l > UNPK_MAX_WORKERS) nw_l = UNPK_MAX_WORKERS;
+    if (nw_l < 1) nw_l = 1;
+    u32 nw = (u32)nw_l;
 
     unpk_worker workers[UNPK_MAX_WORKERS] = {};
     pthread_t   tids[UNPK_MAX_WORKERS]    = {};

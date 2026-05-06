@@ -260,8 +260,10 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
 
     //  Unattributed mtime: hash wt bytes and compare to baseline.
     //  Equal → clean stamp drift, let checkout overwrite + restamp
-    //  (silent fall-through).  Different → real local edit, schedule
-    //  a weave-merge after the checkout pass.
+    //  (silent fall-through) — UNLESS tgt is absent (deletion), in
+    //  which case the WRITE pass never visits this path and the
+    //  unlink branch below has to do the work.  Different → real
+    //  local edit, schedule a weave-merge.
     if (!SNIFFAtKnown(mr) && base) {
         sha1 wt_sha = {};
         b8 hashed = NO;
@@ -286,16 +288,21 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
             HEXu8sDrainSome(bin_s, hex_dup);
         }
         if (hashed && memcmp(wt_sha.data, base_sha.data, 20) == 0) {
-            //  Clean drift — fall through, checkout will restamp.
+            //  Clean drift.  If tgt also has the path, the WRITE pass
+            //  will overwrite + restamp — silent fall-through.  If tgt
+            //  is absent (deletion), fall through to the unlink branch
+            //  below; otherwise the file lingers in the wt forever
+            //  because nothing visits it again.
+            if (tgt) return OK;
+            //  base && !tgt → drop into the clean-delete arm below.
+        } else {
+            //  Real local edit: schedule for weave-merge.  The drain
+            //  pass (`get_drain_merges`) will read wt-on-disk after
+            //  the checkout pass skips this path.
+            u8bFeed(c->merges_out, path);
+            u8bFeed1(c->merges_out, '\n');
             return OK;
         }
-
-        //  Real local edit: schedule for weave-merge.  The drain
-        //  pass (`get_drain_merges`) will read wt-on-disk after the
-        //  checkout pass skips this path.
-        u8bFeed(c->merges_out, path);
-        u8bFeed1(c->merges_out, '\n');
-        return OK;
     }
     if (base && !tgt) {
         //  Clean delete: schedule unlink.
