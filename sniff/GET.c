@@ -373,8 +373,11 @@ static ok64 get_overlap_check(keeper *k, u8cs reporoot,
 
 //  Drain a newline-separated path list and unlink each entry.  Paths
 //  came from get_overlap_check's classifier, which already verified
-//  presence + clean stamp; defensive lstat is omitted.  Reports the
-//  count to stderr to mirror the prior `pruned %u file(s)` notice.
+//  presence + clean stamp; defensive lstat is omitted.  After
+//  unlinking we walk back up each path's parent chain and `rmdir`
+//  every directory that became empty — git's checkout collapses
+//  empty dirs the same way, and rsync flags surviving ones as
+//  `*deleting <dir>/`.  Reports the file count to stderr.
 static ok64 get_drain_unlinks(u8cs reporoot, u8cs unlinks) {
     sane($ok(reporoot));
     u32 dropped = 0;
@@ -386,6 +389,27 @@ static ok64 get_drain_unlinks(u8cs reporoot, u8cs unlinks) {
         a_path(fp);
         if (SNIFFFullpath(fp, reporoot, path) != OK) continue;
         if (FILEUnLink($path(fp)) == OK) dropped++;
+        //  Walk up: rmdir any newly-empty parent until we hit a
+        //  non-empty dir, the reporoot, or rmdir fails (ENOTEMPTY).
+        //  We mutate `fp` in place by truncating at the last `/`.
+        u8 *base_p = u8bDataHead(fp);
+        u8 *end_p  = u8bIdleHead(fp);
+        a_dup(u8c, root_s, reporoot);
+        size_t root_len = (size_t)$len(root_s);
+        for (;;) {
+            //  Trim trailing path component including its slash.
+            u8 *slash = NULL;
+            for (u8 *p = base_p; p < end_p; p++)
+                if (*p == '/') slash = p;
+            if (!slash) break;
+            //  Don't try to rmdir at-or-above reporoot.
+            size_t prefix_len = (size_t)(slash - base_p);
+            if (prefix_len <= root_len) break;
+            *slash = 0;
+            ((u8 **)fp)[2] = slash;       // idle = slash
+            if (rmdir((char const *)base_p) != 0) break;
+            end_p = slash;
+        }
     }
     if (dropped > 0)
         fprintf(stderr, "sniff: pruned %u file(s)\n", dropped);
@@ -608,12 +632,47 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
                 Bu8 cbuf = {};
                 if (u8bAllocate(cbuf, 1UL << 24) == OK) {
                     u8 ctype = 0;
-                    if (KEEPGet(k, bhashlet, 40, cbuf, &ctype) == OK &&
-                        ctype == DOG_OBJ_COMMIT) {
-                        u8cs cbody = {u8bDataHead(cbuf),
-                                      u8bIdleHead(cbuf)};
-                        if (GITu8sCommitTree(cbody, base_tree.data) == OK)
-                            has_base_tree = YES;
+                    if (KEEPGet(k, bhashlet, 40, cbuf, &ctype) == OK) {
+                        //  Peel annotated tag → commit (mill-tags
+                        //  baselines like `?tags/v2.52.0` resolve
+                        //  to a TAG object, not the commit it
+                        //  points at).  Mirrors KEEPResolveTree.
+                        if (ctype == DOG_OBJ_TAG) {
+                            a_dup(u8c, tbody, u8bData(cbuf));
+                            u8cs tf = {}, tv = {};
+                            sha1 tag_target = {};
+                            b8 got = NO;
+                            while (GITu8sDrainCommit(tbody, tf, tv) == OK) {
+                                if (u8csEmpty(tf)) break;
+                                if (u8csLen(tf) == 6 &&
+                                    memcmp(tf[0], "object", 6) == 0 &&
+                                    u8csLen(tv) >= 40) {
+                                    u8s sb = {tag_target.data,
+                                              tag_target.data + 20};
+                                    u8cs hx = {tv[0], tv[0] + 40};
+                                    if (HEXu8sDrainSome(sb, hx) == OK)
+                                        got = YES;
+                                    break;
+                                }
+                            }
+                            if (got) {
+                                u64 ch = WHIFFHashlet60(&tag_target);
+                                u8bReset(cbuf);
+                                ctype = 0;
+                                (void)KEEPGet(k, ch, 40, cbuf, &ctype);
+                                //  Override base_commit_sha with the
+                                //  peeled commit so weave-merge sees
+                                //  the right history root.
+                                memcpy(base_commit_sha.data,
+                                       tag_target.data, 20);
+                            }
+                        }
+                        if (ctype == DOG_OBJ_COMMIT) {
+                            u8cs cbody = {u8bDataHead(cbuf),
+                                          u8bIdleHead(cbuf)};
+                            if (GITu8sCommitTree(cbody, base_tree.data) == OK)
+                                has_base_tree = YES;
+                        }
                     }
                     u8bFree(cbuf);
                 }
