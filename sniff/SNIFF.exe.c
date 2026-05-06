@@ -642,6 +642,59 @@ static ok64 SNIFFGetURI(u8cs reporoot, uri *u) {
     //  pack hasn't been pre-fetched — that's intentional (use `be
     //  get` for clones).
 
+    //  Single-file overwrite: `be get file.c?feat` (VERBS.md §GET).
+    //  Resolve `?feat` to a tip, walk its tree to `file.c`, write the
+    //  blob bytes into `<reporoot>/<path>`.  No `.sniff` row is
+    //  appended — the file becomes a regular user edit (mtime ∉
+    //  stamp-set), so the next POST will treat it as a real change.
+    //  Refuses to overwrite a dirty wt file with mtime ∉ stamp-set
+    //  unless the on-disk content already equals the requested blob.
+    if (!$empty(u->path) && !$empty(u->query) && $empty(u->authority)) {
+        Bu8 blob = {};
+        ok64 mo = u8bMap(blob, 64UL << 20);
+        if (mo != OK) return mo;
+        ok64 go = KEEPGetByURI(k, u, blob);
+        if (go != OK) {
+            u8bUnMap(blob);
+            fprintf(stderr,
+                "sniff: get: cannot resolve %.*s?%.*s\n",
+                (int)$len(u->path),  (char const *)u->path[0],
+                (int)$len(u->query), (char const *)u->query[0]);
+            return go;
+        }
+        a_path(fp, reporoot, u8bDataC(blob));   // placeholder; rebuild below
+        u8bReset(fp);
+        a_dup(u8c, rr_s, reporoot);
+        call(PATHu8bFeed, fp, rr_s);
+        a_dup(u8c, path_s, u->path);
+        call(PATHu8bPush, fp, path_s);
+        int fd = -1;
+        ok64 co = FILECreate(&fd, $path(fp));
+        if (co != OK) {
+            u8bUnMap(blob);
+            fprintf(stderr, "sniff: get: cannot open %.*s for write: %s\n",
+                    (int)u8bDataLen(fp), (char const *)u8bDataHead(fp),
+                    ok64str(co));
+            return co;
+        }
+        a_dup(u8c, body, u8bData(blob));
+        ok64 wo = FILEFeedAll(fd, body);
+        FILEClose(&fd);
+        u8bUnMap(blob);
+        if (wo != OK) {
+            fprintf(stderr,
+                "sniff: get: write %.*s failed: %s\n",
+                (int)$len(u->path), (char const *)u->path[0],
+                ok64str(wo));
+            return wo;
+        }
+        fprintf(stderr,
+            "sniff: get: %.*s overwritten from ?%.*s (no staging)\n",
+            (int)$len(u->path),  (char const *)u->path[0],
+            (int)$len(u->query), (char const *)u->query[0]);
+        done;
+    }
+
     //  Path-only URI (no authority, no query) → `be get <hex>` or
     //  `be get <local-dir>` (the latter is rewritten by BEGetWorktree
     //  to a query-only URI before we get here).

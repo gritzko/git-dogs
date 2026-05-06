@@ -436,6 +436,25 @@ static ok64 BEGet(cli *c, b8 seq) {
     //  Local file: URI → wire this cwd as a worktree of a sibling repo.
     call(BEGetWorktree, u);
 
+    //  Single-file overwrite: `be get file.c?feat` (VERBS.md §GET).
+    //  Path+query (no authority) is a one-file checkout — bypass the
+    //  spot/graf parallel index pipeline and route only to sniff,
+    //  which fetches the blob via keeper and overwrites the wt file
+    //  without touching `.sniff` (no `get`/`put` row appended).
+    if (u != NULL && !$empty(u->path) && !$empty(u->query) &&
+        $empty(u->authority)) {
+        a_pad(u8cs, args, 4 + CLI_MAX_FLAGS * 2 + CLI_MAX_URIS);
+        a_cstr(get_s,   "get");
+        a_cstr(sniff_s, "sniff");
+        a_dup(u8c, sniff_d, sniff_s);
+        a_dup(u8c, get_d,   get_s);
+        be_build_argv(args, sniff_d, get_d, c);
+        a_dup(u8cs, argv, u8csbData(args));
+        call(BERun, sniff_d, argv, NO);
+        (void)seq;
+        done;
+    }
+
     //  Fresh-clone bootstrap: a remote URI with no .dogs/ anywhere up
     //  to / needs an empty .dogs/ in cwd so the downstream dog can
     //  place its subdir.
