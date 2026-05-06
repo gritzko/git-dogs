@@ -629,6 +629,200 @@ static ok64 sniff_get_by_refkey(u8cs reporoot, u8csc keepdir,
     return GETCheckout(reporoot, resolved.query, refkey);
 }
 
+// --- Path+query GET helpers -----------------------------------------
+//
+//  Both helpers are no-staging (no `.sniff` row) overwrites of wt
+//  files from another branch's tip.  Single-file form fetches one
+//  blob via `KEEPGetByURI`; subtree form drains the target tree's
+//  leaves via `KEEPTreeULog` and writes every leaf under the
+//  requested prefix.
+
+static ok64 sniff_get_blob_to_wt(u8cs reporoot, uri *u) {
+    sane(u);
+    keeper *k = &KEEP;
+    Bu8 blob = {};
+    call(u8bMap, blob, 64UL << 20);
+    ok64 go = KEEPGetByURI(k, u, blob);
+    if (go != OK) {
+        u8bUnMap(blob);
+        fprintf(stderr,
+            "sniff: get: cannot resolve %.*s?%.*s\n",
+            (int)$len(u->path),  (char const *)u->path[0],
+            (int)$len(u->query), (char const *)u->query[0]);
+        return go;
+    }
+    a_path(fp);
+    a_dup(u8c, rr_s, reporoot);
+    call(PATHu8bFeed, fp, rr_s);
+    a_dup(u8c, path_s, u->path);
+    call(PATHu8bPush, fp, path_s);
+    int fd = -1;
+    ok64 co = FILECreate(&fd, $path(fp));
+    if (co != OK) {
+        u8bUnMap(blob);
+        fprintf(stderr, "sniff: get: cannot open %.*s for write: %s\n",
+                (int)u8bDataLen(fp), (char const *)u8bDataHead(fp),
+                ok64str(co));
+        return co;
+    }
+    a_dup(u8c, body, u8bData(blob));
+    ok64 wo = FILEFeedAll(fd, body);
+    FILEClose(&fd);
+    u8bUnMap(blob);
+    if (wo != OK) {
+        fprintf(stderr,
+            "sniff: get: write %.*s failed: %s\n",
+            (int)$len(u->path), (char const *)u->path[0],
+            ok64str(wo));
+        return wo;
+    }
+    fprintf(stderr,
+        "sniff: get: %.*s overwritten from ?%.*s (no staging)\n",
+        (int)$len(u->path),  (char const *)u->path[0],
+        (int)$len(u->query), (char const *)u->query[0]);
+    done;
+}
+
+//  Resolve `?ref` (URI's data) to the commit's tree sha-1.  Mirror of
+//  graf/LOG.c's commit→tree extractor; lives here to avoid a graf
+//  dependency in sniff for one helper.
+static ok64 sniff_get_subtree_resolve_tree(uri *u, sha1 *tree_out) {
+    sane(u && tree_out);
+    keeper *k = &KEEP;
+    a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+
+    a_pad(u8, arena, 1024);
+    uri resolved = {};
+    a_dup(u8c, in_uri, u->data);
+    ok64 ro = REFSResolve(&resolved, arena, $path(keepdir), in_uri);
+    if (ro != OK || u8csLen(resolved.query) != 40) return SNIFFNONE;
+
+    sha1 commit_sha = {};
+    {
+        u8s sb = {commit_sha.data, commit_sha.data + 20};
+        a_dup(u8c, hx, resolved.query);
+        if (HEXu8sDrainSome(sb, hx) != OK) return SNIFFFAIL;
+    }
+    Bu8 cbuf = {};
+    call(u8bMap, cbuf, 1UL << 20);
+    u8 ot = 0;
+    ok64 go = KEEPGetExact(k, &commit_sha, cbuf, &ot);
+    if (go != OK || ot != DOG_OBJ_COMMIT) {
+        u8bUnMap(cbuf);
+        return go == OK ? SNIFFFAIL : go;
+    }
+    a_dup(u8c, scan, u8bDataC(cbuf));
+    u8cs field = {}, value = {};
+    b8 got = NO;
+    while (GITu8sDrainCommit(scan, field, value) == OK) {
+        if (u8csEmpty(field)) break;
+        a_cstr(ft, "tree");
+        if ($eq(field, ft) && u8csLen(value) >= 40) {
+            u8s sb = {tree_out->data, tree_out->data + 20};
+            a_dup(u8c, hx2, value);
+            if (HEXu8sDrainSome(sb, hx2) == OK) got = YES;
+            break;
+        }
+    }
+    u8bUnMap(cbuf);
+    return got ? OK : SNIFFFAIL;
+}
+
+static ok64 sniff_get_subtree_to_wt(u8cs reporoot, uri *u) {
+    sane(u);
+    keeper *k = &KEEP;
+
+    sha1 tree_sha = {};
+    ok64 tr = sniff_get_subtree_resolve_tree(u, &tree_sha);
+    if (tr != OK) {
+        fprintf(stderr,
+            "sniff: get: cannot resolve %.*s?%.*s\n",
+            (int)$len(u->path),  (char const *)u->path[0],
+            (int)$len(u->query), (char const *)u->query[0]);
+        return tr;
+    }
+
+    //  Drain the target tree's full leaf set.  KEEPTreeULog's verb
+    //  stem is arbitrary — we only read uri.path / uri.fragment from
+    //  each row.
+    a_cstr(stem_s, "leaf");
+    a_dup(u8c, stem_dup, stem_s);
+    ron60 v_leaf = 0;
+    call(RONutf8sDrain, &v_leaf, stem_dup);
+    Bu8 ulog = {};
+    call(u8bAllocate, ulog, 4UL << 20);
+    ok64 lr = KEEPTreeULog(k, tree_sha.data, 0, v_leaf, ulog);
+    if (lr != OK) { u8bFree(ulog); return lr; }
+
+    //  Filter rows by the requested subtree prefix.  Path slice
+    //  carries the trailing `/`; KEEPTreeULog emits paths with no
+    //  trailing slash, so `<prefix>` matches `<prefix>/<...>` after
+    //  comparing the prefix bytes including the final `/`.
+    u8cs prefix = {u->path[0], u->path[1]};
+    Bu8 blob = {};
+    call(u8bMap, blob, 64UL << 20);
+    u32 n_written = 0;
+    a_dup(u8c, scan, u8bData(ulog));
+    while (!u8csEmpty(scan)) {
+        ulogrec rec = {};
+        ok64 dr = ULOGu8sDrain(scan, &rec);
+        if (dr == NODATA) break;
+        if (dr != OK) continue;
+        u8cs rp = {rec.uri.path[0], rec.uri.path[1]};
+        if ($len(rp) <= $len(prefix)) continue;
+        if (memcmp(rp[0], prefix[0], (size_t)$len(prefix)) != 0) continue;
+        if (u8csLen(rec.uri.fragment) != 40) continue;
+
+        sha1 leaf_sha = {};
+        {
+            u8s sb = {leaf_sha.data, leaf_sha.data + 20};
+            a_dup(u8c, hx, rec.uri.fragment);
+            if (HEXu8sDrainSome(sb, hx) != OK) continue;
+        }
+        u8bReset(blob);
+        u8 ot = 0;
+        if (KEEPGetExact(k, &leaf_sha, blob, &ot) != OK) continue;
+
+        a_path(fp);
+        a_dup(u8c, rr_s, reporoot);
+        call(PATHu8bFeed, fp, rr_s);
+        //  rp is multi-segment (e.g. "src/x.c"); use Add (segment-
+        //  by-segment) — PATHu8bPush would reject the embedded '/'.
+        a_dup(u8c, path_s, rp);
+        call(PATHu8bAdd, fp, path_s);
+        //  mkdir -p the parent dir.
+        a_path(parent);
+        a_dup(u8c, fp_s, u8bDataC(fp));
+        call(PATHu8bFeed, parent, fp_s);
+        call(PATHu8bPop, parent);
+        (void)FILEMakeDirP($path(parent));
+
+        int fd = -1;
+        ok64 co = FILECreate(&fd, $path(fp));
+        if (co != OK) {
+            fprintf(stderr,
+                "sniff: get: cannot open %.*s for write: %s\n",
+                (int)u8bDataLen(fp), (char const *)u8bDataHead(fp),
+                ok64str(co));
+            continue;
+        }
+        a_dup(u8c, body, u8bData(blob));
+        (void)FILEFeedAll(fd, body);
+        FILEClose(&fd);
+        n_written++;
+    }
+    u8bUnMap(blob);
+    u8bFree(ulog);
+
+    fprintf(stderr,
+        "sniff: get: %u file(s) under %.*s overwritten from ?%.*s "
+        "(no staging, no prune)\n",
+        n_written,
+        (int)$len(u->path),  (char const *)u->path[0],
+        (int)$len(u->query), (char const *)u->query[0]);
+    done;
+}
+
 static ok64 SNIFFGetURI(u8cs reporoot, uri *u) {
     sane(u);
     keeper *k = &KEEP;
@@ -642,57 +836,19 @@ static ok64 SNIFFGetURI(u8cs reporoot, uri *u) {
     //  pack hasn't been pre-fetched — that's intentional (use `be
     //  get` for clones).
 
-    //  Single-file overwrite: `be get file.c?feat` (VERBS.md §GET).
-    //  Resolve `?feat` to a tip, walk its tree to `file.c`, write the
-    //  blob bytes into `<reporoot>/<path>`.  No `.sniff` row is
-    //  appended — the file becomes a regular user edit (mtime ∉
-    //  stamp-set), so the next POST will treat it as a real change.
-    //  Refuses to overwrite a dirty wt file with mtime ∉ stamp-set
-    //  unless the on-disk content already equals the requested blob.
+    //  Path+query, no authority — single-file or subtree overlay
+    //  from another branch's tip (VERBS.md §GET).  Trailing `/` on
+    //  the path picks subtree mode; no slash means single file.
+    //  No `.sniff` row is appended either way (no staging — the
+    //  written paths land as regular user edits).  No pruning — wt
+    //  files outside the target tree stay put (per project rule:
+    //  GET overwrites unconditionally; we don't try to be clever
+    //  about dirty wt state, but also don't sweep extras).
     if (!$empty(u->path) && !$empty(u->query) && $empty(u->authority)) {
-        Bu8 blob = {};
-        ok64 mo = u8bMap(blob, 64UL << 20);
-        if (mo != OK) return mo;
-        ok64 go = KEEPGetByURI(k, u, blob);
-        if (go != OK) {
-            u8bUnMap(blob);
-            fprintf(stderr,
-                "sniff: get: cannot resolve %.*s?%.*s\n",
-                (int)$len(u->path),  (char const *)u->path[0],
-                (int)$len(u->query), (char const *)u->query[0]);
-            return go;
-        }
-        a_path(fp, reporoot, u8bDataC(blob));   // placeholder; rebuild below
-        u8bReset(fp);
-        a_dup(u8c, rr_s, reporoot);
-        call(PATHu8bFeed, fp, rr_s);
-        a_dup(u8c, path_s, u->path);
-        call(PATHu8bPush, fp, path_s);
-        int fd = -1;
-        ok64 co = FILECreate(&fd, $path(fp));
-        if (co != OK) {
-            u8bUnMap(blob);
-            fprintf(stderr, "sniff: get: cannot open %.*s for write: %s\n",
-                    (int)u8bDataLen(fp), (char const *)u8bDataHead(fp),
-                    ok64str(co));
-            return co;
-        }
-        a_dup(u8c, body, u8bData(blob));
-        ok64 wo = FILEFeedAll(fd, body);
-        FILEClose(&fd);
-        u8bUnMap(blob);
-        if (wo != OK) {
-            fprintf(stderr,
-                "sniff: get: write %.*s failed: %s\n",
-                (int)$len(u->path), (char const *)u->path[0],
-                ok64str(wo));
-            return wo;
-        }
-        fprintf(stderr,
-            "sniff: get: %.*s overwritten from ?%.*s (no staging)\n",
-            (int)$len(u->path),  (char const *)u->path[0],
-            (int)$len(u->query), (char const *)u->query[0]);
-        done;
+        b8 is_subtree = (*u8csLast(u->path) == '/');
+        if (!is_subtree)
+            return sniff_get_blob_to_wt(reporoot, u);
+        return sniff_get_subtree_to_wt(reporoot, u);
     }
 
     //  Path-only URI (no authority, no query) → `be get <hex>` or
