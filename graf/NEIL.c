@@ -376,6 +376,12 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
 // One pass of boundary shifting.  Returns OK and sets *changed=YES if
 // any region was actually shifted.  Coalescing 0-length entries and
 // merging adjacent same-op runs happens after this in NEILShift.
+//
+// Uses running counters (oi_run/ni_run) instead of a precomputed
+// offset table — earlier shifts within the same pass change EDL
+// lengths, which would invalidate stale offsets and let the
+// identifier-preservation cap miss the wrong tokens (see
+// graf/test/NEIL01.c crash_f02c1360).
 static ok64 neil_shift_pass(e32g edl, u32cs old_toks, u32cs new_toks,
                              u8csc old_src, u8csc new_src, b8 *changed) {
     sane(edl != NULL && changed != NULL);
@@ -386,58 +392,46 @@ static ok64 neil_shift_pass(e32g edl, u32cs old_toks, u32cs new_toks,
     u32 new_ntoks = (u32)$len(new_toks);
     u32 old_ntoks = (u32)$len(old_toks);
 
-    Bu32 oobuf = {}, nobuf = {};
-    ok64 ao = u32bAlloc(oobuf, nedl);
-    ok64 no = u32bAlloc(nobuf, nedl);
-    if (ao != OK || no != OK) {
-        u32bFree(oobuf); u32bFree(nobuf);
-        fail(NEILBAD);
-    }
-    u32 *ooff = oobuf[0];
-    u32 *noff = nobuf[0];
-    {
-        u32 oi = 0, ni = 0;
-        for (u32 k = 0; k < nedl; k++) {
-            ooff[k] = oi;
-            noff[k] = ni;
-            u32 len = DIFF_LEN(edl[2][k]);
-            u32 op = DIFF_OP(edl[2][k]);
-            if (op == DIFF_EQ) { oi += len; ni += len; }
-            else if (op == DIFF_DEL) { oi += len; }
-            else { ni += len; }
-        }
-    }
-
+    u32 oi_run = 0, ni_run = 0;  // OLD/NEW position at start of edl[k]
     u32 k = 0;
     while (k < nedl) {
-        if (DIFF_OP(edl[2][k]) != DIFF_EQ) { k++; continue; }
-        u32 eq1 = k;
-        u32 cs = k + 1;  // change region start
-        if (cs >= nedl || DIFF_OP(edl[2][cs]) == DIFF_EQ) {
+        if (DIFF_OP(edl[2][k]) != DIFF_EQ) {
+            u32 len = DIFF_LEN(edl[2][k]);
+            u32 op  = DIFF_OP(edl[2][k]);
+            if (op == DIFF_DEL) oi_run += len;
+            else ni_run += len;
             k++; continue;
         }
-        // Find end of change region
+        u32 eq1 = k;
+        u32 n1  = DIFF_LEN(edl[2][eq1]);
+        u32 oi_eq1 = oi_run;
+        u32 cs  = k + 1;
+        if (cs >= nedl || DIFF_OP(edl[2][cs]) == DIFF_EQ) {
+            oi_run += n1; ni_run += n1;
+            k++; continue;
+        }
         u32 ce = cs;
         while (ce < nedl && DIFF_OP(edl[2][ce]) != DIFF_EQ) ce++;
         if (ce >= nedl) break;  // no trailing EQ
         u32 eq2 = ce;
-
-        u32 n1 = DIFF_LEN(edl[2][eq1]);
-        u32 n2 = DIFF_LEN(edl[2][eq2]);
-        if (n1 + n2 == 0) { k = ce; continue; }
-
-        // Compute total DEL/INS tokens in the change region.
-        // DEL tokens are contiguous on old side, INS on new side.
+        u32 n2  = DIFF_LEN(edl[2][eq2]);
         u32 dtot = 0, etot = 0;
         for (u32 i = cs; i < ce; i++) {
             if (DIFF_OP(edl[2][i]) == DIFF_DEL) dtot += DIFF_LEN(edl[2][i]);
             else etot += DIFF_LEN(edl[2][i]);
         }
-        if (dtot + etot == 0) { k = ce; continue; }
+        if (n1 + n2 == 0 || dtot + etot == 0) {
+            //  Skip without shifting; advance past eq1 + rm region so
+            //  the next iteration (which starts at edl[ce] = eq2) sees
+            //  correct positions.
+            oi_run += n1 + dtot; ni_run += n1 + etot;
+            k = ce; continue;
+        }
 
-        // Old/new positions at the change region boundary.
-        u32 oi_cs = ooff[cs];  // old start of change region
-        u32 ni_cs = noff[cs];  // new start of change region
+        //  Change-region start — right after eq1.
+        u32 oi_cs = oi_eq1 + n1;
+        u32 ni_cs = ni_run + n1;
+        u32 oi_eq2 = oi_cs + dtot;
 
         // 1. Max left shift: compare old/new tokens walking backward
         //    from the end of the change region.  Naturally walks through
@@ -473,28 +467,25 @@ static ok64 neil_shift_pass(e32g edl, u32cs old_toks, u32cs new_toks,
         //  identifier in eq2 stay within their respective EQs.  See
         //  graf/test/NEIL01.c crash_2d66dfa1 — without this cap shift
         //  could collapse a single-token `=1[ggg]` to length 0.
-        {
-            u32 oi_eq1 = ooff[eq1];
-            for (u32 j = 0; j < max_left; j++) {
-                u32 ti = oi_eq1 + n1 - 1 - j;
-                if (NEILIsIdent(old_toks, old_src[0], ti)) {
-                    max_left = j;
-                    break;
-                }
+        for (u32 j = 0; j < max_left; j++) {
+            u32 ti = oi_eq1 + n1 - 1 - j;
+            if (NEILIsIdent(old_toks, old_src[0], ti)) {
+                max_left = j;
+                break;
             }
         }
-        {
-            u32 oi_eq2 = ooff[eq2];
-            for (u32 j = 0; j < max_right; j++) {
-                u32 ti = oi_eq2 + j;
-                if (NEILIsIdent(old_toks, old_src[0], ti)) {
-                    max_right = j;
-                    break;
-                }
+        for (u32 j = 0; j < max_right; j++) {
+            u32 ti = oi_eq2 + j;
+            if (NEILIsIdent(old_toks, old_src[0], ti)) {
+                max_right = j;
+                break;
             }
         }
 
-        if (max_left + max_right == 0) { k = ce; continue; }
+        if (max_left + max_right == 0) {
+            oi_run += n1 + dtot; ni_run += n1 + etot;
+            k = ce; continue;
+        }
 
         // 3. Score all positions, pick best.
         //    Score on new side (context display) + old side if DEL present.
@@ -525,11 +516,20 @@ static ok64 neil_shift_pass(e32g edl, u32cs old_toks, u32cs new_toks,
             *changed = YES;
         }
 
+        //  Advance running counters past everything we processed up to
+        //  the start of eq2 — eq1's new length is `n1 + best_d`; the rm
+        //  region's content (dtot OLD / etot NEW tokens) is unchanged,
+        //  but its absolute start moved by best_d in both streams.  The
+        //  net advance to the start of eq2 is therefore
+        //  `(n1 + best_d) + dtot` in OLD and `(n1 + best_d) + etot` in
+        //  NEW (the +best_d term is what was missing — without it the
+        //  next region's positions are off, and the ident cap walks
+        //  the wrong tokens).
+        oi_run += (u32)((int)n1 + best_d) + dtot;
+        ni_run += (u32)((int)n1 + best_d) + etot;
         k = ce;
     }
 
-    u32bFree(oobuf);
-    u32bFree(nobuf);
     done;
 }
 

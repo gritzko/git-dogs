@@ -337,6 +337,23 @@ static NEILcase cases[] = {
     {"crash_2d66dfa1",
      BRAW(0x67,0x67,0x67,0xb5,0xb5,0x77,0x09),
      BRAW(0x00,0x00,0x67,0x67,0x67,0x00,0xb5,0x77)},
+
+    // Prop4 repro: NEILShift's precomputed offsets went stale after
+    // region 1's shift, so the ident cap on region 2 looked at the
+    // wrong OLD positions and missed `[546]`.  Fixed by tracking
+    // running counters instead of caching offsets.
+    {"crash_f02c1360",
+     BLIT("ed 546 ft"),
+     BLIT("ed : 546: ( ft ")},
+
+    // Prop1 repro: shift's running-counter advance forgot to add
+    // `best_d`, so subsequent regions' positions were off by the
+    // shift amount.  The misaligned scan let shift produce an EQ
+    // that mixed `\xff` (old) with `\n` (new) — Property 1's
+    // pairwise byte-equality fired.
+    {"crash_60ca80bc",
+     BRAW(0xff,0xff,0xff,0xff),
+     BRAW(0xff,0x3d,0xff,0xff,0x0a,0xff,0x0d,0xff)},
 };
 
 ok64 NEILtest() {
