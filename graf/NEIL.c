@@ -6,6 +6,8 @@
 // length >= 2 — the "substantive identifier" predicate Property #4
 // uses to ensure shared-context names survive NEIL.
 static b8 NEILIsIdent(u32cs toks, u8cp base, u32 idx) {
+    u32 ntoks = (u32)$len(toks);
+    if (idx >= ntoks) return NO;
     u32 lo = (idx > 0) ? tok32Offset(toks[0][idx - 1]) : 0;
     u32 hi = tok32Offset(toks[0][idx]);
     if (hi - lo < 2) return NO;
