@@ -1444,10 +1444,7 @@ static ok64 post_cascade_persist(cascade_ctx *cc) {
 
 //  YES iff `s` starts with `prefix`.
 static b8 post_starts_with(u8cs s, u8cs prefix) {
-    size_t pl = u8csLen(prefix);
-    if (pl == 0) return YES;
-    if (u8csLen(s) < pl) return NO;
-    return memcmp(s[0], prefix[0], pl) == 0 ? YES : NO;
+    return u8csHasPrefix(s, prefix);
 }
 
 //  dirname of an absolute branch path: drop trailing `/segment`.
@@ -1455,7 +1452,7 @@ static b8 post_starts_with(u8cs s, u8cs prefix) {
 static void post_dirname(u8cs out, u8cs abs_branch) {
     out[0] = abs_branch[0];
     out[1] = abs_branch[0];
-    if ($empty(abs_branch)) return;
+    if (u8csEmpty(abs_branch)) return;
     u8cp last_slash = NULL;
     $for(u8c, p, abs_branch) {
         if (*p == '/') last_slash = p;
@@ -1467,9 +1464,8 @@ static void post_dirname(u8cs out, u8cs abs_branch) {
 //  Empty input yields empty; no '/' yields the whole input.  Output
 //  is a slice into input.
 static void post_basename(u8cs out, u8cs abs_branch) {
-    out[0] = abs_branch[0];
-    out[1] = abs_branch[1];
-    if ($empty(abs_branch)) return;
+    u8csMv(out, abs_branch);
+    if (u8csEmpty(abs_branch)) return;
     u8cp last_slash = NULL;
     $for(u8c, p, abs_branch) {
         if (*p == '/') last_slash = p;

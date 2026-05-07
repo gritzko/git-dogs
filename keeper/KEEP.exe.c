@@ -260,7 +260,7 @@ ok64 KEEPGetRemote(uri *g) {
         u8bUnMap(rarena);
         return ru;
     }
-    a_dup(u8c, remote_uri, u8bData(ubuf));
+    a_dup(u8c, remote_uri, u8bDataC(ubuf));
 
     //  Default ref: current worktree branch (`be get //origin` semantics).
     u8cs want_ref = {};
@@ -280,7 +280,7 @@ ok64 KEEPGetRemote(uri *g) {
     //  so the supported flow is "seed with a named ref first, then
     //  look up by sha".  If the object is already in the local store,
     //  skip the wire round-trip entirely.
-    if ($len(want_ref) == 40) {
+    if (u8csLen(want_ref) == 40) {
         b8 all_hex = YES;
         $for(u8c, p, want_ref) {
             u8 c = *p;
@@ -289,8 +289,7 @@ ok64 KEEPGetRemote(uri *g) {
                   (c >= 'A' && c <= 'F'))) { all_hex = NO; break; }
         }
         if (all_hex) {
-            u8csc wr = {want_ref[0], want_ref[1]};
-            u64 hashlet = WHIFFHexHashlet60(wr);
+            u64 hashlet = WHIFFHexHashlet60(want_ref);
             u64 val = 0;
             if (KEEPLookup(k, hashlet, 40, &val) == OK) {
                 u8bUnMap(rarena);
@@ -310,19 +309,16 @@ ok64 KEEPGetRemote(uri *g) {
         //  forwarded (direct `keeper get //origin` invocation), leave
         //  `want_ref` empty — `wcli_match_advert` then picks the
         //  peer's HEAD-mapped branch (mirrors `git clone`).
-        a_dup(u8c, at_branch, u8bData(k->h->cur_branch));
+        a_dup(u8c, at_branch, u8bDataC(k->h->cur_branch));
         if (!u8csEmpty(at_branch)) {
             a_cstr(heads_pfx, "heads/");
             u8cs src = {};
             u8csMv(src, at_branch);
-            if ($len(src) > 6 && memcmp(src[0], heads_pfx[0], 6) == 0)
-                u8csUsed(src, 6);
+            if (u8csHasPrefix(src, heads_pfx)) u8csUsed(src, 6);
             u8bFeed(branch_buf, heads_pfx);
             u8bFeed(branch_buf, src);
-            cur_branch[0] = u8bDataHead(branch_buf);
-            cur_branch[1] = u8bIdleHead(branch_buf);
-            want_ref[0] = cur_branch[0];
-            want_ref[1] = cur_branch[1];
+            u8csMv(cur_branch, u8bDataC(branch_buf));
+            u8csMv(want_ref, cur_branch);
         }
     }
 
@@ -470,15 +466,14 @@ static ok64 keeper_put(keeper *k, cli *c) {
     //  trunk aliases so `heads/master` / `master` / `refs/heads/main`
     //  all become bare `?` (trunk).
     uri uk = {};
-    uk.query[0] = ref_name[0];
-    uk.query[1] = ref_name[1];
+    u8csMv(uk.query, ref_name);
     a_pad(u8, fbuf, 256);
     call(DOGCanonURIFeed, fbuf, &uk);
-    a_dup(u8c, from, u8bData(fbuf));
+    a_dup(u8c, from, u8bDataC(fbuf));
 
     //  Canonical value: strip a leading `?` if the user supplied one
     //  in the URI fragment; otherwise the sha is already bare.
-    u8cs sha = {sha_frag[0], sha_frag[1]};
+    a_dup(u8c, sha, sha_frag);
     if (!u8csEmpty(sha) && sha[0][0] == '?') u8csUsed(sha, 1);
     a_dup(u8c, to, sha);
 
@@ -497,8 +492,9 @@ static ok64 keeper_put(keeper *k, cli *c) {
 //  Extract the tree SHA-1 (as 40 hex chars) from a commit object body.
 //  A git commit always starts with "tree <40hex>\n" per object format.
 static ok64 post_extract_tree_hex(u8 *out40, u8csc body) {
-    if ($len(body) < 46) return KEEPFAIL;
-    if (memcmp(body[0], "tree ", 5) != 0) return KEEPFAIL;
+    a_cstr(tree_pfx, "tree ");
+    if (u8csLen(body) < 46) return KEEPFAIL;
+    if (!u8csHasPrefix(body, tree_pfx)) return KEEPFAIL;
     memcpy(out40, body[0] + 5, 40);
     return OK;
 }
@@ -533,8 +529,8 @@ static ok64 keeper_post(keeper *k, cli *c) {
         fprintf(stderr, "keeper: post: worktree commit not set\n");
         return KEEPFAIL;
     }
-    a_dup(u8c, at_branch, u8bData(k->h->cur_branch));
-    a_dup(u8c, at_sha,    u8bData(k->h->cur_sha));
+    a_dup(u8c, at_branch, u8bDataC(k->h->cur_branch));
+    a_dup(u8c, at_sha,    u8bDataC(k->h->cur_sha));
 
     //  2. Target branch.  Precedence:
     //       a. explicit URI `?query`           — user said which branch.
@@ -551,29 +547,23 @@ static ok64 keeper_post(keeper *k, cli *c) {
         a_dup(u8c, in_uri, g->data);
         if (REFSResolve(&resolved, peer_arena,
                         $path(keepdir), in_uri) == OK) {
-            u8cs r_q = {resolved.fragment[0], resolved.fragment[1]};
-            if (!u8csEmpty(r_q)) {
-                peer_refname[0] = r_q[0];
-                peer_refname[1] = r_q[1];
-            }
+            if (!u8csEmpty(resolved.fragment))
+                u8csMv(peer_refname, resolved.fragment);
         }
     }
     a_pad(u8, branch_buf, 256);
     {
         u8cs src = {};
         if (!u8csEmpty(peer_refname)) {
-            src[0] = peer_refname[0];
-            src[1] = peer_refname[1];
+            u8csMv(src, peer_refname);
         } else if (u8csEmpty(g->query)) {
-            src[0] = at_branch[0];
-            src[1] = at_branch[1];
+            u8csMv(src, at_branch);
         } else {
-            src[0] = g->query[0];
-            src[1] = g->query[1];
+            u8csMv(src, g->query);
         }
         if (!u8csEmpty(src)) u8bFeed(branch_buf, src);
     }
-    a_dup(u8c, branch, u8bData(branch_buf));
+    a_dup(u8c, branch, u8bDataC(branch_buf));
     //  Empty branch = trunk; WIREPush handles it (wire alias to main).
 
     //  WIREPush takes the be-side branch directly — it walks REFADV
@@ -590,7 +580,7 @@ static ok64 keeper_post(keeper *k, cli *c) {
         u8bUnMap(rarena);
         return ru;
     }
-    a_dup(u8c, remote_uri, u8bData(ubuf));
+    a_dup(u8c, remote_uri, u8bDataC(ubuf));
 
     //  4. Push.  WIREPush handles peer-tip advert + pack build + status.
     //  We pass at_sha (decoded from sniff's at-log) as the authoritative
@@ -622,25 +612,21 @@ static ok64 keeper_post(keeper *k, cli *c) {
     //     (empty for trunk → key ends in bare `?`).
     uri gk = {};
     {
-        a_dup(u8c, ru, remote_uri);
-        gk.data[0] = ru[0];
-        gk.data[1] = ru[1];
+        u8csMv(gk.data, remote_uri);
         (void)URILexer(&gk);
-        gk.data[0] = ru[0];
-        gk.data[1] = ru[1];
+        u8csMv(gk.data, remote_uri);
     }
-    if ($empty(branch)) {
+    if (u8csEmpty(branch)) {
         //  Present-but-empty query so DOGCanonURIFeed emits the `?`.
         gk.query[0] = remote_uri[1];
         gk.query[1] = remote_uri[1];
     } else {
         u8csMv(gk.query, branch);
     }
-    gk.fragment[0] = NULL;
-    gk.fragment[1] = NULL;
+    u8csMv0(gk.fragment);
     a_pad(u8, rkey, 1280);
     call(DOGCanonURIFeed, rkey, &gk);
-    a_dup(u8c, remote_key, u8bData(rkey));
+    a_dup(u8c, remote_key, u8bDataC(rkey));
     //  `at_sha` is a slice (a_dup u8c *[2]), not a Bu8 — copy by
     //  slice, not by buffer, and read its length / head accordingly.
     a_dup(u8c, v, at_sha);
@@ -789,7 +775,7 @@ static ok64 keeper_delete(keeper *k, cli *c) {
         u8bUnMap(rarena);
         return ru;
     }
-    a_dup(u8c, remote_uri, u8bData(ubuf));
+    a_dup(u8c, remote_uri, u8bDataC(ubuf));
 
     a_dup(u8c, branch, g->query);
     ok64 pu = WIREPushDelete(k, remote_uri, branch);

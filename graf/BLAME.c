@@ -348,16 +348,11 @@ ok64 GRAFFileWeave(weave *wsrc, weave *wdst, weave *wnu,
         u8bp wt_mapped = NULL;
         ok64 wto = FILEMapRO(&wt_mapped, $path(wt_path));
         if (wto == OK && wt_mapped) {
-            u8cs wt_data = {u8bDataHead(wt_mapped),
-                            u8bDataHead(wt_mapped) + u8bDataLen(wt_mapped)};
+            a_dup(u8c, wt_data, u8bDataC(wt_mapped));
             b8 same = NO;
             if (have_prev) {
-                size_t cl = (size_t)$len(wt_data);
-                size_t pl = u8bDataLen(*prev_blobp);
-                if (cl == pl && (cl == 0 || memcmp(wt_data[0],
-                                                   u8bDataHead(*prev_blobp),
-                                                   cl) == 0))
-                    same = YES;
+                a_dup(u8c, prev_data, u8bDataC(*prev_blobp));
+                if (u8csEq(wt_data, prev_data)) same = YES;
             }
             if (!same) {
                 if (cb) {
@@ -654,8 +649,7 @@ ok64 GRAFWeaveDiff(keeper *k, u8cs filepath, u8cs reporoot,
             u8csMv(to_ref, to);
         else {
             a_cstr(head, "HEAD");
-            to_ref[0] = head[0];
-            to_ref[1] = head[1];
+            u8csMv(to_ref, head);
         }
         blame_read_blob(to_buf, k, to_ref, filepath);
     }

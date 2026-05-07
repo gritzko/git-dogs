@@ -18,10 +18,10 @@
 //  BLOB (100xxx, 120000), or COMMIT/gitlink (160000).
 ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1, u32 *mode) {
     sane(u8csOK(obj) && file && sha1);
-    if ($empty(obj)) return NODATA;
+    if (u8csEmpty(obj)) return NODATA;
 
     u8cp start = obj[0];
-    u8cs scan = {obj[0], obj[1]};
+    a_dup(u8c, scan, obj);
     if (u8csFind(scan, 0) != OK) return GITBADFMT;
 
     file[0] = start;
@@ -56,20 +56,19 @@ ok64 GITu8sDrainTree(u8cs obj, u8csp file, u8csp sha1, u32 *mode) {
 //      empty-field "headers" with an empty body following.
 ok64 GITu8sDrainCommit(u8cs obj, u8csp field, u8csp value) {
     sane(u8csOK(obj) && field && value);
-    if ($empty(obj)) return NODATA;
+    if (u8csEmpty(obj)) return NODATA;
 
     if (*obj[0] == '\n') {
         field[0] = field[1] = obj[0];        // empty field
         u8csUsed(obj, 1);                    // skip blank line
-        value[0] = obj[0];
-        value[1] = obj[1];
-        obj[0] = obj[1];                     // body consumed whole
+        u8csMv(value, obj);
+        u8csUsedAll(obj);                    // body consumed whole
         done;
     }
 
     //  End-of-line via u8csFind; the line (excluding '\n') is
     //  [obj[0], nl).  Inside that line, find the mandatory space.
-    u8cs nl_scan = {obj[0], obj[1]};
+    a_dup(u8c, nl_scan, obj);
     b8   has_nl  = (u8csFind(nl_scan, '\n') == OK);
     u8cp nl      = has_nl ? nl_scan[0] : obj[1];
 
@@ -86,8 +85,8 @@ ok64 GITu8sDrainCommit(u8cs obj, u8csp field, u8csp value) {
 
     //  Fold continuation lines (RFC-822: leading SP).  Extend `value`
     //  through each one so the caller sees a single header.
-    while (!$empty(obj) && *obj[0] == ' ') {
-        u8cs cont_scan = {obj[0], obj[1]};
+    while (!u8csEmpty(obj) && *obj[0] == ' ') {
+        a_dup(u8c, cont_scan, obj);
         b8   c_nl      = (u8csFind(cont_scan, '\n') == OK);
         u8cp c_end     = c_nl ? cont_scan[0] : obj[1];
         value[1] = c_end;
@@ -98,13 +97,14 @@ ok64 GITu8sDrainCommit(u8cs obj, u8csp field, u8csp value) {
 }
 
 ok64 GITu8sCommitTree(u8cs commit, u8 tree_sha[20]) {
-    sane($ok(commit) && tree_sha);
-    u8cs body = {commit[0], commit[1]};
+    sane(u8csOK(commit) && tree_sha);
+    a_dup(u8c, body, commit);
     u8cs field = {}, value = {};
     while (GITu8sDrainCommit(body, field, value) == OK) {
-        if ($empty(field)) break;
-        if ($len(field) == 4 && memcmp(field[0], "tree", 4) == 0) {
-            if ($len(value) < 40) return GITBADFMT;
+        if (u8csEmpty(field)) break;
+        a_cstr(tree_kw, "tree");
+        if (u8csEq(field, tree_kw)) {
+            if (u8csLen(value) < 40) return GITBADFMT;
             u8s bin = {tree_sha, tree_sha + 20};
             u8cs hex = {value[0], value[0] + 40};
             return HEXu8sDrainSome(bin, hex);
@@ -118,8 +118,8 @@ ok64 GITu8sCommitTree(u8cs commit, u8 tree_sha[20]) {
 //  Try to consume `pfx` from the head of `s`.  Returns YES on match
 //  (and advances `s` past the prefix); NO leaves `s` untouched.
 static b8 git_eat_prefix(u8cs s, char const *pfx, size_t plen) {
-    if ((size_t)$len(s) < plen) return NO;
-    if (memcmp(s[0], pfx, plen) != 0) return NO;
+    u8cs pfx_s = {(u8 const *)pfx, (u8 const *)pfx + plen};
+    if (!u8csHasPrefix(s, pfx_s)) return NO;
     u8csUsed(s, plen);
     return YES;
 }
@@ -128,33 +128,35 @@ ok64 GITParseRef(u8csc in, gitref_kind *kind, u8csp name) {
     sane(kind && name);
     *kind = GITREF_NONE;
     name[0] = name[1] = NULL;
-    if (!$ok(in) || $empty(in)) return GITBADFMT;
+    if (!u8csOK(in) || u8csEmpty(in)) return GITBADFMT;
 
-    u8cs s = {in[0], in[1]};
+    a_dup(u8c, s, in);
 
     //  "HEAD" (only as the bare literal — "refs/HEAD" is not a thing
     //  in modern git advertisements).
-    if ($len(s) == 4 && memcmp(s[0], "HEAD", 4) == 0) {
-        *kind = GITREF_HEAD;
-        name[0] = s[0];
-        name[1] = s[1];
-        done;
+    {
+        a_cstr(head_s, "HEAD");
+        if (u8csEq(s, head_s)) {
+            *kind = GITREF_HEAD;
+            u8csMv(name, s);
+            done;
+        }
     }
 
     //  Optional `refs/` prefix.  Once stripped, a `<sub>/...` head whose
     //  `<sub>` is none of {heads, tags, remotes} routes to OTHER (the
     //  whole remainder, including `<sub>/`, becomes the name).
     b8 had_refs = git_eat_prefix(s, "refs/", 5);
-    if (had_refs && $empty(s)) return GITBADFMT;
+    if (had_refs && u8csEmpty(s)) return GITBADFMT;
 
     if (git_eat_prefix(s, "heads/", 6)) {
-        if ($empty(s)) return GITBADFMT;
+        if (u8csEmpty(s)) return GITBADFMT;
         *kind = GITREF_BRANCH;
     } else if (git_eat_prefix(s, "tags/", 5)) {
-        if ($empty(s)) return GITBADFMT;
+        if (u8csEmpty(s)) return GITBADFMT;
         *kind = GITREF_TAG;
     } else if (git_eat_prefix(s, "remotes/", 8)) {
-        if ($empty(s)) return GITBADFMT;
+        if (u8csEmpty(s)) return GITBADFMT;
         *kind = GITREF_REMOTE;
     } else if (had_refs) {
         //  `refs/<other>/...` — keep the whole remainder as name.
@@ -164,19 +166,16 @@ ok64 GITParseRef(u8csc in, gitref_kind *kind, u8csp name) {
         //    "vN..." (v\d.*)   → TAG
         //    contains '/'      → REMOTE
         //    otherwise         → BRANCH
-        b8 v_tag = ($len(s) >= 2 && s[0][0] == 'v' &&
+        b8 v_tag = (u8csLen(s) >= 2 && s[0][0] == 'v' &&
                     s[0][1] >= '0' && s[0][1] <= '9');
-        b8 has_slash = NO;
-        $for(u8c, p, s) {
-            if (*p == '/') { has_slash = YES; break; }
-        }
+        a_dup(u8c, slash_scan, s);
+        b8 has_slash = (u8csFind(slash_scan, '/') == OK);
         if (v_tag)          *kind = GITREF_TAG;
         else if (has_slash) *kind = GITREF_REMOTE;
         else                *kind = GITREF_BRANCH;
     }
 
-    name[0] = s[0];
-    name[1] = s[1];
+    u8csMv(name, s);
     done;
 }
 
@@ -189,7 +188,7 @@ ok64 GITFeedRef(u8b out, gitref_kind kind, u8csc name) {
         done;
     }
 
-    if (!$ok(name) || $empty(name)) return GITBADFMT;
+    if (!u8csOK(name) || u8csEmpty(name)) return GITBADFMT;
 
     a_cstr(refs_s, "refs/");
     u8bFeed(out, refs_s);

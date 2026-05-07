@@ -177,15 +177,13 @@ b8 SNIFFSkipMeta(u8cs rel) {
 
 b8 SNIFFRelFromFull(u8csp rel_out, u8cs reporoot, u8cs full) {
     if (!rel_out) return NO;
-    size_t rlen = $len(reporoot);
-    if ($len(full) <= rlen) return NO;
-    if (memcmp(full[0], reporoot[0], rlen) != 0) return NO;
-    u8cs rel = {$atp(full, rlen), full[1]};
+    if (u8csLen(full) <= u8csLen(reporoot)) return NO;
+    if (!u8csHasPrefix(full, reporoot)) return NO;
+    u8cs rel = {$atp(full, u8csLen(reporoot)), full[1]};
     //  Skip leading slash(es) between reporoot and the first segment.
-    while (!$empty(rel) && *rel[0] == '/') u8csUsed1(rel);
-    if ($empty(rel)) return NO;
-    rel_out[0] = rel[0];
-    rel_out[1] = rel[1];
+    while (!u8csEmpty(rel) && *rel[0] == '/') u8csUsed1(rel);
+    if (u8csEmpty(rel)) return NO;
+    u8csMv(rel_out, rel);
     return YES;
 }
 

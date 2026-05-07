@@ -598,9 +598,8 @@ static ok64 resolve_current_branch(u8cs out_branch);
 //  dance for POST/GET.  Output slice's lifetime matches qbuf's data.
 static ok64 absolutise_query(u8cs out_q, u8b qbuf, u8cs target_query) {
     sane(out_q && qbuf);
-    out_q[0] = target_query[0];
-    out_q[1] = target_query[1];
-    if ($empty(target_query)) done;
+    u8csMv(out_q, target_query);
+    if (u8csEmpty(target_query)) done;
 
     a_dup(u8c, q_in, target_query);
     qref qspec = {};
@@ -620,7 +619,7 @@ static ok64 absolutise_query(u8cs out_q, u8b qbuf, u8cs target_query) {
 //  dereferenced.  Relative refs (`./X`, `../X`, `..`) are absolutised
 //  against the wt's current branch before REFS lookup.
 static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
-    sane(out && $ok(target_query_in));
+    sane(out && u8csOK(target_query_in));
 
     //  Absolutise `?./X` / `?../X` / `?..` before any further
     //  processing so the rest of the function sees a canonical query.
@@ -631,7 +630,7 @@ static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
     call(absolutise_query, target_query, abs_qbuf, target_query_in);
 
     //  Full 40-hex input: decode directly.
-    if ($len(target_query) == 40) {
+    if (u8csLen(target_query) == 40) {
         u8 ok_hex = 1;
         for (size_t i = 0; i < 40 && ok_hex; i++) {
             u8 c = target_query[0][i];
@@ -650,13 +649,13 @@ static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
             ok64 ko = KEEPGetExact(&KEEP, out, cbuf, &ct);
             if (ko == OK && ct == DOG_OBJ_TAG) {
                 //  Extract "object <40hex>".
-                u8cs body = {u8bDataHead(cbuf), u8bIdleHead(cbuf)};
+                a_dup(u8c, body, u8bDataC(cbuf));
                 u8cs field = {}, value = {};
+                a_cstr(obj_kw, "object");
                 while (GITu8sDrainCommit(body, field, value) == OK) {
-                    if ($empty(field)) break;
-                    if ($len(field) == 6 &&
-                        memcmp(field[0], "object", 6) == 0 &&
-                        $len(value) >= 40) {
+                    if (u8csEmpty(field)) break;
+                    if (u8csEq(field, obj_kw) &&
+                        u8csLen(value) >= 40) {
                         u8s sb2 = {out->data, out->data + 20};
                         u8cs hx2 = {value[0], value[0] + 40};
                         HEXu8sDrainSome(sb2, hx2);
@@ -685,24 +684,24 @@ static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
         char const *strips[] = {"", "heads/", "refs/", "refs/heads/", NULL};
         for (u32 si = 0; strips[si] != NULL &&
                          (ro != OK || u8csLen(resolved.query) < 40); si++) {
-            u8cs q = {target_query[0], target_query[1]};
-            size_t plen = strlen(strips[si]);
-            if (plen > 0) {
-                if ($len(q) <= plen) continue;
-                if (memcmp(q[0], strips[si], plen) != 0) continue;
-                u8csUsed(q, plen);
+            a_dup(u8c, q, target_query);
+            a_cstr(strip_s, strips[si]);
+            if (!u8csEmpty(strip_s)) {
+                if (u8csLen(q) <= u8csLen(strip_s)) continue;
+                if (!u8csHasPrefix(q, strip_s)) continue;
+                u8csUsed(q, u8csLen(strip_s));
             }
             a_pad(u8, retry_buf, 512);
             a_cstr(dot_q, ".?");
             u8bFeed(retry_buf, dot_q);
             u8bFeed(retry_buf, q);
-            a_dup(u8c, retry_uri, u8bData(retry_buf));
+            a_dup(u8c, retry_uri, u8bDataC(retry_buf));
             memset(&resolved, 0, sizeof(resolved));
             ro = REFSResolve(&resolved, arena, $path(keepdir), retry_uri);
         }
     }
     if (ro != OK) return ro;
-    if ($len(resolved.query) < 40) fail(PATCHFAIL);
+    if (u8csLen(resolved.query) < 40) fail(PATCHFAIL);
     u8s sb = {out->data, out->data + 20};
     u8cs hx = {resolved.query[0], resolved.query[0] + 40};
     call(HEXu8sDrainSome, sb, hx);

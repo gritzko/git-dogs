@@ -38,16 +38,6 @@
 
 // --- small slice helpers ------------------------------------------------
 
-static b8 wcli_starts_with(u8csc s, u8c const *pfx, size_t plen) {
-    if ((size_t)u8csLen(s) < plen) return NO;
-    return memcmp(s[0], pfx, plen) == 0;
-}
-
-static b8 wcli_eq_lit(u8csc s, u8c const *lit, size_t llen) {
-    if ((size_t)u8csLen(s) != llen) return NO;
-    return memcmp(s[0], lit, llen) == 0;
-}
-
 static b8 wcli_decode_sha(sha1 *out, u8csc hex) {
     if (u8csLen(hex) != 40) return NO;
     a_dup(u8c, hex_dup, hex);
@@ -172,23 +162,23 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
     //  Path is what the peer's upload-pack sees as argv[1].  URI parser
     //  delivers it with a leading '/' for absolute forms (file:///foo,
     //  //host/foo) which is exactly what the peer expects.
-    u8cs path = {u.path[0], u.path[1]};
+    a_dup(u8c, path, u.path);
     if (u8csEmpty(path)) return WIRECLFL;
 
     a_cstr(file_s,    "file");
     a_cstr(keeper_s,  "keeper");
     a_cstr(be_s,      "be");
-    b8 is_file   = wcli_eq_lit(u.scheme, file_s[0],   (size_t)$len(file_s));
-    b8 is_keeper = wcli_eq_lit(u.scheme, keeper_s[0], (size_t)$len(keeper_s));
-    b8 is_be     = wcli_eq_lit(u.scheme, be_s[0],     (size_t)$len(be_s));
+    b8 is_file   = u8csEq(u.scheme, file_s);
+    b8 is_keeper = u8csEq(u.scheme, keeper_s);
+    b8 is_be     = u8csEq(u.scheme, be_s);
     b8 has_host  = !u8csEmpty(u.host);
 
     //  Build a verb slice to pass into argv.
-    u8csc verb_s = {(u8cp)verb, (u8cp)verb + strlen(verb)};
+    a_cstr(verb_s, verb);
 
     //  Local exec branch: file://, keeper://local, or no host at all.
-    if (is_file || (is_keeper && (!has_host ||
-                                  wcli_eq_lit(u.host, (u8c *)"local", 5))) ||
+    a_cstr(local_s, "local");
+    if (is_file || (is_keeper && (!has_host || u8csEq(u.host, local_s))) ||
         (!has_host && u8csEmpty(u.scheme))) {
         //  Detect a local git repo (suffix `.git` or on-disk layout).
         //  When found, exec `git-<verb> <path>` so vanilla bare/working
@@ -227,7 +217,7 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
     //  force the keeper protocol when both ends speak it.  `.git` suffix
     //  is honored as an extra git marker.
     a_cstr(ssh_path_s, "/usr/bin/ssh");
-    u8cs host = {u.host[0], u.host[1]};
+    a_dup(u8c, host, u.host);
     if (u8csEmpty(host)) return WIRECLFL;
 
     //  HOME-relative convention: //host/path delivers `path` with the
@@ -435,7 +425,7 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
         //  Track HEAD separately — git advertises "HEAD" + capability
         //  list as the very first entry, and the matching branch ref
         //  follows with the same sha.
-        if (wcli_eq_lit(name, head_lit[0], (size_t)$len(head_lit))) {
+        if (u8csEq(name, head_lit)) {
             head_sha = sha;
             have_head = YES;
             continue;
@@ -446,22 +436,18 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
         //  Only `refs/heads/*` and `refs/tags/*` are meaningful.
         {
             a_cstr(remotes_pfx, "refs/remotes/");
-            if (wcli_starts_with(name, remotes_pfx[0],
-                                 (size_t)$len(remotes_pfx)))
+            if (u8csHasPrefix(name, remotes_pfx))
                 continue;
             a_cstr(heads_pfx_s, "refs/heads/");
             a_cstr(tags_pfx_s,  "refs/tags/");
-            if (!wcli_starts_with(name, heads_pfx_s[0],
-                                  (size_t)$len(heads_pfx_s)) &&
-                !wcli_starts_with(name, tags_pfx_s[0],
-                                  (size_t)$len(tags_pfx_s)))
+            if (!u8csHasPrefix(name, heads_pfx_s) &&
+                !u8csHasPrefix(name, tags_pfx_s))
                 continue;
         }
 
         if (!first_seen) {
             first_sha = sha;
-            first_name[0] = name[0];
-            first_name[1] = name[1];
+            u8csMv(first_name, name);
             first_seen = YES;
         }
         //  Caller wants trunk (empty) and didn't bind to a specific
@@ -480,15 +466,15 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
         }
     }
     if (!picked) {
-        if ($empty(want_branch) && first_seen) {
+        if (u8csEmpty(want_branch) && first_seen) {
             *out_sha = first_sha;
-            u8cs fn = {first_name[0], first_name[1]};
+            a_dup(u8c, fn, first_name);
             WCLI_RECORD_NAME(fn);
             sha1hex h = {}; sha1hexFromSha1(&h, out_sha);
             fprintf(stderr,
                     "WIREDBG match_advert: no want_branch, no HEAD match — "
                     "fell back to first ref sha=%.40s name=%.*s\n",
-                    h.data, (int)$len(fn), (char *)fn[0]);
+                    h.data, (int)u8csLen(fn), (char *)fn[0]);
             done;
         }
         return WIRECLNRF;
@@ -499,8 +485,8 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
         fprintf(stderr,
                 "WIREDBG match_advert: picked sha=%.40s be-name='%.*s' "
                 "want_branch='%.*s'\n",
-                h.data, (int)$len(nm), (char *)nm[0],
-                (int)$len(want_branch), (char *)want_branch[0]);
+                h.data, (int)u8csLen(nm), (char *)nm[0],
+                (int)u8csLen(want_branch), (char *)want_branch[0]);
     }
     #undef WCLI_RECORD_NAME
     done;
@@ -510,7 +496,7 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
 //  Mirror of REFADV's refadv_decode_terminal — kept private here so the
 //  haves walk doesn't pull REFADV's branch-dedup logic.
 static b8 wcli_haves_decode_val(sha1 *out, u8csc val) {
-    u8cs hex = {val[0], val[1]};
+    a_dup(u8c, hex, val);
     if (u8csLen(hex) == 41 && hex[0][0] == '?') u8csUsed(hex, 1);
     if (u8csLen(hex) != 40) return NO;
     a_dup(u8c, hex_dup, hex);
@@ -534,8 +520,7 @@ static ok64 wcli_haves_cb(refcp r, void *vctx) {
     wcli_haves_ctx *c = (wcli_haves_ctx *)vctx;
     if (c->n >= c->cap) return REFSSTOP;
     sha1 sh = {};
-    u8cs val = {r->val[0], r->val[1]};
-    if (!wcli_haves_decode_val(&sh, val)) done;
+    if (!wcli_haves_decode_val(&sh, r->val)) done;
     if (sha1empty(&sh)) done;
     for (u32 i = 0; i < c->n; i++) {
         if (sha1eq(&c->out[i], &sh)) done;        // dedup
@@ -725,16 +710,12 @@ ok64 WIREFetchAll(keeper *k, u8csc remote_uri) {
             while (nul < name[1] && *nul != 0) nul++;
             name[1] = nul;
 
-            if (wcli_eq_lit(name, head_lit[0],
-                            (size_t)$len(head_lit))) continue;
+            if (u8csEq(name, head_lit)) continue;
             if (u8csLen(name) >= 3 && name[1][-1] == '}' &&
                 name[1][-2] == '{' && name[1][-3] == '^') continue;
-            if (wcli_starts_with(name, remotes_pfx[0],
-                                 (size_t)$len(remotes_pfx))) continue;
-            if (!wcli_starts_with(name, heads_pfx[0],
-                                  (size_t)$len(heads_pfx)) &&
-                !wcli_starts_with(name, tags_pfx[0],
-                                  (size_t)$len(tags_pfx)))
+            if (u8csHasPrefix(name, remotes_pfx)) continue;
+            if (!u8csHasPrefix(name, heads_pfx) &&
+                !u8csHasPrefix(name, tags_pfx))
                 continue;
 
             if (nrefs >= WIRECLI_FETCHALL_MAX) {
@@ -745,7 +726,7 @@ ok64 WIREFetchAll(keeper *k, u8csc remote_uri) {
                 break;
             }
             refs[nrefs].sha = sha;
-            size_t nlen = (size_t)$len(name);
+            size_t nlen = (size_t)u8csLen(name);
             if (nlen > sizeof(refs[nrefs].name))
                 nlen = sizeof(refs[nrefs].name);
             memcpy(refs[nrefs].name, name[0], nlen);
@@ -883,12 +864,9 @@ ok64 WIREFetch(keeper *k, u8csc remote_uri, u8csc want_ref) {
     ok64 mo = wcli_match_advert(rfd, advbuf, effective_ref, &want_sha,
                                 matched_ref_buf);
     if (mo != OK) { rv = mo; goto fetch_close; }
-    u8cs matched_ref = {u8bDataHead(matched_ref_buf),
-                        u8bIdleHead(matched_ref_buf)};
-    if (u8csEmpty(matched_ref)) {
-        matched_ref[0] = effective_ref[0];
-        matched_ref[1] = effective_ref[1];
-    }
+    u8cs matched_ref = {};
+    u8csMv(matched_ref, u8bDataC(matched_ref_buf));
+    if (u8csEmpty(matched_ref)) u8csMv(matched_ref, effective_ref);
 
     //  2.  Harvest haves from local REFS (every tracked tip — local
     //      cur AND cached peer-observed rows).
@@ -1326,14 +1304,16 @@ static ok64 wpush_drain_status(int rfd, u8csc refname) {
     a_cstr(ok_pfx, "ok ");
     u8bFeed(ok_line, ok_pfx);
     u8bFeed(ok_line, refname);
-    a_dup(u8c, ok_match, u8bData(ok_line));
+    a_dup(u8c, ok_match, u8bDataC(ok_line));
 
     a_pad(u8, ng_line, 512);
     a_cstr(ng_pfx, "ng ");
     u8bFeed(ng_line, ng_pfx);
     u8bFeed(ng_line, refname);
-    a_dup(u8c, ng_match, u8bData(ng_line));
+    a_dup(u8c, ng_match, u8bDataC(ng_line));
 
+    a_cstr(unpack_ok_lit, "unpack ok");
+    a_cstr(unpack_pfx,    "unpack ");
     for (;;) {
         u8cs line = {};
         ok64 d = wcli_read_pkt(rfd, buf, adv, line);
@@ -1345,29 +1325,25 @@ static ok64 wpush_drain_status(int rfd, u8csc refname) {
             break;
         }
         //  Strip a trailing newline so our own prints stay tidy.
-        u8cs ln = {line[0], line[1]};
-        if (!$empty(ln) && *u8csLast(ln) == '\n') ln[1]--;
+        a_dup(u8c, ln, line);
+        if (!u8csEmpty(ln) && *u8csLast(ln) == '\n') ln[1]--;
 
-        if (u8csLen(ln) >= 9 && memcmp(ln[0], "unpack ok", 9) == 0) {
+        if (u8csEq(ln, unpack_ok_lit)) {
             unpack_ok = YES;
-        } else if (u8csLen(ln) >= 7 && memcmp(ln[0], "unpack ", 7) == 0) {
+        } else if (u8csHasPrefix(ln, unpack_pfx)) {
             //  "unpack <reason>" — remote refused the pack itself.
             fprintf(stderr, "wpush: remote unpack failed: %.*s\n",
-                    (int)$len(ln) - 7, (char const *)ln[0] + 7);
-        } else if (u8csLen(ln) >= (ssize_t)u8csLen(ok_match) &&
-                   memcmp(ln[0], ok_match[0],
-                          (size_t)u8csLen(ok_match)) == 0) {
+                    (int)u8csLen(ln) - 7, (char const *)ln[0] + 7);
+        } else if (u8csHasPrefix(ln, ok_match)) {
             ref_ok = YES;
-        } else if (u8csLen(ln) >= (ssize_t)u8csLen(ng_match) &&
-                   memcmp(ln[0], ng_match[0],
-                          (size_t)u8csLen(ng_match)) == 0) {
+        } else if (u8csHasPrefix(ln, ng_match)) {
             //  "ng <ref> <reason>" — remote refused the ref update.
             //  Body after "ng " is "<ref> <reason>"; trim "<ref> " for
             //  the user-facing message.
             size_t skip = u8csLen(ng_match);
-            if ((ssize_t)skip < $len(ln) && ln[0][skip] == ' ') skip++;
+            if ((ssize_t)skip < u8csLen(ln) && ln[0][skip] == ' ') skip++;
             fprintf(stderr, "wpush: remote rejected ref update: %.*s\n",
-                    (int)($len(ln) - (ssize_t)skip),
+                    (int)(u8csLen(ln) - (ssize_t)skip),
                     (char const *)ln[0] + skip);
             ref_ok = NO;
         }

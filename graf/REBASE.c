@@ -189,9 +189,9 @@ static u64 pid_digest(pid_collector const *parent, pid_collector const *child) {
         //  carries h forward without any allocation.
         u8cs ps = {path, path + plen};
         h = RAPHashSeed(ps, h);
-        u8cs ss1 = {psha->data, psha->data + 20};
+        a_rawc(ss1, *psha);
         h = RAPHashSeed(ss1, h);
-        u8cs ss2 = {csha->data, csha->data + 20};
+        a_rawc(ss2, *csha);
         h = RAPHashSeed(ss2, h);
     }
     return h;
@@ -256,8 +256,7 @@ fail:
 //  KEEPNONE so JOINMerge can degenerate gracefully.
 static ok64 rebase_blob_at(u8 *const *buf, sha1 const *sha) {
     sane(buf);
-    sha1 zero = {};
-    if (memcmp(sha->data, zero.data, 20) == 0) return OK;  //  treat as empty
+    if (sha1empty(sha)) return OK;  //  treat as empty
     u8 t = 0;
     ok64 o = KEEPGetExact(&KEEP, sha, buf, &t);
     if (o == KEEPNONE) return OK;
@@ -464,13 +463,13 @@ static ok64 tm_merge_blob(sha1 *out_sha,
     *out_conflict = NO;
 
     //  Trivial sha-equality cases short-circuit the weave build.
-    if (memcmp(base->data, ours->data, 20) == 0) {
+    if (sha1eq(base, ours)) {
         *out_sha = *theirs; done;
     }
-    if (memcmp(base->data, theirs->data, 20) == 0) {
+    if (sha1eq(base, theirs)) {
         *out_sha = *ours;   done;
     }
-    if (memcmp(ours->data, theirs->data, 20) == 0) {
+    if (sha1eq(ours, theirs)) {
         *out_sha = *ours;   done;
     }
 
@@ -547,13 +546,13 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
     sane(tree_out_sha && had_conflict);
 
     //  Fast paths: agreement.
-    if (memcmp(base_t->data, ours_t->data, 20) == 0) {
+    if (sha1eq(base_t, ours_t)) {
         *tree_out_sha = *theirs_t; done;
     }
-    if (memcmp(base_t->data, theirs_t->data, 20) == 0) {
+    if (sha1eq(base_t, theirs_t)) {
         *tree_out_sha = *ours_t; done;
     }
-    if (memcmp(ours_t->data, theirs_t->data, 20) == 0) {
+    if (sha1eq(ours_t, theirs_t)) {
         *tree_out_sha = *ours_t; done;
     }
 
@@ -643,11 +642,11 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
             if (*had_conflict) { ret = GRAFCNFL; goto loop_fail; }
         } else if (oe && te) {
             //  Both sides present.
-            if (memcmp(o_sha.data, t_sha.data, 20) == 0) {
+            if (sha1eq(&o_sha, &t_sha)) {
                 final = o_sha;
-            } else if (be && memcmp(b_sha.data, o_sha.data, 20) == 0) {
+            } else if (be && sha1eq(&b_sha, &o_sha)) {
                 final = t_sha;
-            } else if (be && memcmp(b_sha.data, t_sha.data, 20) == 0) {
+            } else if (be && sha1eq(&b_sha, &t_sha)) {
                 final = o_sha;
             } else if (kind == WALK_KIND_DIR) {
                 ret = GRAFCNFL; *had_conflict = YES; goto loop_fail;
@@ -661,14 +660,14 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
             }
         } else if (oe && !te) {
             //  Only ours has it.
-            if (be && memcmp(b_sha.data, o_sha.data, 20) == 0) {
+            if (be && sha1eq(&b_sha, &o_sha)) {
                 //  base had it, theirs deleted it, ours unchanged → drop.
                 keep = NO;
             } else {
                 final = o_sha;
             }
         } else if (!oe && te) {
-            if (be && memcmp(b_sha.data, t_sha.data, 20) == 0) {
+            if (be && sha1eq(&b_sha, &t_sha)) {
                 keep = NO;
             } else {
                 final = t_sha;
@@ -719,7 +718,7 @@ static ok64 rebase_walk_chain(sha1 const *child_tip, sha1 const *base_old,
     sane(child_tip && base_old && list && nlist);
     u32 n = 0;
     sha1 cur = *child_tip;
-    while (memcmp(cur.data, base_old->data, 20) != 0) {
+    while (!sha1eq(&cur, base_old)) {
         if (n >= maxlist) { return GRAFFAIL; }
         list[n++] = cur;
         Bu8 cbuf = {};
@@ -753,8 +752,7 @@ static ok64 rebase_collect_pids(sha1 const *base_new, u64 *pids, u32 *n,
     sane(base_new && pids && n);
     u32 cnt = 0;
     sha1 cur = *base_new;
-    sha1 zero = {};
-    if (memcmp(cur.data, zero.data, 20) == 0) { *n = 0; done; }
+    if (sha1empty(&cur)) { *n = 0; done; }
     for (;;) {
         Bu8 cbuf = {};
         if (u8bAllocate(cbuf, REBASE_OBJ_BUF) != OK) { return GRAFFAIL; }
@@ -813,10 +811,9 @@ static ok64 rebase_build_commit(u8 *const *out, u8csc old_body,
     b8 in_gpgsig = NO;
     b8 emitted_committer = NO;
     while (GITu8sDrainCommit(scan, field, value) == OK) {
-        if ($empty(field)) {
+        if (u8csEmpty(field)) {
             //  Blank-line separator: `value` carries the body.
-            body_rest[0] = value[0];
-            body_rest[1] = value[1];
+            u8csMv(body_rest, value);
             break;
         }
         a_cstr(f_tree, "tree");
@@ -874,7 +871,7 @@ ok64 GRAFRebase(sha1 const *base_old, sha1 const *base_new,
     sane(base_old && base_new && child_tip);
 
     //  Trivial: child_tip == base_old → nothing to replay.
-    if (memcmp(child_tip->data, base_old->data, 20) == 0) {
+    if (sha1eq(child_tip, base_old)) {
         done;
     }
 
@@ -1123,11 +1120,9 @@ ok64 GRAFRebaseFileWeave(weave *wsrc, weave *wdst, weave *wnu,
         if (fo != OK) continue;  //  path absent at this commit
 
         if (have_prev) {
-            size_t cl = u8bDataLen(*cur_blob);
-            size_t pl = u8bDataLen(*prev_blob);
-            if (cl == pl && (cl == 0 ||
-                memcmp(u8bDataHead(*cur_blob),
-                       u8bDataHead(*prev_blob), cl) == 0))
+            a_dup(u8c, cur_data,  u8bDataC(*cur_blob));
+            a_dup(u8c, prev_data, u8bDataC(*prev_blob));
+            if (u8csEq(cur_data, prev_data))
                 continue;  //  byte-identical to prior fold
         }
 
@@ -1138,8 +1133,7 @@ ok64 GRAFRebaseFileWeave(weave *wsrc, weave *wdst, weave *wnu,
             if (co != OK) { ret = co; break; }
         }
 
-        u8cs new_data = {u8bDataHead(*cur_blob),
-                         u8bDataHead(*cur_blob) + u8bDataLen(*cur_blob)};
+        a_dup(u8c, new_data, u8bDataC(*cur_blob));
 
         ret = WEAVEFromBlob(wnu, new_data, ext, sc);
         if (ret != OK) break;

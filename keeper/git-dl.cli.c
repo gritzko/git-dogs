@@ -45,11 +45,10 @@ ok64 gitdl() {
     a$rg(out_arg,    2);
 
     //  Optional ref selector (3rd positional).
-    u8cs ref_cs = {NULL, NULL};
+    u8cs ref_cs = {};
     if ($arglen >= 4) {
         a$rg(ref_arg, 3);
-        ref_cs[0] = ref_arg[0];
-        ref_cs[1] = ref_arg[1];
+        u8csMv(ref_cs, ref_arg);
     }
 
     //  Build / open the destination keeper rooted at out_arg.  HOMEOpen
@@ -57,7 +56,7 @@ ok64 gitdl() {
     {
         char outbuf[1024];
         snprintf(outbuf, sizeof(outbuf), "%.*s",
-                 (int)$len(out_arg), (char *)out_arg[0]);
+                 (int)u8csLen(out_arg), (char *)out_arg[0]);
         mkdir(outbuf, 0755);
     }
 
@@ -65,9 +64,7 @@ ok64 gitdl() {
     call(HOMEOpenAt, &h, out_arg, YES);
     call(KEEPOpen, &h, YES);
 
-    u8csc remote_cs = {remote_arg[0], remote_arg[1]};
-    u8csc want_cs   = {ref_cs[0], ref_cs[1]};
-    ok64 fo = WIREFetch(&KEEP, remote_cs, want_cs);
+    ok64 fo = WIREFetch(&KEEP, remote_arg, ref_cs);
 
     KEEPClose();
     HOMEClose(&h);

@@ -29,21 +29,19 @@ ok64 sniffcli() {
 
     char cwd[1024];
     u8cs reporoot = {};
-    if ($ok(c.repo)) {
-        $mv(reporoot, c.repo);
+    if (!u8csEmpty(c.repo)) {
+        u8csMv(reporoot, c.repo);
     } else {
         if (!getcwd(cwd, sizeof(cwd))) fail(SNIFFFAIL);
         a_cstr(cwds, cwd);
-        reporoot[0] = cwds[0];
-        reporoot[1] = cwds[1];
-        c.repo[0] = cwds[0];
-        c.repo[1] = cwds[1];
+        u8csMv(reporoot, cwds);
+        u8csMv(c.repo, cwds);
     }
 
     // Help and stop don't need an open state.
     a_cstr(v_help, "help");
     a_cstr(v_stop, "stop");
-    b8 need_state = !$eq(c.verb, v_help) && !$eq(c.verb, v_stop)
+    b8 need_state = !u8csEq(c.verb, v_help) && !u8csEq(c.verb, v_stop)
                  && !CLIHas(&c, "-h") && !CLIHas(&c, "--help");
 
     if (!need_state) return SNIFFExec(&c);
@@ -59,7 +57,7 @@ ok64 sniffcli() {
     a_cstr(v_post,   "post");
     a_cstr(v_commit, "commit");
     a_cstr(v_mflag,  "-m");
-    b8 is_projector = $empty(c.verb) && c.nuris > 0 &&
+    b8 is_projector = u8csEmpty(c.verb) && c.nuris > 0 &&
                       DOGIsProjector(c.uris[0].scheme);
     //  `be post` always opens the home rw — even bare `be post`, which
     //  used to be a pure dry-run, can now compose a commit when patch
@@ -68,7 +66,7 @@ ok64 sniffcli() {
     //  we can't pick rw vs ro at CLI-open time.  The rare bare status
     //  preview pays an unnecessary write lock — acceptable.
     b8 is_post_dryrun = NO;
-    b8 ro = $eq(c.verb, v_status) || $eq(c.verb, v_list) || is_projector
+    b8 ro = u8csEq(c.verb, v_status) || u8csEq(c.verb, v_list) || is_projector
          || is_post_dryrun;
     b8 rw = !ro;
 
@@ -78,7 +76,7 @@ ok64 sniffcli() {
     home h = {};
     uri at = {};
     CLIAtURI(&at, &c);
-    if (u8csEmpty(at.path) && $ok(reporoot) && !u8csEmpty(reporoot))
+    if (u8csEmpty(at.path) && u8csOK(reporoot) && !u8csEmpty(reporoot))
         u8csMv(at.path, reporoot);
     call(HOMEOpen, &h, &at, rw);
     call(SNIFFOpen, &h, rw);   // opens keeper singleton too
@@ -103,9 +101,9 @@ ok64 sniffcli() {
     //  forks a parallel graf-rw child whose lock would race with
     //  the sniff-rw lock if we opened it here (long flock waits
     //  on big-repo clones).
-    b8 needs_graf = !$eq(c.verb, v_get) && !$eq(c.verb, v_checkout)
-                 && (rw || $eq(c.verb, v_post) || $eq(c.verb, v_commit)
-                        || $eq(c.verb, v_patch));
+    b8 needs_graf = !u8csEq(c.verb, v_get) && !u8csEq(c.verb, v_checkout)
+                 && (rw || u8csEq(c.verb, v_post) || u8csEq(c.verb, v_commit)
+                        || u8csEq(c.verb, v_patch));
     ok64 go = needs_graf ? GRAFOpen(&h, rw) : NONE;
 
     ok64 ret = SNIFFExec(&c);

@@ -605,8 +605,7 @@ static b8 ulog_path_eq(ulogreccp a, ulogreccp b) {
     else                        u8csMv(ka, a->uri.path);
     if (u8csEmpty(b->uri.path)) u8csMv(kb, b->uri.query);
     else                        u8csMv(kb, b->uri.path);
-    if (u8csLen(ka) != u8csLen(kb)) return NO;
-    return memcmp(ka[0], kb[0], u8csLen(ka)) == 0;
+    return u8csEq(ka, kb);
 }
 
 ok64 ULOGMergeWalk(u8css cursors, ulog_step_fn cb, void *ctx) {
@@ -654,15 +653,13 @@ ok64 ULOGMergeWalk(u8css cursors, ulog_step_fn cb, void *ctx) {
 
 b8 ULOGu8sRelFromFull(u8csp rel_out, u8cs reporoot, u8cs full) {
     if (!rel_out) return NO;
-    size_t rlen = $len(reporoot);
-    if ($len(full) <= rlen) return NO;
-    if (memcmp(full[0], reporoot[0], rlen) != 0) return NO;
-    u8cs rel = {$atp(full, rlen), full[1]};
+    if ($len(full) <= $len(reporoot)) return NO;
+    if (!u8csHasPrefix(full, reporoot)) return NO;
+    u8cs rel = {$atp(full, $len(reporoot)), full[1]};
     //  Skip leading slash(es) between reporoot and the first segment.
     while (!$empty(rel) && *rel[0] == '/') u8csUsed1(rel);
     if ($empty(rel)) return NO;
-    rel_out[0] = rel[0];
-    rel_out[1] = rel[1];
+    u8csMv(rel_out, rel);
     return YES;
 }
 

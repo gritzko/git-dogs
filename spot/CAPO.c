@@ -67,31 +67,22 @@ static void capo_abrt_handler(int sig) {
 // --- Language detection via tok/ ---
 
 b8 CAPOKnownExt(u8csc ext) {
-    if ($empty(ext)) return NO;
-    u8cs nodot = {};
-    if (ext[0][0] == '.') {
-        nodot[0] = ext[0] + 1;
-        nodot[1] = ext[1];
-    } else {
-        nodot[0] = ext[0]; nodot[1] = ext[1];
-    }
+    if (u8csEmpty(ext)) return NO;
+    a_dup(u8c, nodot, ext);
+    if (nodot[0][0] == '.') u8csUsed1(nodot);
     return TOKKnownExt(nodot);
 }
 
 // Simple ext-to-name for display (replaces BASTCodec)
 static void CAPOCodecName(u8csp codec, u8csc ext) {
-    if ($empty(ext)) {
-        codec[0] = (u8cp)"text";
-        codec[1] = (u8cp)"text" + 4;
+    if (u8csEmpty(ext)) {
+        a_cstr(text_lit, "text");
+        u8csMv(codec, text_lit);
         return;
     }
     // Strip dot, use extension as codec name
-    if (ext[0][0] == '.') {
-        codec[0] = ext[0] + 1;
-        codec[1] = ext[1];
-    } else {
-        $mv(codec, ext);
-    }
+    u8csMv(codec, ext);
+    if (codec[0][0] == '.') u8csUsed1(codec);
 }
 
 // --- Resolve spot index directory ---
@@ -100,7 +91,7 @@ static void CAPOCodecName(u8csp codec, u8csc ext) {
 // for creating the dir via FILEMakeDirP if it does not yet exist.
 
 ok64 CAPOResolveDir(path8b out, u8csc reporoot) {
-    sane($ok(reporoot) && out != NULL);
+    sane(u8csOK(reporoot) && out != NULL);
     // If caller supplied a reporoot, feed it; otherwise walk up via HOME.
     if (!u8csEmpty(reporoot)) {
         a_dup(u8c, r, reporoot);
@@ -200,30 +191,24 @@ ok64 CAPOIndexBlob(u8csc source, u8csc ext, u32 fn_hash20) {
     // Mark definitions (S→N) before extraction
     {
         u32 *dts[2] = {u32bDataHead(toks), u32bIdleHead(toks)};
-        u8cs nodot = {};
-        if (!$empty(ext) && ext[0][0] == '.') {
-            nodot[0] = ext[0] + 1; nodot[1] = ext[1];
-        } else {
-            nodot[0] = ext[0]; nodot[1] = ext[1];
-        }
+        a_dup(u8c, nodot, ext);
+        if (!u8csEmpty(nodot) && nodot[0][0] == '.') u8csUsed1(nodot);
         DEFMark(dts, source, nodot);
     }
 
-    u32cp td = u32bDataHead(toks);
-    u32cp ti = u32bIdleHead(toks);
-    u32cs tokslice = {(u32cp)td, (u32cp)ti};
+    a_dup(u32c, tokslice, u32bDataC(toks));
 
     CAPOTriCtx ctx = { .fn_hash20 = fn_hash20 };
     o = CAPOTriExtractToks(tokslice, source[0], CAPOTriCB, &ctx);
     if (o != OK) { if (!use_session) u32bUnMap(owned); return o; }
 
     // Emit symbol mention/definition entries
-    int ntoks = (int)$len(tokslice);
+    int ntoks = (int)u32csLen(tokslice);
     for (int i = 0; i < ntoks; i++) {
         u8 tag = tok32Tag(tokslice[0][i]);
         if (tag != 'S' && tag != 'N' && tag != 'C') continue;
         u8cs val = {}; tok32Val(val, tokslice, source[0], i);
-        if ($len(val) < 2) continue;
+        if (u8csLen(val) < 2) continue;
         u8 type = (tag == 'N') ? SPOT_DEF : SPOT_MEN;
         u64 entry = wh64Pack(type, fn_hash20, CAPOSym40(val));
         ok64 er = CAPOEmit(entry);
@@ -500,16 +485,14 @@ void CAPOProgress(const char *line) {
 
 // Check if ext (with dot) matches one of the given suffixes.
 b8 CAPOExtIs(u8csc ext, const char *a, const char *b) {
-    u8cs nodot = {};
-    if ($empty(ext)) return NO;
-    if (ext[0][0] == '.') { nodot[0] = ext[0] + 1; nodot[1] = ext[1]; }
-    else { nodot[0] = ext[0]; nodot[1] = ext[1]; }
-    size_t n = (size_t)$len(nodot);
-    size_t al = strlen(a);
-    if (n == al && memcmp(nodot[0], a, al) == 0) return YES;
+    if (u8csEmpty(ext)) return NO;
+    a_dup(u8c, nodot, ext);
+    if (nodot[0][0] == '.') u8csUsed1(nodot);
+    a_cstr(a_s, a);
+    if (u8csEq(nodot, a_s)) return YES;
     if (b != NULL) {
-        size_t bl = strlen(b);
-        if (n == bl && memcmp(nodot[0], b, bl) == 0) return YES;
+        a_cstr(b_s, b);
+        if (u8csEq(nodot, b_s)) return YES;
     }
     return NO;
 }
@@ -522,9 +505,9 @@ b8 CAPOExtIs(u8csc ext, const char *a, const char *b) {
 void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
                    char *out, size_t outsz) {
     out[0] = 0;
-    if ($empty(source) || pos == 0 || outsz < 2) return;
+    if (u8csEmpty(source) || pos == 0 || outsz < 2) return;
     u8cp base = source[0];
-    u32 slen = (u32)$len(source);
+    u32 slen = (u32)u8csLen(source);
     if (pos > slen) pos = slen;
 
     b8 is_md = CAPOExtIs(ext, "md", "markdown") ||

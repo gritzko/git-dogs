@@ -20,7 +20,7 @@
 // --- Standalone RO tail peek (no SNIFF singleton, no keeper) -------
 
 ok64 SNIFFAtTailOf(u8cs wt, u8bp out) {
-    sane($ok(wt) && out);
+    sane(u8csOK(wt) && out);
 
     a_cstr(rel, SNIFF_FILE);
     a_path(apath, wt, rel);
@@ -45,8 +45,7 @@ ok64 SNIFFAtTailOf(u8cs wt, u8bp out) {
             r0.verb != SNIFFAtVerbRepo()) {
             ULOGClose(data, idx, NO); fail(SNIFFNONE);
         }
-        u8cs rp = {r0.uri.path[0], r0.uri.path[1]};
-        DOGRepoFromDogs(rp, root_buf);
+        DOGRepoFromDogs(r0.uri.path, root_buf);
     }
 
     //  Latest get/post/patch with a 40-hex sha → branch + sha.
@@ -62,31 +61,23 @@ ok64 SNIFFAtTailOf(u8cs wt, u8bp out) {
         //  carries the sha, query carries the be-branch (empty for
         //  trunk).  Legacy rows kept the sha in a query spec; fall
         //  through and walk the `&`-chain when the fragment is empty.
-        ref_body[0] = ref_body[1] = NULL;
-        sha_body[0] = sha_body[1] = NULL;
-        {
-            u8cs frag = {u.fragment[0], u.fragment[1]};
-            if (u8csLen(frag) == 40) {
-                sha_body[0] = frag[0];
-                sha_body[1] = frag[1];
-            }
-        }
+        u8csMv0(ref_body);
+        u8csMv0(sha_body);
+        if (u8csLen(u.fragment) == 40) u8csMv(sha_body, u.fragment);
         a_dup(u8c, q, u.query);
-        while (!$empty(q)) {
+        while (!u8csEmpty(q)) {
             qref spec = {};
             if (QURYu8sDrain(q, &spec) != OK) break;
             if (spec.type == QURY_NONE) break;
-            if (spec.type == QURY_REF && $empty(ref_body)) {
-                ref_body[0] = spec.body[0];
-                ref_body[1] = spec.body[1];
+            if (spec.type == QURY_REF && u8csEmpty(ref_body)) {
+                u8csMv(ref_body, spec.body);
             } else if (spec.type == QURY_SHA &&
-                       $len(spec.body) == 40 &&
-                       $empty(sha_body)) {
-                sha_body[0] = spec.body[0];
-                sha_body[1] = spec.body[1];
+                       u8csLen(spec.body) == 40 &&
+                       u8csEmpty(sha_body)) {
+                u8csMv(sha_body, spec.body);
             }
         }
-        if (!$empty(sha_body)) { found = YES; break; }
+        if (!u8csEmpty(sha_body)) { found = YES; break; }
     }
 
     if (!found) { ULOGClose(data, idx, NO); fail(SNIFFNONE); }
@@ -95,10 +86,9 @@ ok64 SNIFFAtTailOf(u8cs wt, u8bp out) {
     //  empty (== trunk); `?` separator stays so URILexer round-trips
     //  the empty query as a present-but-empty slot.
     u8bReset(out);
-    a_dup(u8c, root_s, u8bData(root_buf));
-    u8bFeed(out, root_s);
+    u8bFeed(out, u8bDataC(root_buf));
     u8bFeed1(out, '?');
-    if (!$empty(ref_body)) u8bFeed(out, ref_body);
+    if (!u8csEmpty(ref_body)) u8bFeed(out, ref_body);
     u8bFeed1(out, '#');
     u8bFeed(out, sha_body);
 
