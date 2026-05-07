@@ -352,11 +352,21 @@ ok64 SNIFFCheckClock(void) {
     if (ULOGTail(SNIFF.log_data, SNIFF.log_idx, &tail) != OK) done;
     ron60 now = RONNow();
     if (now < tail.ts) {
-        fprintf(stderr,
-                "sniff: clock skew — system clock is before the latest "
-                ".sniff row; refusing every command until clock catches "
-                "up\n");
-        return CLOCKBAD;
+        //  A burst of N rows in one wall-clock ms self-bumps the tail
+        //  N ms ahead (SNIFFAtNow's monotonicity guard).  Tolerate
+        //  sub-second skew; CLOCKBAD is for gross errors (NTP step,
+        //  DST, suspend/resume), not millisecond ordering noise.
+        struct timespec tail_tv = at_ts_of_ron60(tail.ts);
+        struct timespec now_tv  = at_ts_of_ron60(now);
+        i64 skew_ms = ((i64)tail_tv.tv_sec - (i64)now_tv.tv_sec) * 1000
+                    + ((i64)tail_tv.tv_nsec - (i64)now_tv.tv_nsec) / 1000000;
+        if (skew_ms > 1000) {
+            fprintf(stderr,
+                    "sniff: clock skew — system clock is before the latest "
+                    ".sniff row; refusing every command until clock catches "
+                    "up\n");
+            return CLOCKBAD;
+        }
     }
     done;
 }
