@@ -85,7 +85,10 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
                  u8csc old_src, u8csc new_src) {
     sane(edl != NULL);
     u32 nedl = (u32)(edl[0] - edl[2]);
-    if (nedl < 3) done;
+    //  Short EDLs have no kill candidates (kill needs surrounding
+    //  edits) but still need canonicalization — a 2-entry [DEL, INS]
+    //  from DIFF must come back as [INS, DEL] per the in-rm invariant.
+    if (nedl < 3) return NEILCanon(edl);
 
     // Work in a heap buffer (killed EQ expands to DEL+INS).
     u32 cap = nedl * 2 + 4;
@@ -366,7 +369,10 @@ ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
                u8csc old_src, u8csc new_src) {
     sane(edl != NULL);
     u32 nedl = (u32)(edl[0] - edl[2]);
-    if (nedl < 3) done;
+    //  Shift needs both flanking EQs; <3 entries means no shifting can
+    //  happen, but canonicalization still must run so a leftover
+    //  [DEL, INS] from upstream is collapsed to [INS, DEL].
+    if (nedl < 3) return NEILCanon(edl);
 
     u32 new_ntoks = (u32)$len(new_toks);
     u32 old_ntoks = (u32)$len(old_toks);
