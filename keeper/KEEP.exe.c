@@ -21,7 +21,7 @@
 // --- Verb / flag tables ---
 
 char const *const KEEP_CLI_VERBS[] = {
-    "get", "put", "post", "status", "import", "verify",
+    "get", "put", "post", "delete", "status", "import", "verify",
     "refs", "tips", "ls-files",
     "upload-pack", "receive-pack",
     "help", NULL
@@ -42,6 +42,8 @@ static void keep_usage(void) {
         "    put .?ref .#sha            move local ref pointer\n"
         "    put //remote?ref           push to remote (stub)\n"
         "    post //remote              create+push a commit on HEAD\n"
+        "    delete //remote?ref        push-delete a remote ref\n"
+        "    delete //remote            drop alias (tombstone host rows)\n"
         "    status                     show store stats\n"
         "    import <packfile>          import a git packfile\n"
         "    verify .#sha               verify object + recurse\n"
@@ -652,6 +654,179 @@ static ok64 keeper_post(keeper *k, cli *c) {
     done;
 }
 
+// --- Verb: delete ---
+//
+//  Two arms keyed off the URI shape:
+//    `//host?branch`       — push-delete: WIREPushDelete the remote
+//                            ref then tombstone the cached row.
+//    `//host` (no `?ref`)  — alias drop: walk REFS, tombstone every
+//                            row whose authority is the named host.
+//                            No network.
+//
+//  VERBS.md spec stores aliases in `<store>/ALIAS`; the current
+//  keeper folds aliases into REFS rows keyed by host (REFS.h:16),
+//  so dropping the alias is the same as tombstoning every row that
+//  carries that authority.
+
+#define KEEP_DEL_ZERO_HEX                                            \
+    "0000000000000000000000000000000000000000"
+
+typedef struct {
+    u8cs  host;
+    u8b  *keys;       // packed NUL-terminated row-keys to tombstone
+    ok64  err;
+} keeper_delete_alias_ctx;
+
+static ok64 keeper_delete_alias_collect(refcp r, void *vctx) {
+    sane(r && vctx);
+    keeper_delete_alias_ctx *ctx = vctx;
+    if (ctx->err != OK) done;
+
+    //  r->key is the URI (minus fragment) re-emitted by URIutf8Feed;
+    //  re-parse to extract its host slice.  Skip rows whose host
+    //  isn't a byte-exact match against the requested host — alias
+    //  drop is precise; substring matching is REFSResolve's job, not
+    //  this verb's.
+    uri ku = {};
+    u8csMv(ku.data, r->key);
+    if (URILexer(&ku) != OK) done;
+    u8cs row_host = {ku.host[0], ku.host[1]};
+    if (u8csEmpty(row_host)) done;
+    if (u8csLen(row_host) != u8csLen(ctx->host)) done;
+    if (memcmp(row_host[0], ctx->host[0],
+               (size_t)u8csLen(ctx->host)) != 0) done;
+
+    u8bFeed(*ctx->keys, r->key);
+    u8bFeed1(*ctx->keys, '\0');
+    done;
+}
+
+static ok64 keeper_delete_alias(keeper *k, u8cs host) {
+    sane(k && !u8csEmpty(host));
+    a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+
+    Bu8 keys = {};
+    call(u8bAllocate, keys, 1UL << 16);
+
+    keeper_delete_alias_ctx ctx = {.host = {host[0], host[1]},
+                                   .keys = &keys, .err = OK};
+    ok64 eo = REFSEach($path(keepdir),
+                       keeper_delete_alias_collect, &ctx);
+    if (eo != OK) {
+        u8bFree(keys);
+        return eo;
+    }
+    if (ctx.err != OK) {
+        u8bFree(keys);
+        return ctx.err;
+    }
+
+    if (!u8bHasData(keys)) {
+        u8bFree(keys);
+        fprintf(stderr,
+                "keeper: delete: no rows for //%.*s\n",
+                (int)u8csLen(host), (char const *)host[0]);
+        return KEEPNONE;
+    }
+
+    a_cstr(zeros, KEEP_DEL_ZERO_HEX);
+    //  Canonical tombstone shape: one row per key under verb
+    //  `delete`.  REFSLoad / REFSResolve dedup by URI key only
+    //  (ULOGeachLatestKey), so a single `delete` row supersedes any
+    //  earlier `get`/`post` row for the same key.
+    u32 dropped = 0;
+    u8cp p = u8bDataHead(keys);
+    u8cp end = u8bIdleHead(keys);
+    while (p < end) {
+        u8cp q = p;
+        while (q < end && *q != '\0') q++;
+        u8cs row_key = {p, q};
+        if (!u8csEmpty(row_key)) {
+            ok64 ao = REFSAppendVerb($path(keepdir), REFSVerbDelete(),
+                                     row_key, zeros);
+            if (ao != OK) {
+                u8bFree(keys);
+                return ao;
+            }
+            dropped++;
+        }
+        p = (q < end) ? q + 1 : end;
+    }
+    u8bFree(keys);
+    fprintf(stdout, "keeper: dropped alias //%.*s (%u row(s))\n",
+            (int)u8csLen(host), (char const *)host[0], dropped);
+    done;
+}
+
+static ok64 keeper_delete(keeper *k, cli *c) {
+    sane(k && c);
+    if (c->nuris == 0) {
+        fprintf(stderr, "keeper: delete requires a //host[?ref] URI\n");
+        return KEEPFAIL;
+    }
+    uri *g = &c->uris[0];
+    if (u8csEmpty(g->host)) {
+        fprintf(stderr,
+                "keeper: delete needs a remote URI (//host[?ref])\n");
+        return KEEPFAIL;
+    }
+
+    //  Bare `//host` → alias drop.  No wire, no transport spawn.
+    if (u8csEmpty(g->query)) {
+        u8cs host = {g->host[0], g->host[1]};
+        return keeper_delete_alias(k, host);
+    }
+
+    //  `//host?branch` → push-delete via receive-pack.  Resolve the
+    //  alias to its full transport URI just like keeper_post does;
+    //  delete-only commands are accepted without a packfile body.
+    Bu8 rarena = {};
+    call(u8bMap, rarena, (size_t)REFS_MAX_REFS * 320);
+    a_pad(u8, ubuf, FILE_PATH_MAX_LEN);
+    ok64 ru = keeper_remote_uri(k, g, ubuf, rarena);
+    if (ru != OK) {
+        u8bUnMap(rarena);
+        return ru;
+    }
+    a_dup(u8c, remote_uri, u8bData(ubuf));
+
+    a_dup(u8c, branch, g->query);
+    ok64 pu = WIREPushDelete(k, remote_uri, branch);
+    u8bUnMap(rarena);
+    if (pu != OK) return pu;
+
+    //  Tombstone the local cached `<peer-uri>?<branch>` row so future
+    //  cached reads stop returning the now-deleted tip.  Mirrors the
+    //  REFS-write at the end of keeper_post (KEEP.exe.c:620+).
+    a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+    {
+        a_pad(u8, kbuf, 1280);
+        uri gk = {};
+        a_dup(u8c, ru2, remote_uri);
+        gk.data[0] = ru2[0];
+        gk.data[1] = ru2[1];
+        (void)URILexer(&gk);
+        gk.data[0] = ru2[0];
+        gk.data[1] = ru2[1];
+        u8csMv(gk.query, branch);
+        gk.fragment[0] = NULL;
+        gk.fragment[1] = NULL;
+        if (DOGCanonURIFeed(kbuf, &gk) == OK) {
+            a_dup(u8c, key, u8bData(kbuf));
+            a_cstr(zeros, KEEP_DEL_ZERO_HEX);
+            //  Canonical tombstone: one row, verb=`delete`.  REFS's
+            //  URI-key-only dedup ensures it masks any prior write.
+            (void)REFSAppendVerb($path(keepdir), REFSVerbDelete(),
+                                 key, zeros);
+        }
+    }
+
+    fprintf(stdout, "keeper: deleted //%.*s?%.*s\n",
+            (int)u8csLen(g->host), (char const *)g->host[0],
+            (int)u8csLen(branch), (char const *)branch[0]);
+    done;
+}
+
 // --- Entry ---
 
 ok64 KEEPExec(keeper *k, cli *c) {
@@ -661,6 +836,7 @@ ok64 KEEPExec(keeper *k, cli *c) {
     a_cstr(v_get,    "get");
     a_cstr(v_put,    "put");
     a_cstr(v_post,   "post");
+    a_cstr(v_delete, "delete");
     a_cstr(v_status, "status");
     a_cstr(v_import, "import");
     a_cstr(v_verify, "verify");
@@ -714,6 +890,7 @@ ok64 KEEPExec(keeper *k, cli *c) {
     if ($eq(c->verb, v_get))     return keeper_get(k, c);
     if ($eq(c->verb, v_put))     return keeper_put(k, c);
     if ($eq(c->verb, v_post))    return keeper_post(k, c);
+    if ($eq(c->verb, v_delete))  return keeper_delete(k, c);
 
     if ($eq(c->verb, v_import)) {
         if (c->nuris < 1) {

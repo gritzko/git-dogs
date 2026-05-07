@@ -556,7 +556,7 @@ ok64 DELBranch(uri const *u, b8 recursive) {
     a_dup(u8c, refkey, u8bData(keybuf));
     a_cstr(zeros, DEL_ZERO_HEX);
 
-    call(REFSAppendVerb, $path(keepdir), REFSVerbPost(), refkey, zeros);
+    call(REFSAppendVerb, $path(keepdir), REFSVerbDelete(), refkey, zeros);
 
     //  Drop the per-branch keeper shard if it was materialised by a
     //  prior `be post ?./X` (POSTSetLabel).  KEEPBranchDrop is the

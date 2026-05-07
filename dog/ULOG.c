@@ -374,8 +374,13 @@ static b8 seen_contains(Bu64 seen, u64 h) {
     return NO;
 }
 
-ok64 ULOGeachLatest(u8b data, kv64b idx, ron60 verb_filter,
-                    ulog_each_fn cb, void *ctx) {
+//  Shared body for the latest-walk variants.  `dedup_per_verb=YES`
+//  matches `ULOGeachLatest`'s historical behaviour ((key, verb) hash);
+//  `dedup_per_verb=NO` matches `ULOGeachLatestKey`'s URI-key-only
+//  hash.  Keeping one body avoids drift between the two surfaces.
+static ok64 ulog_each_latest(u8b data, kv64b idx, ron60 verb_filter,
+                             b8 dedup_per_verb,
+                             ulog_each_fn cb, void *ctx) {
     sane(data && idx && cb);
     u32 n = ULOGCount(idx);
     if (n == 0) done;
@@ -393,10 +398,8 @@ ok64 ULOGeachLatest(u8b data, kv64b idx, ron60 verb_filter,
 
         u8cs key = {};
         ulog_row_key_bytes(data, idx, i, key);
-        //  Dedup key includes verb: seed the hash with verb so two
-        //  different verbs over the same URI-minus-fragment key hash
-        //  to different slots.
-        u64 h = RAPHashSeed(key, (u64)r.verb);
+        u64 h = dedup_per_verb ? RAPHashSeed(key, (u64)r.verb)
+                                : RAPHashSeed(key, 0);
         if (seen_contains(seen, h)) continue;
         u64bFeed1(seen, h);
 
@@ -406,6 +409,16 @@ ok64 ULOGeachLatest(u8b data, kv64b idx, ron60 verb_filter,
 
     u64bFree(seen);
     return rc;
+}
+
+ok64 ULOGeachLatest(u8b data, kv64b idx, ron60 verb_filter,
+                    ulog_each_fn cb, void *ctx) {
+    return ulog_each_latest(data, idx, verb_filter, YES, cb, ctx);
+}
+
+ok64 ULOGeachLatestKey(u8b data, kv64b idx, ron60 verb_filter,
+                       ulog_each_fn cb, void *ctx) {
+    return ulog_each_latest(data, idx, verb_filter, NO, cb, ctx);
 }
 
 // --- ULOGCompactLatest -----------------------------------------------

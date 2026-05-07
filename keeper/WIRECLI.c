@@ -1571,3 +1571,83 @@ push_close:
     }
     return rv;
 }
+
+// --- WIREPushDelete -----------------------------------------------------
+//
+//  Delete-only push: send `<peer_old> 000…0 refs/heads/<X>` with no
+//  packfile body.  receive-pack accepts a delete command without a
+//  pack — see git's pack-protocol.txt §"updates" ("If the only
+//  commands are deletes, the client MAY skip the pack data").
+
+ok64 WIREPushDelete(keeper *k, u8csc remote_uri, u8csc local_branch) {
+    sane(k);
+    if (u8csEmpty(remote_uri)) return WIRECLFL;
+
+    a_pad(u8, refname_buf, 256);
+    call(wcli_be_to_wire, refname_buf, local_branch);
+    u8cs refname = {u8bDataHead(refname_buf), u8bIdleHead(refname_buf)};
+
+    fprintf(stderr, "wpush: spawning receive-pack (delete), remote=%.*s\n",
+            (int)u8csLen(remote_uri), (char const *)remote_uri[0]);
+    int wfd = -1, rfd = -1;
+    pid_t pid = 0;
+    ok64 so = wcli_spawn(remote_uri, "receive-pack", &wfd, &rfd, &pid);
+    if (so != OK) {
+        fprintf(stderr, "wpush: delete spawn failed (so=%llx)\n",
+                (unsigned long long)so);
+        return WIRECLFL;
+    }
+
+    Bu8 advbuf = {};
+    ok64 rv = WIRECLFL;
+    if (u8bAllocate(advbuf, WCLI_BUF) != OK) {
+        fprintf(stderr, "wpush: delete advbuf alloc failed\n");
+        goto delete_close;
+    }
+
+    sha1 peer_tip = {};
+    b8   have_peer = NO;
+    if (wpush_peer_tip(rfd, advbuf, refname, &peer_tip, &have_peer,
+                       NULL, NULL, 0) != OK) {
+        fprintf(stderr, "wpush: delete peer_tip drain failed\n");
+        goto delete_close;
+    }
+
+    if (!have_peer) {
+        //  Peer did not advertise the ref — nothing to delete.  Send a
+        //  flush so the peer closes cleanly, surface as WIRECLNRF.
+        Bu8 flush_b = {};
+        if (u8bAllocate(flush_b, 8) == OK) {
+            PKTu8sFeedFlush(u8bIdle(flush_b));
+            a_dup(u8c, fdata, u8bData(flush_b));
+            FILEFeedAll(wfd, fdata);
+            u8bFree(flush_b);
+        }
+        rv = WIRECLNRF;
+        goto delete_close;
+    }
+
+    sha1 zero = {};
+    if (wpush_send_update(wfd, &peer_tip, &zero, refname, YES) != OK) {
+        fprintf(stderr, "wpush: delete send_update failed\n");
+        goto delete_close;
+    }
+    //  No pack body: receive-pack treats a delete-only command list as
+    //  not requiring a packfile.  Close writer to signal end-of-input.
+    close(wfd); wfd = -1;
+
+    rv = wpush_drain_status(rfd, refname);
+    if (rv != OK)
+        fprintf(stderr, "wpush: delete drain_status returned non-OK\n");
+    close(rfd); rfd = -1;
+
+delete_close:
+    if (advbuf[0]) u8bFree(advbuf);
+    if (wfd >= 0) close(wfd);
+    if (rfd >= 0) close(rfd);
+    if (pid > 0) {
+        int rc = 0;
+        FILEReap(pid, &rc);
+    }
+    return rv;
+}

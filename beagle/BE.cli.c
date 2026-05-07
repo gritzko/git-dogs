@@ -700,12 +700,29 @@ static ok64 BEPut(cli *c, b8 seq) {
 }
 
 //  `be delete` is the mirror of `be put`: stage tree without a file.
+//  `be delete <uri>` per VERBS.md §DELETE.  Local URIs (paths or
+//  `?branch`) are sniff's job — DELStage / DELBranch.  Remote URIs
+//  (`//host` cached or transport-scheme) open the wire / drop the
+//  alias; both arms live in `keeper delete`.  Mixing local + remote
+//  URIs in one invocation is rejected by the all-or-nothing branch
+//  taken on the first authority-bearing URI — the verbs are too
+//  different to interleave coherently.
 static ok64 BEDelete(cli *c, b8 seq) {
     sane(c);
-    static dog_step const steps[] = {
+    b8 has_remote = NO;
+    for (u32 i = 0; i < c->nuris; i++) {
+        if (!u8csEmpty(c->uris[i].authority)) { has_remote = YES; break; }
+    }
+    if (has_remote) {
+        static dog_step const remote_steps[] = {
+            {u8slit("keeper"), u8slit("delete"), NO},
+        };
+        return BEDispatch(c, remote_steps, 1, seq);
+    }
+    static dog_step const local_steps[] = {
         {u8slit("sniff"),  u8slit("delete"), NO},
     };
-    return BEDispatch(c, steps, 1, seq);
+    return BEDispatch(c, local_steps, 1, seq);
 }
 
 //  `be diff <uri>` — delegate to graf.  For local URIs (no authority)

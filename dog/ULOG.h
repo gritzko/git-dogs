@@ -168,6 +168,16 @@ typedef ok64 (*ulog_each_fn)(ulogreccp rec, void *ctx);
 ok64 ULOGeachLatest(u8b data, kv64b idx, ron60 verb_filter,
                     ulog_each_fn cb, void *ctx);
 
+//  Like `ULOGeachLatest` but the dedup key is the URI-minus-fragment
+//  ALONE (verb is NOT folded into the hash).  At most one callback
+//  per URI key, with the absolutely-latest row carrying that key
+//  (regardless of which verb wrote it).  Useful for ref-resolution-
+//  style walks where a delete row must mask earlier writes by any
+//  other verb for the same key.  `verb_filter == 0` considers every
+//  verb.
+ok64 ULOGeachLatestKey(u8b data, kv64b idx, ron60 verb_filter,
+                       ulog_each_fn cb, void *ctx);
+
 // --- compact / truncate ---------------------------------------------
 
 //  Rewrite the log keeping only the latest row per (verb,

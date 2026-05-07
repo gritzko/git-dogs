@@ -55,6 +55,11 @@ ron60 REFSVerbPost(void) {
     return refs_verb_cached("post", &c);
 }
 
+ron60 REFSVerbDelete(void) {
+    static ron60 c = 0;
+    return refs_verb_cached("delete", &c);
+}
+
 ron60 REFSVerbSet(void) {
     static ron60 c = 0;
     return refs_verb_cached("set", &c);
@@ -250,8 +255,10 @@ typedef struct {
     u8bp  arena;
 } refs_load_ctx;
 
-//  Callback fed by ULOGeachLatest: capture (key = URI minus fragment,
-//  val = fragment bytes) into the caller's arena, push a `ref` entry.
+//  Callback fed by ULOGeachLatestKey: capture (key = URI minus
+//  fragment, val = fragment bytes) into the caller's arena, push
+//  a `ref` entry.  Tombstones (verb=`delete` OR zero-sha fragment)
+//  silently drop out — caller sees no row for the key.
 static ok64 refs_each_store(ulogreccp rec, void *ctx) {
     sane(rec && ctx);
     refs_load_ctx *c = (refs_load_ctx *)ctx;
@@ -261,11 +268,11 @@ static ok64 refs_each_store(ulogreccp rec, void *ctx) {
     //  state.
     if (rec->verb == REFSVerbGetFail() ||
         rec->verb == REFSVerbPostFail()) done;
+    //  Tombstone: explicit `delete` verb (canonical) or the legacy
+    //  zero-sha post shape.  Either way, the key is absent.
+    if (rec->verb == REFSVerbDelete()) done;
     uri const *u = &rec->uri;
 
-    //  Skip tombstoned keys: zero-sha fragment means the branch was
-    //  deleted (`?<branch>#0000…`).  Loaders/advertisers must not
-    //  surface ghost branches whose latest write was a delete.
     {
         u8cs r_frag = {u->fragment[0], u->fragment[1]};
         if (!u8csEmpty(r_frag) && r_frag[0][0] == '?')
@@ -310,11 +317,11 @@ ok64 REFSLoad(refp arr, u32p out_n, u32 max, u8b arena, u8csc dir) {
     if (oo != OK) done;  // missing file ⇒ 0 refs, not an error
 
     refs_load_ctx ctx = {arr, 0, max, arena};
-    //  verb_filter=0: include `get`, `post`, and legacy `set` rows.
-    //  Dedup keys on the URI-minus-fragment, so peer-observed (get)
-    //  and local-move (post) rows dedup separately per their distinct
-    //  URI keys.
-    ok64 eo = ULOGeachLatest(data, idx, 0, refs_each_store, &ctx);
+    //  verb_filter=0: include rows of every verb.  Dedup is by URI
+    //  key alone (no verb in the hash) so a `delete` row supersedes
+    //  any earlier `get`/`post` row for the same key — see REFS.h
+    //  on the tombstone semantics.
+    ok64 eo = ULOGeachLatestKey(data, idx, 0, refs_each_store, &ctx);
     ULOGClose(data, idx, YES);
     if (eo != OK) return eo;
     *out_n = ctx.cnt;
@@ -469,8 +476,11 @@ ok64 REFSResolve(urip resolved, u8bp arena, u8csc dir, u8csc input) {
     //  Fill resolved.query = fragment bytes (minus leading `?`).
     u8cs frag = {u->fragment[0], u->fragment[1]};
     if (!u8csEmpty(frag) && frag[0][0] == '?') u8csUsed(frag, 1);
-    //  Zero-sha tombstone: branch was deleted; report as absent.
-    if (refs_is_tombstone(frag)) { ULOGClose(data, idx, YES); fail(REFSNONE); }
+    //  Tombstone: explicit `delete` verb (canonical) or the legacy
+    //  zero-sha shape; either way, branch was deleted, report absent.
+    if (rec.verb == REFSVerbDelete() || refs_is_tombstone(frag)) {
+        ULOGClose(data, idx, YES); fail(REFSNONE);
+    }
     if (!u8csEmpty(frag))
         call(refs_capture_cs, arena, frag, resolved->query);
     if (!u8csEmpty(u->scheme))

@@ -179,4 +179,16 @@ ok64 WIREFetchAll(keeper *k, u8csc remote_uri);
 ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch,
               sha1 const *local_tip);
 
+//  Spawn a git-protocol peer and run a delete-only push: drain the
+//  advertisement, look up the peer's tip for `local_branch`, send
+//  `<peer_old> 000…0 refs/heads/<X>` + flush (no pack body — git's
+//  receive-pack accepts a delete-only command without a packfile),
+//  and drain the report-status response.
+//
+//  `local_branch` is be-side (empty selects trunk → wire alias
+//  `refs/heads/main`).  Returns OK on accept, WIRECLNRF if the peer
+//  did not advertise the ref (nothing to delete), WIRECLFL on
+//  transport failure or peer refusal.
+ok64 WIREPushDelete(keeper *k, u8csc remote_uri, u8csc local_branch);
+
 #endif

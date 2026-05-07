@@ -107,8 +107,18 @@ ok64 REFSCompareAndAppend(u8csc dir, u8csc key, u8csc expected_old, u8csc new_va
 //  fetch reached the peer but the post-fetch checkout crashed).
 //  REFSResolve / REFSLoad ignore them; readers that care about
 //  history (audit, recovery, debug) walk for them explicitly.
+//
+//  `delete` rows are the canonical tombstone shape: a row with
+//  verb `delete` and an empty (or zero-sha) value.  REFSLoad /
+//  REFSResolve walk in URI-key-only dedup order (via
+//  `ULOGeachLatestKey`), so a `delete` row supersedes any earlier
+//  `get`/`post` row for the same key regardless of verb.  The
+//  legacy "post-with-zero-sha" tombstone shape is still recognised
+//  for backward compat; new tombstone writers should use
+//  `REFSVerbDelete`.
 ron60 REFSVerbGet(void);
 ron60 REFSVerbPost(void);
+ron60 REFSVerbDelete(void);
 ron60 REFSVerbGetFail(void);
 ron60 REFSVerbPostFail(void);
 ron60 REFSVerbSet(void);   //  legacy — only for reading old logs

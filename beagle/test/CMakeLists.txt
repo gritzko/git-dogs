@@ -100,6 +100,7 @@ foreach(vc
         be-delete-branch-wt-on-it
         be-delete-branch-descendants
         be-delete-branch-resurrect
+        be-delete-alias
         be-patch-clean)
     add_test(NAME ${vc}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/${vc}.sh
