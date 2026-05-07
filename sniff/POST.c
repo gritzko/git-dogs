@@ -390,6 +390,18 @@ static ok64 post_classify_step(ulogreccp recs, u32 n, void *vctx) {
     u8cs path = {recs[0].uri.path[0], recs[0].uri.path[1]};
     if ($empty(path)) return OK;
 
+    //  Sniff-meta paths (.sniff / .dogs/* / .git*): never carry into
+    //  the new commit's tree, even when present in the baseline tree.
+    //  Legacy trees that committed these accidentally are scrubbed on
+    //  the next post.  Emit UNLINK so POST drops them; the on-disk
+    //  meta files are preserved (post_emit_decision UNLINK only
+    //  affects the tree, not the wt).
+    if (SNIFFSkipMeta(path)) {
+        u8cs none = {NULL, NULL};
+        (void)none;
+        return OK;
+    }
+
     //  Inspect sources contributing to this path.  Baseline / wt rows
     //  carry a kind suffix in the verb's bottom RON64 digit (appended
     //  by KEEPTreeULog / SNIFFWtULog), so source dispatch tests the

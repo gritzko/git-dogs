@@ -364,6 +364,12 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
         PATHu8bTerm(childp);
         a_dup(u8c, childpath, u8bData(childp));
 
+        //  Sniff-meta paths (.sniff, .dogs/*, .git*) never participate
+        //  in a 3-way merge: they may sit in legacy trees but PATCH
+        //  must not classify or write them.  Skip the entry on every
+        //  side; the next POST drops them from the result tree.
+        if (SNIFFSkipMeta(childpath)) continue;
+
         b8 any_dir = (l && l->is_dir) || (o && o->is_dir) ||
                      (t && t->is_dir);
         if (any_dir) {

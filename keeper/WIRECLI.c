@@ -484,9 +484,23 @@ static ok64 wcli_match_advert(int rfd, u8b buf, u8csc want_branch,
             *out_sha = first_sha;
             u8cs fn = {first_name[0], first_name[1]};
             WCLI_RECORD_NAME(fn);
+            sha1hex h = {}; sha1hexFromSha1(&h, out_sha);
+            fprintf(stderr,
+                    "WIREDBG match_advert: no want_branch, no HEAD match — "
+                    "fell back to first ref sha=%.40s name=%.*s\n",
+                    h.data, (int)$len(fn), (char *)fn[0]);
             done;
         }
         return WIRECLNRF;
+    }
+    {
+        sha1hex h = {}; sha1hexFromSha1(&h, out_sha);
+        a_dup(u8c, nm, u8bDataC(name_out));
+        fprintf(stderr,
+                "WIREDBG match_advert: picked sha=%.40s be-name='%.*s' "
+                "want_branch='%.*s'\n",
+                h.data, (int)$len(nm), (char *)nm[0],
+                (int)$len(want_branch), (char *)want_branch[0]);
     }
     #undef WCLI_RECORD_NAME
     done;

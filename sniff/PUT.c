@@ -71,6 +71,10 @@ static ok64 put_visit_tracked(u8cs path, u8 kind, u8cp esha, u8cs blob,
     //  Submodules / gitlinks: nothing to put.  POST keeps them via
     //  the gitlink-pass-through rule.
     if (kind == WALK_KIND_SUB) return WALKSKIP;
+    //  Meta paths (.sniff / .dogs/* / .git*) leak into legacy trees
+    //  but must never be re-staged.  Skip even when present on the
+    //  tracked side — POST will drop them from the new tree too.
+    if (SNIFFSkipMeta(path)) return OK;
 
     a_path(fp);
     if (SNIFFFullpath(fp, c->reporoot, path) != OK) return OK;
@@ -377,6 +381,15 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
         if (u8csEmpty(raw)) continue;
         if ($len(raw) >= 2 && raw[0][0] == '.' && raw[0][1] == '/')
             raw[0] += 2;
+        //  Refuse to stage sniff-meta paths (.sniff / .dogs/* / .git*)
+        //  even when explicitly named — they leak into legacy trees
+        //  but must not propagate forward.
+        if (SNIFFSkipMeta(raw)) {
+            fprintf(stderr,
+                    "sniff: put: %.*s is a meta path — skipped\n",
+                    (int)$len(raw), (char *)raw[0]);
+            skipped++; continue;
+        }
 
         b8 is_dir = ($len(raw) > 0 && *(raw[1] - 1) == '/');
         if (is_dir) {

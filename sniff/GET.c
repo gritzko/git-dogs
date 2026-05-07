@@ -115,6 +115,14 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     //  no write, no mark.
     if (kind == WALK_KIND_SUB) return WALKSKIP;
 
+    //  Sniff-meta paths (.sniff, .dogs/*, .git*) sometimes leak into
+    //  legacy trees but must never be materialised on disk — the live
+    //  ULOG / store dir would be clobbered.  Skip both the dir creation
+    //  and the file write.
+    if (!$empty(path) && SNIFFSkipMeta(path)) {
+        return (kind == WALK_KIND_DIR) ? WALKSKIP : OK;
+    }
+
     if (kind == WALK_KIND_DIR) {
         if ($empty(path)) return OK;    // root; walker recurses
         a_path(dp);
@@ -226,6 +234,14 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
     //  Path is identical in the tie group — peek from whichever side.
     u8cs path = {};
     u8csMv(path, (base ? base->uri.path : tgt->uri.path));
+
+    //  `.dogs/`, `.sniff*`, `.git*` are sniff-meta — they sometimes
+    //  leak into committed trees (legacy / accidental put), but they
+    //  must never participate in the overlap-dirty classifier: the
+    //  live ULOG and store dir would always trip the unstamped-mtime
+    //  check and refuse every cross-branch GET.  Treat them as if
+    //  they weren't in the tree.
+    if (SNIFFSkipMeta(path)) return OK;
 
     b8 is_sub = (base && get_is_sub(base)) || (tgt && get_is_sub(tgt));
     if (is_sub) return OK;        //  gitlink — sniff doesn't manage
