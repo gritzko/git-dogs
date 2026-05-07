@@ -114,7 +114,6 @@ static b8 weave_line_in(u8cs needle, u8cs haystack) {
 typedef struct {
     u8cs o;
     u8cs x;
-    ok64 fail;
 } hunk_check_ctx;
 
 //  TLV-rendering property: in the emitted `text + hili` stream, an
@@ -122,11 +121,12 @@ typedef struct {
 //  span contained at least one '\n' would visually fuse the two
 //  multi-line edits onto a single screen row in bro (e.g.
 //  `name[0]char const *name…`).  Catches the bug fixed by the
-//  synthetic-`\n` insertion in `WEAVEEmitDiff`.
-static ok64 weave_tlv_fusion_check(hunkc *hk) {
-    sane(hk);
+//  synthetic-`\n` insertion in `WEAVEEmitDiff`.  Property failure
+//  traps via `must()` so libFuzzer captures the offending input.
+static void weave_tlv_fusion_check(hunkc *hk) {
+    must(hk != NULL, "null hunk");
     int n_hili = (int)$len(hk->hili);
-    if (n_hili < 2) return OK;
+    if (n_hili < 2) return;
     u8c *text = hk->text[0];
     u32 textlen = (u32)$len(hk->text);
     u32 prev_lo = 0;
@@ -141,33 +141,42 @@ static ok64 weave_tlv_fusion_check(hunkc *hk) {
             u8 first_byte = text[boundary];
             if (last_byte != '\n' && first_byte != '\n') {
                 u32 span_len = boundary - prev_lo;
-                if (span_len > 0 &&
-                    memchr(text + prev_lo, '\n', span_len) != NULL) {
+                b8 prev_multi = (span_len > 0) &&
+                    (memchr(text + prev_lo, '\n', span_len) != NULL);
+                if (prev_multi) {
                     fprintf(stderr,
                         "WEAVE fuzz: INS↔DEL fusion at offset %u "
                         "(%c→%c, span_len=%u, last=0x%02x first=0x%02x)\n",
                         boundary, prev_tag, cur_tag, span_len,
                         last_byte, first_byte);
-                    return FAILSANITY;
+                    must(0, "INS↔DEL fusion across multi-line span");
                 }
             }
         }
         prev_lo = boundary;
         prev_tag = cur_tag;
     }
-    return OK;
+}
+
+//  Print the body's bytes in mixed printable/hex form so case (b)
+//  cases — bodies whose first byte is NUL, or which contain control
+//  bytes — produce a useful repro hint instead of an opaque `''`.
+static void weave_dump_body(u8cs body) {
+    u32 n = (u32)$len(body);
+    fprintf(stderr, "[%u]", n);
+    for (u32 i = 0; i < n; i++) {
+        u8 c = body[0][i];
+        if (c >= 0x20 && c < 0x7f && c != '\\') fputc(c, stderr);
+        else fprintf(stderr, "\\x%02x", c);
+    }
 }
 
 static ok64 weave_hunk_check_cb(hunkc *hk, void *vctx) {
     sane(hk && vctx);
     hunk_check_ctx *c = vctx;
-    if (c->fail != OK) return OK;
 
     //  Property: no INS↔DEL fusion across multi-line spans.
-    {
-        ok64 fr = weave_tlv_fusion_check(hk);
-        if (fr != OK) { c->fail = fr; return OK; }
-    }
+    weave_tlv_fusion_check(hk);
 
     //  Render the hunk in plain unified-diff form.
     Bu8 buf = {};
@@ -197,18 +206,16 @@ static ok64 weave_hunk_check_cb(hunkc *hk, void *vctx) {
         u8 pref = *p;
         u8cs body = {p + 1, eol};
         if (pref == '-' && !weave_line_in(body, c->o)) {
-            fprintf(stderr,
-                "WEAVE fuzz: -line not present in OLD: '%.*s'\n",
-                (int)$len(body), (char *)body[0]);
-            c->fail = FAILSANITY;
-            break;
+            fprintf(stderr, "WEAVE fuzz: -line not present in OLD: ");
+            weave_dump_body(body);
+            fputc('\n', stderr);
+            must(0, "-line in rendered diff doesn't match OLD");
         }
         if (pref == '+' && !weave_line_in(body, c->x)) {
-            fprintf(stderr,
-                "WEAVE fuzz: +line not present in NEW: '%.*s'\n",
-                (int)$len(body), (char *)body[0]);
-            c->fail = FAILSANITY;
-            break;
+            fprintf(stderr, "WEAVE fuzz: +line not present in NEW: ");
+            weave_dump_body(body);
+            fputc('\n', stderr);
+            must(0, "+line in rendered diff doesn't match NEW");
         }
 
         p = (eol < e) ? eol + 1 : eol;
@@ -259,12 +266,11 @@ static ok64 weave_check_one(u8cs o_data, u8cs x_data, u32 x_src,
     if (ret != OK) goto out;
     {
         a_dup(u8c, repro_o, u8bData(outbuf));
-        if ($len(repro_o) != $len(o_data) ||
-            ($len(o_data) > 0 &&
-             memcmp(repro_o[0], o_data[0],
-                    (size_t)$len(o_data)) != 0)) {
-            ret = FAILSANITY; goto out;
-        }
+        must($len(repro_o) == $len(o_data) &&
+             ($len(o_data) == 0 ||
+              memcmp(repro_o[0], o_data[0],
+                     (size_t)$len(o_data)) == 0),
+             "WEAVEDiff round-trip lost the OLD side (in != x_src walk)");
     }
 
     //  Property: walking with `rm == 0` filter reproduces `x`.
@@ -272,29 +278,28 @@ static ok64 weave_check_one(u8cs o_data, u8cs x_data, u32 x_src,
     if (ret != OK) goto out;
     {
         a_dup(u8c, repro_x, u8bData(outbuf));
-        if ($len(repro_x) != $len(x_data) ||
-            ($len(x_data) > 0 &&
-             memcmp(repro_x[0], x_data[0],
-                    (size_t)$len(x_data)) != 0)) {
-            ret = FAILSANITY; goto out;
-        }
+        must($len(repro_x) == $len(x_data) &&
+             ($len(x_data) == 0 ||
+              memcmp(repro_x[0], x_data[0],
+                     (size_t)$len(x_data)) == 0),
+             "WEAVEDiff round-trip lost the NEW side (rm == 0 walk)");
     }
 
-    //  Property (patch validity): every `-`/`+` line in the rendered
-    //  hunk text must be a real line of `o`/`x`.  Catches partial-line
-    //  duplicates like the `+//  Stock` regression (test/diff/
-    //  03-stock-context).
+    //  Property (patch validity + TLV fusion): every `-`/`+` line in
+    //  the rendered hunk text must be a real line of `o`/`x`, and the
+    //  emitted text must not have INS↔DEL transitions that fuse two
+    //  multi-line edits onto one screen row.  Failures `must()`-trap
+    //  inside `weave_hunk_check_cb` so libFuzzer captures the input.
     {
         a_cstr(name, "fuzz");
         u32 to_src = x_src;
-        hunk_check_ctx hctx = {.fail = OK};
+        hunk_check_ctx hctx = {};
         u8csMv(hctx.o, o_data);
         u8csMv(hctx.x, x_data);
         (void)WEAVEEmitDiff(&wox, name,
                             weave_in_from, &to_src,
                             weave_in_to,   &to_src,
                             weave_hunk_check_cb, &hctx);
-        if (hctx.fail != OK) { ret = hctx.fail; goto out; }
     }
 
 out:

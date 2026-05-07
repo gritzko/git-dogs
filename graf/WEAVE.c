@@ -106,6 +106,24 @@ ok64 WEAVEFromBlob(weave *w, u8cs data, u8cs ext, u32 src) {
         u32 end = (u32)$len(data);
         call(u32bFeed1, w->toks, tok32Pack('S', end));
         call(u64bFeed1, w->hashlets, RAPHash(data));
+    } else {
+        //  Lexer may bail mid-input on malformed source (unterminated
+        //  string, unbalanced comment, etc.) — TOKLexer returns a
+        //  non-OK code but we ignore it ("best effort" above).  The
+        //  bytes after the last emitted token still get appended to
+        //  `w->text` below, which would leave them untokenized — the
+        //  WEAVEDiff round-trip property fails because the token
+        //  walk reproduces only the parsed prefix.  Catch the gap
+        //  here: emit a synthetic 'S' token covering the trailing
+        //  un-tokenized bytes.
+        u32 last_end = tok32Offset(((u32cp)w->toks[1])
+                                   [u32bDataLen(w->toks) - 1]);
+        u32 total    = (u32)$len(data);
+        if (last_end < total) {
+            u8cs tail = {data[0] + last_end, data[1]};
+            call(u32bFeed1, w->toks, tok32Pack('S', total));
+            call(u64bFeed1, w->hashlets, RAPHash(tail));
+        }
     }
 
     //  Append data bytes to w->text.  Offsets in w->toks now match.
@@ -1040,16 +1058,13 @@ ok64 WEAVEEmitDiff(weave const *w, u8cs name,
         //  any token whose start line is inside the window as visible.
         if (cur_line >= win_lo && cur_line <= win_hi) {
             //  Synthetic newline at INS↔DEL transitions when neither
-            //  side ended/starts at '\n' AND the *previous* span ran
+            //  side ends/starts at '\n' AND the previous span ran
             //  across a line boundary (contained a '\n').  Without
             //  it, bro's TLV renderer fuses an INS-line's tail with
             //  the next DEL-line's head — e.g.
             //    `u8cs seqno_s = {name[0], name[0]char const *name…`
-            //  Don't fire on single-line modifications (the
-            //  `puts("hello");` → `puts("hello, world");` case): the
-            //  previous span never spans `\n`, so the surrounding
-            //  KEEP+changed bytes form one logical line that the
-            //  line-renderer handles correctly without a split.
+            //  LineBased rendering is robust via HUNK.c's dampener
+            //  (drops phantom DEL flushes when oldb has no DEL bytes).
             if (last_hili != 0 && last_hili != tag &&
                 ((last_hili == 'I' && tag == 'D') ||
                  (last_hili == 'D' && tag == 'I'))) {
@@ -1057,9 +1072,6 @@ ok64 WEAVEEmitDiff(weave const *w, u8cs name,
                 u8c *odata = u8bDataHead(outtext);
                 u8c last_byte = (olen > 0) ? odata[olen - 1] : '\n';
                 u8c first_byte = (lo < hi) ? text[lo] : '\n';
-                //  Did the *previous span* (since `last_hili_start`)
-                //  contain any '\n'?  Scanning back to that boundary
-                //  bounds the work to the just-emitted span.
                 u8 const *outp = u8bDataHead(outtext);
                 u32 span_len = (olen > last_hili_start)
                                ? (olen - last_hili_start) : 0;
@@ -1067,29 +1079,25 @@ ok64 WEAVEEmitDiff(weave const *w, u8cs name,
                     (memchr(outp + last_hili_start, '\n', span_len) != NULL);
                 if (last_byte != '\n' && first_byte != '\n' &&
                     prev_multi_line) {
-                    //  Close the previous hili span at the byte
-                    //  before the synthetic '\n', then add a 'D'-
-                    //  tagged span of length 1 for the '\n' itself.
                     ok64 fc = u32bFeed1(outhili,
                         tok32Pack(last_hili, olen));
                     if (fc != OK) { ret = fc; goto cleanup; }
                     fc = u8bFeed1(outtext, '\n');
                     if (fc != OK) { ret = fc; goto cleanup; }
-                    //  Tag the synthetic '\n' as DEL so a renderer
-                    //  walking hili by-byte sees: `…INS bytes` then
-                    //  one DEL '\n' (terminating the INS line) then
-                    //  `DEL bytes…`.  Tracked separately from the
-                    //  upcoming `tag` so we don't double-emit.
+                    //  Mark synthetic '\n' with tag 'X' so HUNK.c
+                    //  LineBased can tell it apart from a real DEL
+                    //  '\n'.  (tok32 packs the tag as `tag - 'A'` in
+                    //  5 bits, so the tag must lie in 'A'..'`'; 'X'
+                    //  is unused by the lexer or diff classifier.)
+                    //  Bro renders the byte as a row break, which is
+                    //  the only effect we needed for fusion-breaking.
                     fc = u32bFeed1(outhili,
-                        tok32Pack('D', olen + 1));
+                        tok32Pack('X', olen + 1));
                     if (fc != OK) { ret = fc; goto cleanup; }
-                    //  Match the toks stream so consumers walking
-                    //  toks by-end-offset see a token boundary at
-                    //  the synthetic '\n' too.
                     fc = u32bFeed1(outtoks,
                         tok32Pack('W', olen + 1));
                     if (fc != OK) { ret = fc; goto cleanup; }
-                    last_hili = 'D';        // NL just emitted
+                    last_hili = 'X';
                 }
             }
             if (last_hili != 0 && last_hili != tag) {

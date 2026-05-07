@@ -214,6 +214,14 @@ ok64 HUNKu8sFeedLineBased(u8s into, hunk const *hk) {
         for (; p < e; p++) {
             u8 c = *p;
             b8 is_nl = (c == '\n');
+            if (tag == 'X') {
+                //  Synthetic '\n' inserted by WEAVEEmitDiff to break
+                //  INS↔DEL fusion in bro's TLV path.  The byte does
+                //  not exist in OLD or NEW — drop it entirely so the
+                //  LineBased renderer sees the underlying spans as
+                //  if no break were inserted.
+                continue;
+            }
             if (tag == 'D') {
                 if (is_nl) {
                     u8sFeed1(into, '-');
