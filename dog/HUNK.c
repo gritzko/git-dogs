@@ -171,54 +171,120 @@ ok64 HUNKu8sFeedLineBased(u8s into, hunk const *hk) {
         done;
     }
 
+    //  Reconstruct OLD and NEW byte streams from the tag-tagged
+    //  merged text, breaking each side into its own logical lines.
+    //  KEEP bytes appear in both streams; DEL only in OLD; INS only
+    //  in NEW.  At every '\n':
+    //    - DEL '\n'  flushes the OLD line ('-' prefix; KEEP+DEL
+    //                bytes accumulated since the previous flush).
+    //    - INS '\n'  flushes the NEW line ('+' prefix).
+    //    - KEEP '\n' flushes BOTH lines: OLD with '-' if it had any
+    //                DEL byte else ' ' (context); NEW with '+' if it
+    //                had any INS byte (otherwise it's a context line
+    //                already emitted by OLD's flush — drop it to
+    //                avoid duplication).
+    //
+    //  The previous "split merged text on '\n'" approach failed when
+    //  the matcher grouped INS and DEL into multi-line blobs that
+    //  straddle line boundaries — a "line" of merged text could
+    //  contain the tail of an INS region and the head of a DEL
+    //  region with no '\n' between them, so the per-line +/-/space
+    //  tag-roll-up produced incoherent reconstructions.
     u8c *base = hk->text[0];
-    u8c *end  = hk->text[1];
     int  n_hili = (int)$len(hk->hili);
 
-    u8c *cur = base;
-    while (cur < end) {
-        u8c *line_start = cur;
-        while (cur < end && *cur != '\n') cur++;
-        u8c *line_end = cur;            // exclusive of '\n'
-        if (cur < end && *cur == '\n') cur++;
+    //  Build OLD and NEW byte streams independently:
+    //    OLD = KEEP + DEL bytes (tracking per-line "had any DEL").
+    //    NEW = KEEP + INS bytes (tracking per-line "had any INS").
+    //  Lines are split on real '\n' on each side.  A line whose flag
+    //  is set emits with `-`/`+`; otherwise it's a context line — we
+    //  emit context lines from the OLD walk only (NEW's context is
+    //  byte-identical, so emitting it again would double the line).
+    Bu8 oldb = {}, newb = {};
+    call(u8bAllocate, oldb, 1UL << 16);
+    call(u8bAllocate, newb, 1UL << 16);
+    b8 old_dirty = NO, new_dirty = NO;
 
-        u32 line_lo = (u32)(line_start - base);
-        u32 line_hi = (u32)(line_end - base);
-
-        b8 has_ins = NO, has_del = NO;
-        for (int i = 0; i < n_hili; i++) {
-            u32 span_lo = (i > 0) ? tok32Offset(hk->hili[0][i - 1]) : 0;
-            u32 span_hi = tok32Offset(hk->hili[0][i]);
-            if (span_hi <= line_lo) continue;
-            if (span_lo >= line_hi) break;
-            u8 tag = tok32Tag(hk->hili[0][i]);
-            if (tag == 'I') has_ins = YES;
-            else if (tag == 'D') has_del = YES;
-            if (has_ins && has_del) break;
+    u32 prev = 0;
+    for (int i = 0; i < n_hili; i++) {
+        u32 span_hi = tok32Offset(hk->hili[0][i]);
+        u8  tag     = tok32Tag(hk->hili[0][i]);
+        u8c *p = base + prev;
+        u8c *e = base + span_hi;
+        for (; p < e; p++) {
+            u8 c = *p;
+            b8 is_nl = (c == '\n');
+            if (tag == 'D') {
+                if (is_nl) {
+                    u8sFeed1(into, '-');
+                    a_dup(u8c, body, u8bData(oldb));
+                    u8sFeed(into, body);
+                    u8sFeed1(into, '\n');
+                    u8bReset(oldb);
+                    old_dirty = NO;
+                } else {
+                    u8bFeed1(oldb, c);
+                    old_dirty = YES;
+                }
+            } else if (tag == 'I') {
+                if (is_nl) {
+                    //  Emit `+` only if this NEW line carried any INS
+                    //  bytes.  An untagged new_acc holds context bytes
+                    //  also present in old_acc; OLD's '\n' will flush
+                    //  them as context — emitting them here too would
+                    //  duplicate the line.
+                    if (new_dirty) {
+                        u8sFeed1(into, '+');
+                        a_dup(u8c, body, u8bData(newb));
+                        u8sFeed(into, body);
+                        u8sFeed1(into, '\n');
+                    }
+                    u8bReset(newb);
+                    new_dirty = NO;
+                } else {
+                    u8bFeed1(newb, c);
+                    new_dirty = YES;
+                }
+            } else { // KEEP
+                if (is_nl) {
+                    u8sFeed1(into, old_dirty ? '-' : ' ');
+                    a_dup(u8c, ob, u8bData(oldb));
+                    u8sFeed(into, ob);
+                    u8sFeed1(into, '\n');
+                    u8bReset(oldb);
+                    if (new_dirty) {
+                        u8sFeed1(into, '+');
+                        a_dup(u8c, nb, u8bData(newb));
+                        u8sFeed(into, nb);
+                        u8sFeed1(into, '\n');
+                    }
+                    u8bReset(newb);
+                    old_dirty = NO;
+                    new_dirty = NO;
+                } else {
+                    u8bFeed1(oldb, c);
+                    u8bFeed1(newb, c);
+                }
+            }
         }
-
-        u8cs line = {line_start, line_end};
-        if (!has_ins && !has_del) {
-            u8sFeed1(into, ' ');
-            u8sFeed(into, line);
-            u8sFeed1(into, '\n');
-        } else if (has_ins && !has_del) {
-            u8sFeed1(into, '+');
-            u8sFeed(into, line);
-            u8sFeed1(into, '\n');
-        } else if (has_del && !has_ins) {
-            u8sFeed1(into, '-');
-            u8sFeed(into, line);
-            u8sFeed1(into, '\n');
-        } else {
-            // Mixed INS+DEL within a line: split into '-old' / '+new'
-            // by reconstructing each version (skip the other side's
-            // bytes).  Skip emitting the '-old' if it'd be empty after
-            // dropping INS, and similarly for '+new'.
-            call(hunk_emit_recon, into, '-', line_lo, line_hi, hk, 'I');
-            call(hunk_emit_recon, into, '+', line_lo, line_hi, hk, 'D');
-        }
+        prev = span_hi;
     }
+
+    //  Trailing partial line (no terminating '\n').
+    if (u8bDataLen(oldb) > 0 || old_dirty) {
+        u8sFeed1(into, old_dirty ? '-' : ' ');
+        a_dup(u8c, ob, u8bData(oldb));
+        u8sFeed(into, ob);
+        u8sFeed1(into, '\n');
+    }
+    if (new_dirty && u8bDataLen(newb) > 0) {
+        u8sFeed1(into, '+');
+        a_dup(u8c, nb, u8bData(newb));
+        u8sFeed(into, nb);
+        u8sFeed1(into, '\n');
+    }
+    u8bFree(oldb);
+    u8bFree(newb);
     u8sFeed1(into, '\n');
     done;
 }

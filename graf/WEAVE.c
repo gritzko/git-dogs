@@ -61,6 +61,27 @@ typedef struct {
 static ok64 weave_blob_cb(u8 tag, u8cs tok, void *vctx) {
     sane(vctx);
     weave_blob_ctx *ctx = vctx;
+    //  Split whitespace tokens at every '\n' so that "end-of-line +
+    //  next-line indent" don't fuse into one token.  Without this
+    //  split, an LCS that classifies the fused token as DEL drags
+    //  the next line's indent into the deleted region — making the
+    //  diff falsely flag the (otherwise unchanged) next line as
+    //  modified.
+    if (tag == 'W' && $len(tok) > 1) {
+        u8c *p = tok[0];
+        u8c *e = tok[1];
+        while (p < e) {
+            u8c *q = p;
+            while (q < e && *q != '\n') q++;
+            u8c *seg_end = (q < e) ? q + 1 : e;
+            u32  end_off = (u32)(seg_end - ctx->base);
+            u8cs seg     = {p, seg_end};
+            call(u32bFeed1, ctx->w->toks,     tok32Pack(tag, end_off));
+            call(u64bFeed1, ctx->w->hashlets, RAPHash(seg));
+            p = seg_end;
+        }
+        done;
+    }
     u32 end = (u32)(tok[1] - ctx->base);
     call(u32bFeed1, ctx->w->toks,     tok32Pack(tag, end));
     call(u64bFeed1, ctx->w->hashlets, RAPHash(tok));
@@ -887,6 +908,13 @@ ok64 WEAVEEmitDiff(weave const *w, u8cs name,
         for (u32 b = lo; b < hi; b++) if (text[b] == '\n') nl++;
 
         if (tag == 'I' || tag == 'D') {
+            //  Mark the line ABOVE too — splitting whitespace tokens
+            //  at '\n' (in `weave_blob_cb`) makes line marking sharper
+            //  but can leave a pure-insertion's "before context" out of
+            //  the window; including the prior line restores the
+            //  natural unified-diff "show the line above the insert"
+            //  behaviour without overshooting context.
+            if (cur_line > 0) cmark[cur_line - 1] = 1;
             for (u32 l = cur_line; l <= cur_line + nl && l < total_lines_est; l++)
                 cmark[l] = 1;
         }
