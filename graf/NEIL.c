@@ -2,6 +2,23 @@
 
 #include "abc/PRO.h"
 
+// True if the token at idx in (toks, base) is an alphanumeric/_ run of
+// length >= 2 — the "substantive identifier" predicate Property #4
+// uses to ensure shared-context names survive NEIL.
+static b8 NEILIsIdent(u32cs toks, u8cp base, u32 idx) {
+    u32 lo = (idx > 0) ? tok32Offset(toks[0][idx - 1]) : 0;
+    u32 hi = tok32Offset(toks[0][idx]);
+    if (hi - lo < 2) return NO;
+    for (u32 b = lo; b < hi; b++) {
+        u8 c = base[b];
+        b8 d  = (c >= '0' && c <= '9');
+        b8 lc = (c >= 'a' && c <= 'z');
+        b8 uc = (c >= 'A' && c <= 'Z');
+        if (!d && !lc && !uc && c != '_') return NO;
+    }
+    return YES;
+}
+
 // Byte length of tokens [from, from+count), optionally skipping whitespace.
 static u32 NEILByteSpanX(u32cs toks, u8cp base, u32 from, u32 count,
                          b8 skip_ws) {
@@ -173,6 +190,60 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
                 tmp[w++] = buf[k]; continue;
             }
 
+            // Protect EQs that contain at least one alphanumeric token
+            // of length >= 2 — IF the EQ is line-aligned on at least
+            // one boundary OR the surrounding edits are small.  When
+            // the EQ is mid-line on both sides AND sits between large
+            // edit regions, the matched identifier is almost certainly
+            // accidental (e.g. `DOG_PUP_SEQNO_W` appearing 3x in OLD
+            // and 3x in NEW across a function rewrite — LCS picks one
+            // pairing arbitrarily; rendering it as KEEP within
+            // otherwise-DEL or -INS lines just adds visual noise).
+            //
+            // "Line-aligned" here means the byte just before the EQ's
+            // first token is `\n` OR the byte just after the EQ's last
+            // token (in `new_src`) is `\n`.  Cheap and covers the
+            // single-line modification case (`int x = 5;` →
+            // `int x = 7;`) where the EQ tokens straddle an `\n`.
+            //
+            // Runs BEFORE the line-fraction kill so that a substantive
+            // identifier doesn't get sacrificed when the surrounding
+            // line happens to be dominated by edits (`.int]D` vs
+            // `\xff…\xff int` — `int` is shared context, must survive).
+            {
+                u32 eq_from = new_off[k];
+                b8 has_ident = NO;
+                for (u32 j = 0; j < eq_len && !has_ident; j++) {
+                    u32 ti = eq_from + j;
+                    u32 lo = (ti > 0) ? tok32Offset(new_toks[0][ti - 1]) : 0;
+                    u32 hi = tok32Offset(new_toks[0][ti]);
+                    if (hi - lo < 2) continue;
+                    b8 alnum = YES;
+                    for (u32 b = lo; b < hi && alnum; b++) {
+                        u8 c = new_src[0][b];
+                        b8 d  = (c >= '0' && c <= '9');
+                        b8 lc = (c >= 'a' && c <= 'z');
+                        b8 uc = (c >= 'A' && c <= 'Z');
+                        if (!d && !lc && !uc && c != '_') alnum = NO;
+                    }
+                    if (alnum) has_ident = YES;
+                }
+                if (has_ident) {
+                    //  Substantive identifier match — always keep.
+                    //  The previous "kill if surrounding edits are
+                    //  large and EQ is mid-line on both sides" override
+                    //  was unsound: it could drop the *only* surviving
+                    //  EQ for a given identifier, violating the
+                    //  Property-4 invariant that every pre-NEIL EQ
+                    //  identifier appears in some post-NEIL EQ (see
+                    //  graf/test/NEIL01.c crash_300bca78).  In the
+                    //  function-rewrite case where a repeated
+                    //  identifier picks an arbitrary pairing, the
+                    //  resulting visual noise is the lesser evil.
+                    tmp[w++] = buf[k]; continue;
+                }
+            }
+
             // Line-fraction kill: if the EQ is a small fragment of the
             // line(s) it spans, drop it.  Common case is incidental
             // bracket / punctuation matches inside otherwise-different
@@ -224,69 +295,6 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
             // Never kill EQs larger than the tunable ceiling.
             if (NEIL_MAX_KILL > 0 && eq_bytes >= NEIL_MAX_KILL) {
                 tmp[w++] = buf[k]; continue;
-            }
-
-            // Protect EQs that contain at least one alphanumeric token
-            // of length >= 2 — IF the EQ is line-aligned on at least
-            // one boundary OR the surrounding edits are small.  When
-            // the EQ is mid-line on both sides AND sits between large
-            // edit regions, the matched identifier is almost certainly
-            // accidental (e.g. `DOG_PUP_SEQNO_W` appearing 3x in OLD
-            // and 3x in NEW across a function rewrite — LCS picks one
-            // pairing arbitrarily; rendering it as KEEP within
-            // otherwise-DEL or -INS lines just adds visual noise).
-            //
-            // "Line-aligned" here means the byte just before the EQ's
-            // first token is `\n` OR the byte just after the EQ's last
-            // token (in `new_src`) is `\n`.  Cheap and covers the
-            // single-line modification case (`int x = 5;` →
-            // `int x = 7;`) where the EQ tokens straddle an `\n`.
-            {
-                u32 eq_from = new_off[k];
-                b8 has_ident = NO;
-                for (u32 j = 0; j < eq_len && !has_ident; j++) {
-                    u32 ti = eq_from + j;
-                    u32 lo = (ti > 0) ? tok32Offset(new_toks[0][ti - 1]) : 0;
-                    u32 hi = tok32Offset(new_toks[0][ti]);
-                    if (hi - lo < 2) continue;
-                    b8 alnum = YES;
-                    for (u32 b = lo; b < hi && alnum; b++) {
-                        u8 c = new_src[0][b];
-                        b8 d  = (c >= '0' && c <= '9');
-                        b8 lc = (c >= 'a' && c <= 'z');
-                        b8 uc = (c >= 'A' && c <= 'Z');
-                        if (!d && !lc && !uc && c != '_') alnum = NO;
-                    }
-                    if (alnum) has_ident = YES;
-                }
-                if (has_ident) {
-                    //  Protect when (a) the EQ touches at least one
-                    //  line boundary in `new_src` (covers single-line
-                    //  modifications where most tokens stay), OR (b)
-                    //  the surrounding edits are small enough that the
-                    //  match is plausibly intentional, not accidental.
-                    //  Mid-line-on-both-sides + large surrounding edits
-                    //  = LCS picked one arbitrary occurrence of a
-                    //  repeated identifier across a function rewrite —
-                    //  visually noisy in token-coloured renderers.
-                    u32 eq_blo = (eq_from > 0)
-                        ? tok32Offset(new_toks[0][eq_from - 1]) : 0;
-                    u32 eq_bhi = tok32Offset(new_toks[0][eq_from + eq_len - 1]);
-                    u32 nlen   = (u32)$len(new_src);
-                    b8 line_aligned = NO;
-                    if (eq_blo == 0 || new_src[0][eq_blo - 1] == '\n')
-                        line_aligned = YES;
-                    if (eq_bhi >= nlen || new_src[0][eq_bhi] == '\n')
-                        line_aligned = YES;
-                    //  "Big" = at least one full line worth of edit on
-                    //  each side.  Single-line `int x = 5;` →
-                    //  `int x = 7;` has tiny surrounds; the existing
-                    //  has_ident protection is right there.
-                    b8 big_both = (before_bytes >= 60 && after_bytes >= 60);
-                    if (line_aligned || !big_both) {
-                        tmp[w++] = buf[k]; continue;
-                    }
-                }
             }
 
             // Protect EQs that contain a line with >= 6 non-ws bytes.
@@ -365,19 +373,19 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
     return NEILCanon(edl);
 }
 
-ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
-               u8csc old_src, u8csc new_src) {
-    sane(edl != NULL);
+// One pass of boundary shifting.  Returns OK and sets *changed=YES if
+// any region was actually shifted.  Coalescing 0-length entries and
+// merging adjacent same-op runs happens after this in NEILShift.
+static ok64 neil_shift_pass(e32g edl, u32cs old_toks, u32cs new_toks,
+                             u8csc old_src, u8csc new_src, b8 *changed) {
+    sane(edl != NULL && changed != NULL);
+    *changed = NO;
     u32 nedl = (u32)(edl[0] - edl[2]);
-    //  Shift needs both flanking EQs; <3 entries means no shifting can
-    //  happen, but canonicalization still must run so a leftover
-    //  [DEL, INS] from upstream is collapsed to [INS, DEL].
-    if (nedl < 3) return NEILCanon(edl);
+    if (nedl < 3) done;
 
     u32 new_ntoks = (u32)$len(new_toks);
     u32 old_ntoks = (u32)$len(old_toks);
 
-    // Compute old/new token offsets for each EDL entry.
     Bu32 oobuf = {}, nobuf = {};
     ok64 ao = u32bAlloc(oobuf, nedl);
     ok64 no = u32bAlloc(nobuf, nedl);
@@ -400,7 +408,6 @@ ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
         }
     }
 
-    // Process change regions: runs of non-EQ entries between two EQs.
     u32 k = 0;
     while (k < nedl) {
         if (DIFF_OP(edl[2][k]) != DIFF_EQ) { k++; continue; }
@@ -458,6 +465,35 @@ ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
             max_right = j + 1;
         }
 
+        //  Property-4 guard: shifting must not move identifier-bearing
+        //  tokens out of an EQ.  max_left shrinks eq1 from its tail
+        //  (loses the last `max_left` tokens); max_right shrinks eq2
+        //  from its head (loses the first `max_right` tokens).  Cap
+        //  each so the rightmost identifier in eq1 and the leftmost
+        //  identifier in eq2 stay within their respective EQs.  See
+        //  graf/test/NEIL01.c crash_2d66dfa1 — without this cap shift
+        //  could collapse a single-token `=1[ggg]` to length 0.
+        {
+            u32 oi_eq1 = ooff[eq1];
+            for (u32 j = 0; j < max_left; j++) {
+                u32 ti = oi_eq1 + n1 - 1 - j;
+                if (NEILIsIdent(old_toks, old_src[0], ti)) {
+                    max_left = j;
+                    break;
+                }
+            }
+        }
+        {
+            u32 oi_eq2 = ooff[eq2];
+            for (u32 j = 0; j < max_right; j++) {
+                u32 ti = oi_eq2 + j;
+                if (NEILIsIdent(old_toks, old_src[0], ti)) {
+                    max_right = j;
+                    break;
+                }
+            }
+        }
+
         if (max_left + max_right == 0) { k = ce; continue; }
 
         // 3. Score all positions, pick best.
@@ -486,26 +522,43 @@ ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
         if (best_d != 0) {
             edl[2][eq1] = DIFF_ENTRY(DIFF_EQ, (u32)((int)n1 + best_d));
             edl[2][eq2] = DIFF_ENTRY(DIFF_EQ, (u32)((int)n2 - best_d));
+            *changed = YES;
         }
 
         k = ce;
     }
 
-    // Remove any 0-length entries produced by shifting.
-    u32 w = 0;
-    for (u32 k2 = 0; k2 < nedl; k2++) {
-        if (DIFF_LEN(edl[2][k2]) == 0) continue;
-        edl[2][w++] = edl[2][k2];
-    }
-    edl[0] = edl[2] + w;
-
     u32bFree(oobuf);
     u32bFree(nobuf);
+    done;
+}
 
-    //  Splice canonicalization — same reasoning as in `NEILCleanup`.
-    //  Shifting an EQ across a non-EQ run can leave a `DEL INS DEL`
-    //  shape; collapse to `INS DEL`.
-    return NEILCanon(edl);
+ok64 NEILShift(e32g edl, u32cs old_toks, u32cs new_toks,
+               u8csc old_src, u8csc new_src) {
+    sane(edl != NULL);
+    //  Iterate boundary-shift to a fixed point.  One pass operates on
+    //  change regions defined by the *current* EDL boundaries; if a
+    //  shift collapses an EQ to length 0 between two non-EQ runs, the
+    //  next NEILCanon merges them into a larger region whose new
+    //  flanking EQs may admit further shifts that the first pass
+    //  couldn't see (test case: alternating 06 11 06 sequences).
+    //  Without iteration NEILShift is non-idempotent — running it
+    //  twice can change the EDL further, breaking property 6.
+    //
+    //  Cap at 8 iterations: each iteration either changes nothing
+    //  (loop exits) or strictly merges entries (entry count is monotone
+    //  non-increasing), so 8 is generous in practice.
+    for (int iter = 0; iter < 8; iter++) {
+        b8 changed = NO;
+        call(neil_shift_pass, edl, old_toks, new_toks, old_src, new_src,
+             &changed);
+        //  Drop 0-length entries and re-canonicalise so the next pass
+        //  sees merged regions (this is also where post-shift
+        //  `[DEL, INS]` orderings get collapsed to `[INS, DEL]`).
+        call(NEILCanon, edl);
+        if (!changed) done;
+    }
+    done;
 }
 
 ok64 NEILCanon(e32g edl) {
