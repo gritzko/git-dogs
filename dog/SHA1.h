@@ -61,6 +61,15 @@ fun void sha1slice(u8csp out, sha1 const *s) {
     out[1] = s->data + 20;
 }
 
+// Copy 20 raw bytes from a slice into a sha1.  Returns BADRANGE
+// when the slice is not exactly 20 bytes; otherwise OK.
+fun ok64 sha1FromBin(sha1 *out, u8cs bin) {
+    if (u8csLen(bin) != 20) return BADRANGE;
+    u8s dst = {out->data, out->data + 20};
+    u8sCopy(dst, bin);
+    return OK;
+}
+
 // --- ABC type system ---
 
 #define X(M, n) M##sha1##n

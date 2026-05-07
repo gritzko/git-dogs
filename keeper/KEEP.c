@@ -884,30 +884,29 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
     }
 
     // Recompute SHA-1
-    u8cp content = u8bDataHead(obj);
-    u64 content_sz = u8bDataLen(obj);
+    a_dup(u8c, content, u8bDataC(obj));
 
-    static char const *type_names[] = {
-        [1] = "commit", [2] = "tree", [3] = "blob", [4] = "tag"};
-    if (obj_type < 1 || obj_type > 4) {
+    u8cs type_name = {};
+    if (GITTypeName(type_name, obj_type) != OK) {
         fprintf(stderr, "  BAD TYPE: %u\n", obj_type);
         (*failed)++;
         u8bUnMap(obj);
         return KEEPFAIL;
     }
 
-    char hdr[64];
-    int hlen = snprintf(hdr, sizeof(hdr), "%s %lu",
-                        type_names[obj_type], (unsigned long)content_sz);
-    u8p tmp = malloc((size_t)(hlen + 1 + content_sz));
-    if (!tmp) { u8bUnMap(obj); return KEEPNOROOM; }
-    memcpy(tmp, hdr, hlen);
-    tmp[hlen] = 0;
-    memcpy(tmp + hlen + 1, content, content_sz);
+    Bu8 tmp = {};
+    if (u8bAlloc(tmp, 64 + u8csLen(content)) != OK) {
+        u8bUnMap(obj);
+        return KEEPNOROOM;
+    }
+    u8bFeed(tmp, type_name);
+    u8bPrintf(tmp, " %lu", (unsigned long)u8csLen(content));
+    u8bFeed1(tmp, 0);
+    u8bFeed(tmp, content);
 
     sha1 actual_sha = {};
-    { u8csc _d = {tmp, tmp + hlen + 1 + content_sz}; SHA1Sum(&actual_sha, _d); };
-    free(tmp);
+    SHA1Sum(&actual_sha, u8bDataC(tmp));
+    u8bFree(tmp);
 
     if (sha1cmp(&actual_sha, &expected_sha) != 0) {
         a_pad(u8, hex_exp, 16);
@@ -928,7 +927,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
     // Recurse based on type
     if (obj_type == DOG_OBJ_COMMIT) {
         // Parse tree SHA from commit
-        u8cs body = {content, content + content_sz};
+        a_dup(u8c, body, content);
         u8cs field = {}, value = {};
         while (GITu8sDrainCommit(body, field, value) == OK) {
             if ($empty(field)) break;
@@ -951,7 +950,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
         }
     } else if (obj_type == DOG_OBJ_TREE) {
         // Parse tree entries: each is "mode name\0<20-byte sha>"
-        u8cs body = {content, content + content_sz};
+        a_dup(u8c, body, content);
         while (!u8csEmpty(body)) {
             u8cs entry_field = {}, entry_sha = {};
             ok64 o = GITu8sDrainTree(body, entry_field, entry_sha, NULL);
@@ -973,7 +972,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
                 }
             }
             sha1 child_sha = {};
-            memcpy(child_sha.data, entry_sha[0], 20);
+            sha1FromBin(&child_sha, entry_sha);
             o = keep_verify_sha(k, child_sha, checked, failed);
             if (o != OK) {
                 a_pad(u8, hex, 16);
@@ -985,7 +984,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
         }
     } else if (obj_type == DOG_OBJ_TAG) {
         // Parse "object <sha>" from tag body, recurse
-        u8cs body = {content, content + content_sz};
+        a_dup(u8c, body, content);
         u8cs field = {}, value = {};
         while (GITu8sDrainCommit(body, field, value) == OK) {
             if (u8csEmpty(field)) break;
@@ -1137,30 +1136,18 @@ static ok64 keep_idx_path(path8b out, u8csc kdir, u32 seqno) {
     done;
 }
 
-con char *keep_type_names[] = {
-    [DOG_OBJ_COMMIT] = "commit",
-    [DOG_OBJ_TREE] = "tree",
-    [DOG_OBJ_BLOB] = "blob",
-    [DOG_OBJ_TAG] = "tag",
-};
-
 // Compute git object SHA-1: SHA1("type size\0" + content)
 void KEEPObjSha(sha1 *out, u8 type, u8csc content) {
     a_pad(u8, hdr, 64);
-    a_cstr(tname, keep_type_names[type]);
+    u8cs tname = {};
+    GITTypeName(tname, type);
     u8bFeed(hdr, tname);
-    u8bFeed1(hdr, ' ');
-    char tmp[32];
-    int nlen = snprintf(tmp, sizeof(tmp), "%llu",
-                        (unsigned long long)u8csLen(content));
-    u8cs ns = {(u8cp)tmp, (u8cp)tmp + nlen};
-    u8bFeed(hdr, ns);
+    u8bPrintf(hdr, " %llu", (unsigned long long)u8csLen(content));
     u8bFeed1(hdr, 0);
 
     SHA1state ctx;
     SHA1Open(&ctx);
-    a_dup(u8c, hdata, u8bData(hdr));
-    SHA1Feed(&ctx, hdata);
+    SHA1Feed(&ctx, u8bDataC(hdr));
     SHA1Feed(&ctx, content);
     SHA1Close(&ctx, out);
 }
@@ -2275,23 +2262,16 @@ ok64 KEEPIngestStream(keeper *k, int rfd) {
 // Compute git object SHA-1: hash("<type> <size>\0<content>")
 // Incremental: feeds header and content separately (no copy needed).
 static void keep_git_sha1(sha1 *out, u8 type, u8csc content) {
-    static char const *type_str[] = {
-        [1] = "commit", [2] = "tree", [3] = "blob", [4] = "tag"};
     a_pad(u8, hdr, 64);
-    a_cstr(tname, type_str[type]);
+    u8cs tname = {};
+    GITTypeName(tname, type);
     u8bFeed(hdr, tname);
-    u8bFeed1(hdr, ' ');
-    char tmp[32];
-    int nlen = snprintf(tmp, sizeof(tmp), "%llu",
-                        (unsigned long long)u8csLen(content));
-    u8cs ns = {(u8cp)tmp, (u8cp)tmp + nlen};
-    u8bFeed(hdr, ns);
+    u8bPrintf(hdr, " %llu", (unsigned long long)u8csLen(content));
     u8bFeed1(hdr, 0);
 
     SHA1state ctx;
     SHA1Open(&ctx);
-    a_dup(u8c, hdata, u8bData(hdr));
-    SHA1Feed(&ctx, hdata);
+    SHA1Feed(&ctx, u8bDataC(hdr));
     SHA1Feed(&ctx, content);
     SHA1Close(&ctx, out);
 }
@@ -2683,7 +2663,10 @@ ok64 KEEPSync(keeper *k, u8cs remote, u8cs origin_uri,
 
     // First line = HEAD sha
     sha1hex head_hex;
-    memcpy(head_hex.data, line[0], 40);
+    {
+        u8cs hex40 = {line[0], line[0] + 40};
+        sha1hexFromHex(&head_hex, hex40);
+    }
 
     // Drain remaining refs until flush.
     u32 ref_cap = 4096;
@@ -2715,10 +2698,12 @@ ok64 KEEPSync(keeper *k, u8cs remote, u8cs origin_uri,
             // Peeled tag (^{}): update peeled SHA for matching ref.
             if (namelen > 3 && nameend[-1] == '}' && nameend[-2] == '{' && nameend[-3] == '^') {
                 size_t base_namelen = namelen - 3;
+                u8cs base_name = {namestart, namestart + base_namelen};
+                u8cs hex40     = {line[0],   line[0]   + 40};
                 for (u32 pi = 0; pi < nrefs; pi++) {
-                    if (strlen(refs[pi].name) == base_namelen &&
-                        memcmp(refs[pi].name, namestart, base_namelen) == 0) {
-                        memcpy(refs[pi].peeled.data, line[0], 40);
+                    a_cstr(rname, refs[pi].name);
+                    if (u8csEq(rname, base_name)) {
+                        sha1hexFromHex(&refs[pi].peeled, hex40);
                         break;
                     }
                 }
@@ -2733,8 +2718,9 @@ ok64 KEEPSync(keeper *k, u8cs remote, u8cs origin_uri,
                 refs = grown;
             }
 
-            memcpy(refs[nrefs].sha.data, line[0], 40);
-            memcpy(refs[nrefs].peeled.data, line[0], 40);
+            u8cs hex40 = {line[0], line[0] + 40};
+            sha1hexFromHex(&refs[nrefs].sha,    hex40);
+            sha1hexFromHex(&refs[nrefs].peeled, hex40);
             memcpy(refs[nrefs].name, namestart, namelen);
             refs[nrefs].name[namelen] = 0;
             nrefs++;
@@ -3290,7 +3276,7 @@ static ok64 keep_walk_tree(keeper *k, sha1 const *tree_sha,
                            mode_buf[1] == '6' && mode_buf[2] == '0');
         if (is_submodule) continue;
         sha1 entry_sha = {};
-        memcpy(entry_sha.data, sha[0], 20);
+        sha1FromBin(&entry_sha, sha);
         if (is_tree) {
             keep_walk_tree(k, &entry_sha, out, n, cap);
         } else {
@@ -3379,22 +3365,19 @@ ok64 KEEPPush(keeper *k, u8csc host, u8csc path, char const *ref,
 
     // Send update command: "<old> <new> <ref>\0report-status\n" then flush.
     {
-        u8 payload[1024];
-        int plen = snprintf((char *)payload, sizeof(payload),
-            "%.40s %.40s %s", old_hex[0], new_hex[0], ref);
-        if (plen < 0 || plen >= (int)sizeof(payload) - 32) goto push_fail;
-        payload[plen++] = 0;
+        a_pad(u8, payload, 1024);
+        u8bPrintf(payload, "%.40s %.40s %s",
+                  old_hex[0], new_hex[0], ref);
+        u8bFeed1(payload, 0);
         a_cstr(caps, "report-status");
-        memcpy(payload + plen, caps[0], (size_t)$len(caps));
-        plen += (int)$len(caps);
-        payload[plen++] = '\n';
+        u8bFeed(payload, caps);
+        u8bFeed1(payload, '\n');
 
-        u8 pktbuf[1200];
-        u8s ps = {pktbuf, pktbuf + sizeof(pktbuf)};
-        u8csc pay_cs = {payload, payload + plen};
-        if (PKTu8sFeed(ps, pay_cs) != OK) goto push_fail;
+        a_pad(u8, pktbuf, 1200);
+        u8s ps = {u8bIdleHead(pktbuf), u8bIdleHead(pktbuf) + 1200};
+        if (PKTu8sFeed(ps, u8bDataC(payload)) != OK) goto push_fail;
         if (PKTu8sFeedFlush(ps) != OK) goto push_fail;
-        u8csc written = {pktbuf, ps[0]};
+        u8csc written = {u8bDataHead(pktbuf), ps[0]};
         if (keep_push_write_all(wfd, written) != OK) goto push_fail;
     }
 

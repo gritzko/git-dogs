@@ -52,6 +52,19 @@ extern u8csc GIT_PKT_OK_PFX;
 extern u8csc GIT_PKT_NG_PFX;
 extern u8csc GIT_PKT_UNPACK_PFX;
 
+//  Loose-object type names ("commit"/"tree"/"blob"/"tag"), indexed by
+//  the DOG_OBJ_* tag.  These are the literal ASCII words git's
+//  loose-object framing prepends to content before SHA-1 hashing.
+extern u8csc GIT_TYPE_COMMIT;
+extern u8csc GIT_TYPE_TREE;
+extern u8csc GIT_TYPE_BLOB;
+extern u8csc GIT_TYPE_TAG;
+
+//  Lookup by DOG_OBJ_* tag.  Out-of-range tags fill `out` with the
+//  empty slice and return GITBADFMT.  Index 0 is intentionally empty
+//  (no DOG_OBJ_* uses 0).
+ok64 GITTypeName(u8csp out, u8 obj_type);
+
 //  Kind of a git ref.  GITREF_NONE = unparseable / empty input.
 typedef enum {
     GITREF_NONE   = 0,

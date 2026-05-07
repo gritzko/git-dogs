@@ -37,7 +37,25 @@ GITLIT(GIT_PKT_OK_PFX,       "ok ");
 GITLIT(GIT_PKT_NG_PFX,       "ng ");
 GITLIT(GIT_PKT_UNPACK_PFX,   "unpack ");
 
+GITLIT(GIT_TYPE_COMMIT,      "commit");
+GITLIT(GIT_TYPE_TREE,        "tree");
+GITLIT(GIT_TYPE_BLOB,        "blob");
+GITLIT(GIT_TYPE_TAG,         "tag");
+
 #undef GITLIT
+
+#include "dog/DOG.h"
+
+ok64 GITTypeName(u8csp out, u8 obj_type) {
+    switch (obj_type) {
+        case DOG_OBJ_COMMIT: u8csMv(out, GIT_TYPE_COMMIT); return OK;
+        case DOG_OBJ_TREE:   u8csMv(out, GIT_TYPE_TREE);   return OK;
+        case DOG_OBJ_BLOB:   u8csMv(out, GIT_TYPE_BLOB);   return OK;
+        case DOG_OBJ_TAG:    u8csMv(out, GIT_TYPE_TAG);    return OK;
+    }
+    out[0] = out[1] = NULL;
+    return GITBADFMT;
+}
 
 //  Tree entry: <mode SP name>\0<20-byte-sha1>.  Find the NUL via
 //  u8csFind; slice before = "<mode> <name>"; the 20 bytes that follow

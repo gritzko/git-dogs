@@ -173,6 +173,16 @@ fun void sha1hexSlice(u8csp out, sha1hexcp s) {
     out[1] = s->data + 40;
 }
 
+// Copy 40 ASCII hex chars from a slice into a sha1hex.  Returns
+// BADRANGE if the slice is not exactly 40 bytes; otherwise OK.
+// Caller is responsible for verifying hex-ness if it matters.
+fun ok64 sha1hexFromHex(sha1hex *out, u8cs hex) {
+    if (u8csLen(hex) != 40) return BADRANGE;
+    u8s dst = {out->data, out->data + 40};
+    u8sCopy(dst, hex);
+    return OK;
+}
+
 // --- ABC type system ---
 
 #define X(M, n) M##sha1hex##n
