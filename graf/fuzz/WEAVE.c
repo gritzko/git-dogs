@@ -169,8 +169,23 @@ static ok64 weave_hunk_check_cb(hunkc *hk, void *vctx) {
         while (eol < e && *eol != '\n') eol++;
         u32 llen = (u32)(eol - p);
 
-        //  Skip the title line `--- name ---`.
+        //  Skip header lines emitted by HUNKu8sFeedLineBased:
+        //  `--- a/<path>` and `+++ b/<path>` for the unified-diff
+        //  shape, plus the `--- <uri> ---` title used when a hunk has
+        //  no diff text.  Plus the `@@ -L,C +L,C @@` hunk range line.
+        //  Without these the next branch parses `+++ b/<path>` as a
+        //  spurious +content line whose body (`++ b/<path>`) isn't in
+        //  `x`, faulting on every diff produced for a non-empty
+        //  rename-shaped fuzz input.
         if (llen >= 4 && memcmp(p, "--- ", 4) == 0) {
+            p = (eol < e) ? eol + 1 : eol;
+            continue;
+        }
+        if (llen >= 4 && memcmp(p, "+++ ", 4) == 0) {
+            p = (eol < e) ? eol + 1 : eol;
+            continue;
+        }
+        if (llen >= 2 && memcmp(p, "@@", 2) == 0) {
             p = (eol < e) ? eol + 1 : eol;
             continue;
         }
