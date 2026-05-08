@@ -93,6 +93,10 @@ static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
         };
         if (memcmp(entry_sha.data, EMPTY_BLOB_SHA, 20) == 0) {
             u8bUnMap(bbuf);
+            //  Unlink first so a stale symlink at this path is replaced
+            //  outright; FILECreate's O_CREAT|O_TRUNC otherwise follows
+            //  the symlink and clobbers its target instead of the path.
+            FILEUnLink($path(fp));
             int fd = -1;
             ok64 co = FILECreate(&fd, $path(fp));
             if (co != OK) return co;
@@ -113,6 +117,12 @@ static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
             fail(SNIFFFAIL);
         }
     } else {
+        //  Unlink first so a stale symlink at this path is replaced
+        //  outright; FILECreate's O_CREAT|O_TRUNC otherwise follows
+        //  the symlink and writes its target instead of the path
+        //  itself (e.g. a tag transition that flips a tracked entry
+        //  from mode 120000 to 100644).
+        FILEUnLink($path(fp));
         int fd = -1;
         o = FILECreate(&fd, $path(fp));
         if (o != OK) { u8bUnMap(bbuf); return o; }
@@ -277,8 +287,23 @@ static ok64 get_overlap_step(ulogreccp recs, u32 n, void *vctx) {
     //  must never participate in the overlap-dirty classifier: the
     //  live ULOG and store dir would always trip the unstamped-mtime
     //  check and refuse every cross-branch GET.  Treat them as if
-    //  they weren't in the tree.
-    if (SNIFFSkipMeta(path)) return OK;
+    //  they weren't in the tree.  Hard-coded names rather than
+    //  `SNIFFSkipMeta` (which also folds in user `.gitignore`
+    //  patterns and would silently drop tracked tree paths whose
+    //  basename matches a broad pattern like `.*`, e.g. linux's
+    //  root .gitignore — see get_visit's matching block).
+    {
+        a_cstr(m_git, ".git");
+        a_cstr(m_dogs, ".dogs");
+        a_cstr(m_sniff, ".sniff");
+        b8 hit = NO;
+        $eachseg(seg, path) {
+            if (u8csEq(seg, m_git))   { hit = YES; break; }
+            if (u8csEq(seg, m_dogs))  { hit = YES; break; }
+            if (u8csEq(seg, m_sniff)) { hit = YES; break; }
+        }
+        if (hit) return OK;
+    }
 
     b8 is_sub = (base && get_is_sub(base)) || (tgt && get_is_sub(tgt));
     if (is_sub) return OK;        //  gitlink — sniff doesn't manage
@@ -737,10 +762,17 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         }
     }
 
+    //  256 MB mmap'd (COW, pay-on-write) — same envelope as the ULOG
+    //  row buffers inside `get_overlap_check`.  The previous 1 MB
+    //  heap allocation truncated under big tag-to-tag deltas (linux's
+    //  v7.x → v6.1.y rollback drops ~14 K paths whose names sort late
+    //  in lex order — `tools/v*`, `tools/w*` — those tail entries
+    //  silently lost their `u8bFeed` and never reached the unlink
+    //  drainer, leaving stale files on disk after checkout).
     Bu8 noop = {}, unlinks = {}, merges = {};
-    call(u8bAllocate, noop,    1UL << 20);
-    call(u8bAllocate, unlinks, 1UL << 20);
-    call(u8bAllocate, merges,  1UL << 20);
+    call(u8bMap, noop,    1UL << 28);
+    call(u8bMap, unlinks, 1UL << 28);
+    call(u8bMap, merges,  1UL << 28);
     //  TODO: even on a fresh clone (`base_tree==NULL`) the overlap
     //  check still walks the target tree once to detect dirty wt
     //  files sitting at target-tree paths (the
@@ -754,7 +786,7 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     o = get_overlap_check(k, reporoot,
                           has_base_tree ? base_tree.data : NULL,
                           tree_sha.data, noop, unlinks, merges);
-    if (o != OK) { u8bFree(noop); u8bFree(unlinks); u8bFree(merges); return o; }
+    if (o != OK) { u8bUnMap(noop); u8bUnMap(unlinks); u8bUnMap(merges); return o; }
 
     get_ctx ctx = {.k = k, .error = OK};
     u8csMv(ctx.reporoot, reporoot);
@@ -767,7 +799,7 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
     o = WALKTreeLazy(k, tree_sha.data, get_visit, &ctx);
     if (o == OK && ctx.error != OK) o = ctx.error;
     if (o != OK) {
-        u8bFree(noop); u8bFree(unlinks); u8bFree(merges);
+        u8bUnMap(noop); u8bUnMap(unlinks); u8bUnMap(merges);
         return o;
     }
 
@@ -791,7 +823,7 @@ ok64 GETCheckout(u8cs reporoot, u8cs hex, u8cs source) {
         a_dup(u8c, ulist, u8bData(unlinks));
         (void)get_drain_unlinks(reporoot, ulist);
     }
-    u8bFree(noop); u8bFree(unlinks); u8bFree(merges);
+    u8bUnMap(noop); u8bUnMap(unlinks); u8bUnMap(merges);
 
     //  Compose the `get` row URI via abc/URI.  Canonical at-log form:
     //  `?<branch>#<curhash>` — query carries the be-branch path
