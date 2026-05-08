@@ -5,7 +5,8 @@
 set -e
 
 GRAF="${1:-./build-debug/graf/graf}"
-DATADIR="$(dirname "$0")/data"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATADIR="$SCRIPT_DIR/data"
 
 OLD="$DATADIR/diff_old.c"
 NEW="$DATADIR/diff_new.c"
@@ -14,6 +15,19 @@ if [ ! -x "$GRAF" ]; then
     echo "FAIL: graf binary not found at $GRAF"
     exit 1
 fi
+
+#  graf reaches HOMEOpen before dispatch even for verbs that don't
+#  need a keeper (file-pair `diff a.c b.c`).  Run from a tmpdir
+#  bootstrapped with the canonical `be put`-style markers so HOME
+#  walk-up finds a valid repo.  All input paths are now absolute.
+TMP=${TMP:-$HOME/tmp/run-$(date +%Y%m%d-%H%M%S)}
+TEST_ID=${TEST_ID:-GRAFcli_diff_artifact}
+WORK="$TMP/$TEST_ID/$$"
+mkdir -p "$WORK/.dogs"
+: > "$WORK/.dogs/refs"
+: > "$WORK/.sniff"
+trap 'rm -rf "$WORK"; rmdir "${WORK%/*}" 2>/dev/null || true; rmdir "${WORK%/*/*}" 2>/dev/null || true' EXIT INT TERM
+cd "$WORK"
 
 OUT=$("$GRAF" diff "$OLD" "$NEW" 2>&1 | perl -pe 's/\e\[[0-9;]*m//g')
 FAILS=0

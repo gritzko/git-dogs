@@ -36,7 +36,12 @@ ok64 capocli() {
     CLIAtURI(&at, &c);
     if (u8csEmpty(at.path) && $ok(c.repo) && !u8csEmpty(c.repo))
         u8csMv(at.path, c.repo);
-    call(HOMEOpen, &h, &at, need_rw);
+    //  Direct call so we can run HOMEClose on failure: HOMEOpen may
+    //  have allocated buffers before HOMEFindDogs returned NOHOME.
+    {
+        ok64 ho = HOMEOpen(&h, &at, need_rw);
+        if (ho != OK) { HOMEClose(&h); return ho; }
+    }
 
     call(SPOTOpen, &h, need_rw);
     ok64 ret = SPOTExec(&c);

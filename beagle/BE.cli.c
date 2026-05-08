@@ -681,16 +681,67 @@ static ok64 be_reindex(cli *c) {
     return worst;
 }
 
+//  Repo bootstrap: when no `.dogs/` is reachable from cwd, lay down
+//  the empty markers `<cwd>/.dogs/refs` and `<cwd>/.sniff` so the
+//  HOME walk-up succeeds for downstream dogs.  No-op when an existing
+//  repo is already in scope.  Mirrors the canonical layout: `.sniff`
+//  is sniff's per-wt ULOG; `.dogs/refs` is keeper's REFS_FILE ULOG —
+//  both grow append-only so an empty file is the well-defined "no
+//  rows yet" state.
+static ok64 be_ensure_repo(void) {
+    sane(1);
+    {
+        home probe = {};
+        uri none = {};
+        ok64 ho = HOMEOpen(&probe, &none, NO);
+        HOMEClose(&probe);
+        if (ho == OK) done;
+    }
+    a_path(here);
+    call(FILEGetCwd, here);
+    a_dup(u8c, here_s, u8bDataC(here));
+    a_cstr(dotdogs,  ".dogs");
+    a_cstr(refs_lit, "refs");
+    a_cstr(dotsniff, ".sniff");
+    {
+        a_path(dogs_dir);
+        call(PATHu8bFeed, dogs_dir, here_s);
+        call(PATHu8bPush, dogs_dir, dotdogs);
+        call(FILEMakeDirP, $path(dogs_dir));
+        a_path(refs_path);
+        a_dup(u8c, dogs_s, u8bDataC(dogs_dir));
+        call(PATHu8bFeed, refs_path, dogs_s);
+        call(PATHu8bPush, refs_path, refs_lit);
+        int fd = -1;
+        call(FILECreate, &fd, $path(refs_path));
+        call(FILEClose, &fd);
+    }
+    {
+        a_path(sniff_path);
+        call(PATHu8bFeed, sniff_path, here_s);
+        call(PATHu8bPush, sniff_path, dotsniff);
+        int fd = -1;
+        call(FILECreate, &fd, $path(sniff_path));
+        call(FILEClose, &fd);
+    }
+    done;
+}
+
 //  `be put` is the ref-writer (VERBS.md §"PUT").  Per the URI's
 //  `//remote` slot it also doubles as the FF-push verb — the wire
 //  side maps to keeper's old `post` (push) entry point.  Local
 //  shapes (label move, file staging, sha reset) stay in sniff put.
+//
+//  PUT also doubles as the repo-init verb: when nothing is reachable
+//  from cwd it lays down the canonical `.dogs/refs` + `.sniff`
+//  markers so the dispatched sniff-put has a HOME to walk into.
 static ok64 BEPut(cli *c, b8 seq) {
     sane(c);
     b8 has_remote = NO;
     for (u32 i = 0; i < c->nuris; i++) {
         if (!u8csEmpty(c->uris[i].authority)) { has_remote = YES; break; }
     }
+    if (!has_remote) call(be_ensure_repo);
     if (has_remote) {
         //  FF-push: `be put //origin` (cached) and `be put ssh://host`
         //  (transport) both open the wire — VERBS.md §"Schemes —

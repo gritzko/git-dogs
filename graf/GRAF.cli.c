@@ -22,7 +22,13 @@ ok64 grafcli() {
     CLIAtURI(&at, &c);
     if (u8csEmpty(at.path) && $ok(c.repo) && !u8csEmpty(c.repo))
         u8csMv(at.path, c.repo);
-    call(HOMEOpen, &h, &at, YES);
+    //  Direct call so we can run HOMEClose on failure: HOMEOpen may
+    //  have allocated buffers (root/wt/cur_branch/cur_sha/branches_data)
+    //  before the HOMEFindDogs walk-up returned NOHOME.
+    {
+        ok64 ho = HOMEOpen(&h, &at, YES);
+        if (ho != OK) { HOMEClose(&h); return ho; }
+    }
 
     call(GRAFOpen, &h, YES);
     ok64 ret = GRAFExec(&c);
