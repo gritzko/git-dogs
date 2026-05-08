@@ -322,8 +322,10 @@ ok64 CAPOCompact(spot *s) {
         u8cs raw = {};
         DOGPupData(raw, s->puppies, i);
         if (raw[0] == NULL) continue;
-        runs[nview][0] = (u64cp)raw[0];
-        runs[nview][1] = (u64cp)raw[1];
+        u64cp base = (u64cp)raw[0];
+        size_t bytes = (size_t)(raw[1] - raw[0]);
+        runs[nview][0] = base;
+        runs[nview][1] = base + bytes / sizeof(u64);
         nview++;
     }
     u64css stack = {runs, runs + nview};
@@ -373,8 +375,10 @@ ok64 CAPOCompactAll(spot *s) {
         u8cs raw = {};
         DOGPupData(raw, s->puppies, i);
         if (raw[0] == NULL) continue;
-        runs[nview][0] = (u64cp)raw[0];
-        runs[nview][1] = (u64cp)raw[1];
+        u64cp base = (u64cp)raw[0];
+        size_t bytes = (size_t)(raw[1] - raw[0]);
+        runs[nview][0] = base;
+        runs[nview][1] = base + bytes / sizeof(u64);
         total += $len(runs[nview]);
         nview++;
     }
@@ -405,6 +409,121 @@ ok64 CAPOCompactAll(spot *s) {
     CAPORefreshView();
 
     u64bUnMap(mbuf);
+    done;
+}
+
+// --- Per-worker subdirs ---
+
+//  Worker-subdir name width: 4 RON64 chars covers 64^4 = 16 M ids,
+//  way more than the 64-worker cap.  Naming scheme: ".w<NNNN>".
+#define CAPO_WORKER_PAD 4
+
+//  Compose `<leafdir>/.w<NNNN>` (NUL-terminated) into `out`.  Mirrors
+//  `dog_pup_path` in style: a fixed-width RON64 pad after a literal
+//  prefix, pushed as one path segment.  Internal helper for the
+//  fork-workers merge path; not exposed.
+static ok64 spot_worker_dir(path8b out, path8s leafdir, u32 w) {
+    sane(u8bOK(out) && $ok(leafdir));
+    call(PATHu8bDup, out, leafdir);
+    a_pad(u8, name, CAPO_WORKER_PAD + 8);
+    a_cstr(prefix, ".w");
+    call(u8bFeed, name, prefix);
+    call(RONu8sFeedPad, u8bIdle(name), (ok64)w, CAPO_WORKER_PAD);
+    ((u8 **)name)[2] += CAPO_WORKER_PAD;
+    call(PATHu8bPush, out, u8bDataC(name));
+    call(PATHu8bTerm, out);
+    done;
+}
+
+ok64 CAPOMergeWorkers(spot *s, u32 nw) {
+    sane(s);
+    if (nw == 0) done;
+
+    a_pad(u8, leafdir, FILE_PATH_MAX_LEN);
+    {
+        a_dup(u8c, leaf, u8bDataC(s->leaf_branch));
+        call(spot_branch_dir, leafdir, s->h, leaf);
+    }
+
+    //  Open every worker's pups into a scratch puppy stack so we hold
+    //  their mmaps for the lifetime of the merge.  Each worker dir
+    //  contains exactly one pup (children call CAPOCompactAll before
+    //  exit), so up to `nw` pups total — bounded by CAPO_MAX_LEVELS in
+    //  the loop below.
+    Bkv32 wp = {};
+    call(kv32bAllocate, wp, FILE_MAX_OPEN);
+    a_cstr(ext, CAPO_IDX_EXT);
+
+    for (u32 w = 0; w < nw; w++) {
+        a_pad(u8, wdir, FILE_PATH_MAX_LEN);
+        ok64 wo = spot_worker_dir(wdir, $path(leafdir), w);
+        if (wo != OK) continue;
+        (void)DOGPupOpenAll(wp, $path(wdir), ext);
+    }
+
+    //  Build typed view; cap at CAPO_MAX_LEVELS just in case a worker
+    //  somehow ended up with multiple pups (CAPOCompactAll can fail).
+    u32 nfiles = (u32)kv32bDataLen(wp);
+    if (nfiles == 0) {
+        DOGPupClose(wp);
+        //  Still try to remove any worker dirs left empty.
+        for (u32 w = 0; w < nw; w++) {
+            a_pad(u8, wdir, FILE_PATH_MAX_LEN);
+            if (spot_worker_dir(wdir, $path(leafdir), w) == OK) {
+                (void)FILERmDir($path(wdir), true);
+            }
+        }
+        CAPORefreshView();
+        done;
+    }
+    if (nfiles > CAPO_MAX_LEVELS) {
+        fprintf(stderr,
+                "spot: warning: worker merge saw %u pups, capping at %u\n",
+                nfiles, (u32)CAPO_MAX_LEVELS);
+        nfiles = CAPO_MAX_LEVELS;
+    }
+
+    u64cs runs[CAPO_MAX_LEVELS] = {};
+    u32 nview = 0;
+    size_t total = 0;
+    for (u32 i = 0; i < nfiles && nview < CAPO_MAX_LEVELS; i++) {
+        u8cs raw = {};
+        DOGPupData(raw, wp, i);
+        if (raw[0] == NULL) continue;
+        u64cp base = (u64cp)raw[0];
+        size_t bytes = (size_t)(raw[1] - raw[0]);
+        runs[nview][0] = base;
+        runs[nview][1] = base + bytes / sizeof(u64);
+        total += $len(runs[nview]);
+        nview++;
+    }
+    u64css stack = {runs, runs + nview};
+
+    Bu64 mbuf = {};
+    call(u64bMap, mbuf, total);
+    u64s into = {u64bIdleHead(mbuf), mbuf[3]};
+
+    HITu64Start(stack);
+    u64p out = into[0];
+    HITu64Merge(stack, &out);
+    into[0] = out;
+
+    u8cs merged = {(u8cp)mbuf[0], (u8cp)out};
+    call(DOGPupCreate, s->puppies, $path(leafdir), ext, merged);
+
+    u64bUnMap(mbuf);
+    DOGPupClose(wp);
+
+    //  Tear down worker dirs (they hold one or more pups + maybe a
+    //  stale .lock).  Recursive rm; mmaps are already released via
+    //  DOGPupClose above.
+    for (u32 w = 0; w < nw; w++) {
+        a_pad(u8, wdir, FILE_PATH_MAX_LEN);
+        if (spot_worker_dir(wdir, $path(leafdir), w) != OK) continue;
+        (void)FILERmDir($path(wdir), true);
+    }
+
+    CAPORefreshView();
     done;
 }
 

@@ -839,15 +839,42 @@ ok64 SPOTIndexFromTips(keeper *k, uricp u) {
             continue;
         }
         if (pid == 0) {
-            //  Child: index our slice into our COW-private BOX,
-            //  flush it, exit.  CAPOFlushRun goes through the
-            //  normal DOGPupCreate path, picking a fresh seqno
-            //  off the inherited puppies snapshot — works because
-            //  every child sees the SAME parent state and all the
-            //  potential collisions are between sibling children
-            //  writing in parallel.  We dodge that by stamping the
-            //  child's worker id into the file's seqno via a quick
-            //  pre-pump of synthetic puppies (see below).
+            //  Child: switch into our own per-worker subdir
+            //  `<leafdir>/.wNNNN/`, reset the inherited puppy stack
+            //  to empty (so DOGPupCreate's seqnos start at 1 inside
+            //  the worker dir), then index our slice and emit one
+            //  pup.  CAPOCompactAll collapses any cascade-emitted
+            //  pups into a single file so the parent's merge cap
+            //  stays bounded.  Parent merges all worker dirs into
+            //  the leaf dir post-waitpid.
+            //
+            //  Append `.wNNNN` to s->leaf_branch with a fixed-width
+            //  RON64 pad — same shape as dog_pup_path's seqno.
+            {
+                a_pad(u8, wname, 16);
+                a_cstr(prefix, ".w");
+                if (u8bFeed(wname, prefix) != OK) _exit(1);
+                if (RONu8sFeedPad(u8bIdle(wname), (ok64)w, 4) != OK)
+                    _exit(1);
+                ((u8 **)wname)[2] += 4;
+                if (PATHu8bPush(s->leaf_branch, u8bDataC(wname))
+                    != OK) _exit(1);
+            }
+            //  Compute the worker leafdir, mkdir -p it.
+            a_pad(u8, wleafdir, FILE_PATH_MAX_LEN);
+            {
+                a_dup(u8c, wl, u8bDataC(s->leaf_branch));
+                if (spot_branch_dir(wleafdir, s->h, wl) != OK)
+                    _exit(1);
+            }
+            if (FILEMakeDirP($path(wleafdir)) != OK) _exit(1);
+
+            //  Reset inherited pup stack — start fresh in the worker
+            //  dir.  No mmap leaks: parent owns the fds, the COW
+            //  copy of the buffer header is just zeroed here.
+            Breset(s->puppies);
+            CAPORefreshView();
+
             Bu8 bbuf = {};
             if (u8bMap(bbuf, 1UL << 28) != OK) _exit(1);
             for (size_t i = lo; i < hi; i++) {
@@ -858,16 +885,10 @@ ok64 SPOTIndexFromTips(keeper *k, uricp u) {
             }
             u8bUnMap(bbuf);
 
-            //  Bump the inherited puppies stack by `w` synthetic
-            //  rows so DOGPupCreate's `1 + max(seqno)` lands on a
-            //  worker-unique seqno.  Sibling children write to
-            //  distinct files; parent rescans afterwards.
-            for (u32 pad = 0; pad < w; pad++) {
-                kv32 fake = {.key = (u32)(1u << 30) + pad,
-                             .val = 0};
-                (void)kv32bPush(s->puppies, &fake);
-            }
             (void)CAPOFlushRun(s);
+            //  Collapse the worker dir to a single pup so the parent
+            //  merge stack is bounded by `nw`, not `nw * cascade`.
+            (void)CAPOCompactAll(s);
             _exit(0);
         }
         pids[w] = pid;
@@ -882,15 +903,11 @@ ok64 SPOTIndexFromTips(keeper *k, uricp u) {
         }
     }
 
-    //  Re-open the leaf branch dir to absorb the children's
-    //  freshly-written `<seqno>.spot.idx` files into puppies, then
-    //  refresh the typed view and compact down to the LSM ladder.
-    {
-        a_cstr(ext, CAPO_IDX_EXT);
-        (void)DOGPupOpenAll(s->puppies, $path(leafdir), ext);
-        CAPORefreshView();
-        (void)CAPOCompact(s);
-    }
+    //  Merge every worker subdir's pup into a single new pup at the
+    //  leaf level, drop the worker subdirs, then fold the merged run
+    //  into the parent's pre-fork ladder via the usual compact.
+    (void)CAPOMergeWorkers(s, nw);
+    (void)CAPOCompact(s);
 
     u8bUnMap(todo_buf);
     u8bUnMap(ulog_buf);

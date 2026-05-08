@@ -18,7 +18,7 @@ TMILL=${TMILL:-$TMP/$TEST_ID/$$}
 REPO=${REPO:-$HOME/src/git}
 NTAGS=${NTAGS:-12}
 #  Keeper URI paths are $HOME-relative: //host/src/git → $HOME/src/git.
-REPO_REL=${REPO#$HOME/}
+REPO_REL=${REPO_REL:-${REPO#$HOME/}}
 HOST=${HOST:-localhost}
 trap 'rm -rf "$TMILL"; rmdir "${TMILL%/*}" 2>/dev/null || true; rmdir "$TMP" 2>/dev/null || true' EXIT
 

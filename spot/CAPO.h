@@ -161,6 +161,12 @@ ok64 CAPOPcreGrep(u8csc pattern, u8csc ext, u8csc reporoot, u32 ctx_lines,
 // dir.  Uses SPOT.puppies and writes to SPOT.leaf_branch.
 ok64 CAPOCompactAll(spot *s);
 
+// Merge all .wNNNN/ worker subdirs under the leaf dir into a single
+// run at <leafdir>/, then rm -rf each worker subdir. Called by spot
+// get's parent after waitpid'ing fork-workers. Adds the merged run
+// to s->puppies and refreshes the view.
+ok64 CAPOMergeWorkers(spot *s, u32 nw);
+
 // Resolve spot index dir from reporoot (<reporoot>/.dogs/spot)
 ok64 CAPOResolveDir(path8b out, u8csc reporoot);
 
