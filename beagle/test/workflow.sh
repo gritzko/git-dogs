@@ -26,6 +26,18 @@ trap 'rm -rf "$TMP"; rmdir "${TMP%/*}" 2>/dev/null || true; rmdir "${TMP%/*/*}" 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 note() { echo "  - $*"; }
 
+#  Portable mtime in `sec.nanosec` form.  GNU coreutils stat exposes
+#  this as `%.Y`; BSD stat (macOS, FreeBSD) doesn't, so we fall back
+#  to Python which reads the underlying timespec.  Sub-second
+#  precision matters for the re-stamp test below: POST writes mtimes
+#  via futimens(), so two writes inside one wall-clock second still
+#  diverge in the nanosecond component.
+mtime_ns() {
+    stat -c %.Y "$1" 2>/dev/null \
+        || python3 -c 'import os, sys; s=os.stat(sys.argv[1]); \
+print(f"{s.st_mtime_ns}")' "$1"
+}
+
 want_file() {
     path=$1; want=$2
     [ -f "$path" ] || fail "$path missing"
@@ -409,7 +421,7 @@ note "baseline HEAD=$C13a"
 #  %.Y is seconds.nanoseconds — captures the millisecond-resolution
 #  mtime that POST writes via futimens, so a re-stamp shows up here
 #  even when the post happens within the same wall-clock second.
-a_mtime_before=$(stat -c %.Y a.txt)
+a_mtime_before=$(mtime_ns a.txt)
 a_bytes_before=$(cat a.txt)
 
 sleep 0.2
@@ -418,7 +430,7 @@ echo b-v2 > b.txt                          # modify only b.txt
 C13b=$(head_hex)
 [ "$C13b" != "$C13a" ] || fail "HEAD unchanged after b.txt modify"
 
-a_mtime_after=$(stat -c %.Y a.txt)
+a_mtime_after=$(mtime_ns a.txt)
 a_bytes_after=$(cat a.txt)
 
 [ "$a_mtime_before" = "$a_mtime_after" ] \

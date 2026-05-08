@@ -52,7 +52,10 @@ vc_assert_exit 0
 SQUASH=$(vc_section after_post sniff | awk '$1=="post"{last=$2} END{
     h=last; sub(/^[^#]*#/, "", h); print h
 }')
-PARENTS=$(keeper get ".#$SQUASH" 2>/dev/null | awk '/^parent / {print $2}' | wc -l)
+#  BSD `wc` pads with whitespace; strip via arithmetic so the
+#  string compare below works on both Linux and macOS.
+PARENTS=$(($(keeper get ".#$SQUASH" 2>/dev/null \
+    | awk '/^parent / {print $2}' | wc -l)))
 [ "$PARENTS" = "1" ] \
     || vc_fail "merge commit has $PARENTS parents, want 1 (single-parent)"
 vc_note "merge commit has 1 parent (single-parent absorb confirmed)"

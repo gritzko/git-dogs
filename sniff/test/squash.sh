@@ -165,7 +165,9 @@ note "trunk -> $SQUASH"
 #  contributed to the merged tree but is NOT recorded as a parent —
 #  provenance is erased at PATCH time.
 SQUASH_PARENTS=$(parents_of "$SQUASH")
-SQUASH_NPAR=$(echo "$SQUASH_PARENTS" | wc -l)
+#  BSD `wc` pads with whitespace; strip via arithmetic so the
+#  string compare below works on both Linux and macOS.
+SQUASH_NPAR=$(($(echo "$SQUASH_PARENTS" | wc -l)))
 [ "$SQUASH_NPAR" = "1" ] \
     || fail "squash has $SQUASH_NPAR parents, expected 1 (single-parent)"
 SQUASH_P1=$(echo "$SQUASH_PARENTS" | sed -n '1p')
