@@ -1,0 +1,17 @@
+int t2helper(void){return 7;}
+int t1bigger(int a, int b){
+    int s=a+b;
+    return s*2;
+}
+int t1=42;
+int t2=1;
+int t3=1;
+int f1=1;
+int f2=1;
+int f3=1;
+int fa=1;
+int fb=0;
+int fc=0;
+int f1plus(int x){return x+10;}
+int main(void){return f1plus(0);}
+// fixA tag

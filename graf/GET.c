@@ -224,6 +224,11 @@ static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
 static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
                                      u64 const *tip_hs, u32 ntips,
                                      Bu32 out_ids);
+static ok64 build_tip_weave_tunable(weave *out, u8cs path, u8cs ext,
+                                    u64 const *tip_hs, u32 ntips,
+                                    u32 edges,
+                                    u64 const *skip_hl, u32 nskip,
+                                    Bu32 out_ids);
 static ok64 emit_alive_bytes(u8b into, weave const *w);
 
 //  Per-side membership predicate for `WEAVEEmitMerged`.  Backed by a
@@ -345,9 +350,11 @@ static ok64 graf_fold_wt_layer(weave *next, b8 *used_next,
 //
 //  Returns OK on success.  GRAFFAIL on history-empty-on-both-sides.
 //  Caller writes `out` to disk and stamps the new mtime.
-ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
-                     sha1 const *base, sha1 const *tgt,
-                     u8b out) {
+ok64 GRAFMergeWtFileTunable(u8cs path, u8cs reporoot,
+                            sha1 const *base, sha1 const *tgt,
+                            u32 edges,
+                            u64 const *skip_hl, u32 nskip,
+                            u8b out) {
     sane($ok(path) && $ok(reporoot) && base && tgt && out);
     u8bReset(out);
 
@@ -370,7 +377,8 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
     if ((ret = u32bMap(tgt_ids,  4096)) != OK) goto cleanup;
 
     //  Base side: ancestor closure of base commit, plus wt layer.
-    ret = build_tip_weave_with_ids(&wbase, path, ext, &base_h40, 1, base_ids);
+    ret = build_tip_weave_tunable(&wbase, path, ext, &base_h40, 1,
+                                  edges, skip_hl, nskip, base_ids);
     if (ret != OK) goto cleanup;
 
     weave const *wcur = &wbase;
@@ -383,8 +391,9 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
         (void)u32bFeed1(base_ids, WEAVE_WT_SRC);
     }
 
-    //  Target side: ancestor closure of tgt commit.
-    ret = build_tip_weave_with_ids(&wtgt, path, ext, &tgt_h40, 1, tgt_ids);
+    //  Target side: ancestor closure of tgt commit (same edges + skip).
+    ret = build_tip_weave_tunable(&wtgt, path, ext, &tgt_h40, 1,
+                                  edges, skip_hl, nskip, tgt_ids);
     if (ret != OK) goto cleanup;
 
     //  Empty-side degeneracy.
@@ -422,6 +431,17 @@ cleanup:
     return ret;
 }
 
+ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
+                     sha1 const *base, sha1 const *tgt,
+                     u8b out) {
+    //  Default to parent-only reachability — historic shape, kept so
+    //  call sites that haven't migrated to the tunable variant get
+    //  identical behaviour.  PATCH.c uses the tunable form directly
+    //  with `parent | foster` to handle absorbed-via-foster history.
+    return GRAFMergeWtFileTunable(path, reporoot, base, tgt,
+                                  DAG_EDGE_PARENT, NULL, 0, out);
+}
+
 // --- Weave-replay helpers: shared by N-tip union and 2-way merge ---
 
 //  Build a weave by replaying `path`'s blob versions across the
@@ -444,7 +464,10 @@ cleanup:
 //  predicates over token `inrm.in` values.
 static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
                                      u64 const *tip_hs, u32 ntips,
-                                     Bu32 out_ids);
+                                     Bu32 out_ids) {
+    return build_tip_weave_tunable(out, path, ext, tip_hs, ntips,
+                                   DAG_EDGE_PARENT, NULL, 0, out_ids);
+}
 
 static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
                             u64 const *tip_hs, u32 ntips) {
@@ -452,29 +475,40 @@ static ok64 build_tip_weave(weave *out, u8cs path, u8cs ext,
     return build_tip_weave_with_ids(out, path, ext, tip_hs, ntips, noids);
 }
 
-static ok64 build_tip_weave_with_ids(weave *out, u8cs path, u8cs ext,
-                                     u64 const *tip_hs, u32 ntips,
-                                     Bu32 out_ids) {
+static ok64 build_tip_weave_tunable(weave *out, u8cs path, u8cs ext,
+                                    u64 const *tip_hs, u32 ntips,
+                                    u32 edges,
+                                    u64 const *skip_hl, u32 nskip,
+                                    Bu32 out_ids) {
     sane(out && ntips > 0);
 
-    //  Ancestor union across the supplied tips.
+    //  Ancestor union across the supplied tips with the caller's
+    //  edge-kind selector + skip set.  edges = DAG_EDGE_PARENT
+    //  reproduces the legacy behaviour exactly.
     Bwh128 anc = {};
     call(wh128bAllocate, anc, GET_ANC_SIZE);
     wh128css runs = {NULL, NULL};
     GRAFRuns(runs);
-    ok64 ao = DAGAncestorsOfMany(anc, runs, tip_hs, ntips);
+    ok64 ao = DAGAncestorsOfManyTunable(anc, runs, tip_hs, ntips,
+                                        edges, skip_hl, nskip);
     if (ao != OK) { wh128bFree(anc); return ao; }
 
-    //  Topo-sort: parents-before-children.  Heap-allocated; the cap
-    //  needs to fit a real repo's history (src/git ~80k commits would
-    //  blow a stack array).
+    //  Topo-sort using the SAME edge bitmask as the ancestor walk so
+    //  foster-attached commits sit before the carrying commit in the
+    //  replay order.  Without that, ours's WEAVEDiff stamps the
+    //  attached commit's tokens with the carrying commit's sc, and
+    //  WEAVEMerge can't align them with theirs's still-original-sc
+    //  tokens.  Picked targets aren't given an ordering edge (they're
+    //  reachability-set leaves with no replay step).
     u32 nvers = 0;
     u64 *vers = NULL;
     size_t anc_cap = (size_t)(wh128bTerm(anc) - wh128bHead(anc));
     Bu8 ord_buf = {};
     if (anc_cap > 0 && u8bMap(ord_buf, anc_cap * sizeof(u64)) == OK) {
         u64 *ordered = (u64 *)u8bDataHead(ord_buf);
-        u32 nord = DAGTopoSort(ordered, (u32)anc_cap, anc, runs);
+        u32 topo_edges = edges & ~DAG_EDGE_PICKED;
+        u32 nord = DAGTopoSortTunable(ordered, (u32)anc_cap, anc, runs,
+                                      topo_edges);
         if (nord > GET_MAX_VERS) nord = GET_MAX_VERS;
         vers = ordered;
         nvers = nord;

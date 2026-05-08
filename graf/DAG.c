@@ -240,6 +240,123 @@ ok64 DAGAncestors(Bwh128 set, wh128css runs, u64 tip) {
     done;
 }
 
+ok64 DAGEdgesOf(wh128css runs, u64 commit_h, u8 kind,
+                u64 *out, u32 cap, u32 *nout) {
+    sane(out && nout);
+    *nout = 0;
+    if (commit_h == 0) done;
+    wh128cs slots[MSET_MAX_LEVELS] = {};
+    wh128css hits = {slots, slots + MSET_MAX_LEVELS};
+    wh128cs *base = hits[0];
+    call(DAGRange, hits, runs, DAGPack(DAG_T_COMMIT, commit_h));
+    for (wh128cs *r = base; r < hits[0]; r++) {
+        for (wh128cp e = (*r)[0]; e < (*r)[1]; e++) {
+            if (DAGType(e->val) != kind) continue;
+            if (*nout >= cap) return DAGNOROOM;
+            out[(*nout)++] = DAGHashlet(e->val);
+        }
+    }
+    done;
+}
+
+//  Linear-scan membership in a (small) skip array.
+static b8 dag_in_skip(u64 const *skip_hl, u32 nskip, u64 h) {
+    for (u32 i = 0; i < nskip; i++) {
+        if (skip_hl[i] == h) return YES;
+    }
+    return NO;
+}
+
+ok64 DAGAncestorsTunable(Bwh128 set, wh128css runs, u64 tip,
+                         u32 edges,
+                         u64 const *skip_hl, u32 nskip) {
+    sane(set);
+    if (tip == 0) done;
+    if (edges == 0) {
+        //  No edges to traverse — still seed the tip if not skipped.
+        if (!dag_in_skip(skip_hl, nskip, tip)) dag_anc_put(set, tip);
+        done;
+    }
+    if (dag_in_skip(skip_hl, nskip, tip)) done;
+
+    size_t cap = (size_t)(wh128bTerm(set) - wh128bHead(set));
+    if (cap == 0) return DAGFAIL;
+
+    Bwh128 queue = {};
+    call(wh128bMap, queue, cap);
+
+    dag_anc_put(set, tip);
+    wh128 q0 = { .key = DAGPack(0, tip), .val = 0 };
+    wh128bFeed1(queue, q0);
+
+    size_t head = 0;
+    u64 nbuf[16];
+    while (head < wh128bDataLen(queue)) {
+        wh128cp cur = wh128bDataHead(queue) + head;
+        u64 c = DAGHashlet(cur->key);
+        head++;
+
+        //  Helper closure: try to add `nh` to the set.  When `traverse`
+        //  is YES, also enqueue for further BFS expansion.  Skip-set
+        //  entries are dropped silently and no traversal happens
+        //  through them.
+        #define DAG_TUN_VISIT(nh, traverse) do {                    \
+            u64 _h = (nh);                                          \
+            if (dag_in_skip(skip_hl, nskip, _h)) break;             \
+            if (DAGAncestorsHas(set, _h)) break;                    \
+            if (dag_anc_put(set, _h) != OK) break;                  \
+            if (traverse) {                                         \
+                wh128 _qr = { .key = DAGPack(0, _h), .val = 0 };    \
+                if (wh128bFeed1(queue, _qr) != OK) break;           \
+            }                                                       \
+        } while (0)
+
+        if (edges & DAG_EDGE_PARENT) {
+            u32 nn = 0;
+            if (DAGEdgesOf(runs, c, DAG_T_COMMIT, nbuf, 16, &nn) == OK) {
+                for (u32 i = 0; i < nn; i++) DAG_TUN_VISIT(nbuf[i], YES);
+            }
+        }
+        if (edges & DAG_EDGE_FOSTER) {
+            u32 nn = 0;
+            if (DAGEdgesOf(runs, c, DAG_T_FOSTER, nbuf, 16, &nn) == OK) {
+                //  Foster targets traverse fully — they're real
+                //  ancestor commits absorbed into cur's history,
+                //  just under a non-standard header name.
+                for (u32 i = 0; i < nn; i++) DAG_TUN_VISIT(nbuf[i], YES);
+            }
+        }
+        if (edges & DAG_EDGE_PICKED) {
+            u32 nn = 0;
+            if (DAGEdgesOf(runs, c, DAG_T_PICKED, nbuf, 16, &nn) == OK) {
+                //  picked targets are leaves — added to the set but
+                //  NOT enqueued.  Per spec picked is dedup-only and
+                //  doesn't transitively pull in the picked commit's
+                //  own ancestors.
+                for (u32 i = 0; i < nn; i++) DAG_TUN_VISIT(nbuf[i], NO);
+            }
+        }
+
+        #undef DAG_TUN_VISIT
+    }
+
+    wh128bUnMap(queue);
+    done;
+}
+
+ok64 DAGAncestorsOfManyTunable(Bwh128 set, wh128css runs,
+                               u64 const *tips, u32 ntips,
+                               u32 edges,
+                               u64 const *skip_hl, u32 nskip) {
+    sane(set);
+    for (u32 i = 0; i < ntips; i++) {
+        if (tips[i] == 0) continue;
+        call(DAGAncestorsTunable, set, runs, tips[i],
+             edges, skip_hl, nskip);
+    }
+    done;
+}
+
 ok64 DAGAncestorsOfMany(Bwh128 set, wh128css runs,
                         u64 const *tips, u32 n) {
     sane(set);
@@ -296,6 +413,111 @@ static u32 topo_parents_of(wh128css runs, u64 commit_h,
     if (n > cap) n = cap;
     for (u32 i = 0; i < n; i++) out[i] = DAGHashlet(base[i]);
     return n;
+}
+
+//  Edge-set-aware variant of `topo_parents_of`.  Concatenates targets
+//  of each edge kind in `edges` into `out` (capped at `cap`).
+static u32 topo_links_of(wh128css runs, u64 commit_h,
+                         u32 edges,
+                         u64 *out, u32 cap) {
+    u32 n = 0;
+    if (edges & DAG_EDGE_PARENT) {
+        u32 nn = 0;
+        if (DAGEdgesOf(runs, commit_h, DAG_T_COMMIT,
+                       out + n, cap - n, &nn) == OK) {
+            n += nn;
+        }
+    }
+    if ((edges & DAG_EDGE_FOSTER) && n < cap) {
+        u32 nn = 0;
+        if (DAGEdgesOf(runs, commit_h, DAG_T_FOSTER,
+                       out + n, cap - n, &nn) == OK) {
+            n += nn;
+        }
+    }
+    //  Picked targets are not topo-ordered: see DAGTopoSortTunable
+    //  comment.  Even if DAG_EDGE_PICKED is in the bitmask, no edge
+    //  is followed here.
+    return n;
+}
+
+u32 DAGTopoSortTunable(u64 *out, u32 cap,
+                       Bwh128 set, wh128css runs,
+                       u32 edges) {
+    if (cap == 0 || !out) return 0;
+    //  No edges to follow → no ordering, just emit set members in
+    //  array order (caller will see arbitrary order, fine for
+    //  parent-less degenerate cases).
+    if (edges == 0) edges = DAG_EDGE_PARENT;
+
+    size_t set_cap = (size_t)(wh128bTerm(set) - wh128bHead(set));
+    if (set_cap == 0) return 0;
+
+    Bwh128 visited = {};
+    if (wh128bMap(visited, set_cap) != OK) return 0;
+
+    Bu8 stk_buf = {};
+    if (u8bMap(stk_buf, set_cap * sizeof(topo_frame)) != OK) {
+        wh128bUnMap(visited);
+        return 0;
+    }
+    topo_frame *stack = (topo_frame *)u8bDataHead(stk_buf);
+    u32 stack_max = (u32)set_cap;
+
+    u32 written = 0;
+    wh128cp set_head = wh128bHead(set);
+    wh128cp set_term = wh128bTerm(set);
+
+    for (wh128cp p = set_head; p < set_term && written < cap; p++) {
+        if (p->key == 0) continue;
+        u64 root = DAGHashlet(p->key);
+        if (DAGAncestorsHas(visited, root)) continue;
+        if (1 > stack_max) goto outta_room;
+
+        u32 sp = 0;
+        stack[sp].c = root;
+        stack[sp].par_i = 0;
+        stack[sp].npar = topo_links_of(runs, root, edges,
+                                       stack[sp].pars,
+                                       DAG_TOPO_MAX_PARENTS);
+        if (stack[sp].npar > DAG_TOPO_MAX_PARENTS)
+            stack[sp].npar = DAG_TOPO_MAX_PARENTS;
+        sp++;
+        dag_anc_put(visited, root);
+
+        while (sp > 0) {
+            topo_frame *t = &stack[sp - 1];
+            b8 descended = NO;
+            while (t->par_i < t->npar) {
+                u64 par = t->pars[t->par_i++];
+                if (par == 0) continue;
+                if (!DAGAncestorsHas(set, par)) continue;
+                if (DAGAncestorsHas(visited, par)) continue;
+                if (sp >= stack_max) goto outta_room;
+
+                stack[sp].c = par;
+                stack[sp].par_i = 0;
+                stack[sp].npar = topo_links_of(runs, par, edges,
+                                               stack[sp].pars,
+                                               DAG_TOPO_MAX_PARENTS);
+                if (stack[sp].npar > DAG_TOPO_MAX_PARENTS)
+                    stack[sp].npar = DAG_TOPO_MAX_PARENTS;
+                sp++;
+                dag_anc_put(visited, par);
+                descended = YES;
+                break;
+            }
+            if (!descended) {
+                if (written < cap) out[written++] = t->c;
+                sp--;
+            }
+        }
+    }
+
+outta_room:
+    u8bUnMap(stk_buf);
+    wh128bUnMap(visited);
+    return written;
 }
 
 u32 DAGTopoSort(u64 *out, u32 cap,
@@ -520,12 +742,16 @@ ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
 
     switch (obj_type) {
     case DOG_OBJ_COMMIT: {
-        // Parse commit header for tree_h and parents[].
+        //  Parse headers: tree (mandatory), parents[], fosters[].
+        //  GITu8sDrainCommit walks line-by-line; an empty `field` row
+        //  marks the header/body separator.  After it we keep walking
+        //  the body to scan for `picked: <40hex>` trailers.
         a_dup(u8c, scan, blob);
         u8cs field = {}, value = {};
         sha1 tree_sha = {};
         sha1 parents[16] = {};
-        u32 npar = 0;
+        sha1 fosters[16] = {};
+        u32 npar = 0, nfost = 0;
         b8 got_tree = NO;
         while (GITu8sDrainCommit(scan, field, value) == OK) {
             if (u8csEmpty(field)) break;
@@ -536,9 +762,39 @@ ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
                        && npar < 16) {
                 DAGsha1FromHex(&parents[npar], (char const *)value[0]);
                 npar++;
+            } else if (u8csEq(field, GIT_FIELD_FOSTER) && u8csLen(value) >= 40
+                       && nfost < 16) {
+                DAGsha1FromHex(&fosters[nfost], (char const *)value[0]);
+                nfost++;
             }
         }
         if (!got_tree) return DAGFAIL;
+
+        //  Trailer scan: walk remaining bytes for `picked: <40hex>`
+        //  lines.  Each picked target maps to one (COMMIT, PICKED)
+        //  edge.  Bounded loop — stops at end of body.
+        sha1 pickeds[16] = {};
+        u32 npick = 0;
+        {
+            u8cp p = scan[0];
+            u8cp e = scan[1];
+            a_dup(u8c, pkl, GIT_TRAILER_PICKED);
+            size_t klen = (size_t)(pkl[1] - pkl[0]);
+            while (p < e && npick < 16) {
+                //  Find line start.  Either p == start-of-body or just
+                //  past a '\n'.
+                u8cp lend = p;
+                while (lend < e && *lend != '\n') lend++;
+                size_t llen = (size_t)(lend - p);
+                if (llen >= klen + 40 &&
+                    memcmp(p, pkl[0], klen) == 0) {
+                    DAGsha1FromHex(&pickeds[npick],
+                                   (char const *)(p + klen));
+                    npick++;
+                }
+                p = (lend < e) ? lend + 1 : e;
+            }
+        }
 
         u64 commit_h = dag_obj_hashlet(DOG_OBJ_COMMIT, sha, blob);
 
@@ -546,12 +802,24 @@ ok64 GRAFDagUpdate(u8 obj_type, sha1 const *sha, u8cs blob) {
 
         //  (COMMIT, commit_h) → (TREE,   tree_h)    root-tree edge
         //  (COMMIT, commit_h) → (COMMIT, parent_h)  one per parent
+        //  (COMMIT, commit_h) → (FOSTER, foster_h)  one per foster
+        //  (COMMIT, commit_h) → (PICKED, picked_h)  one per picked:
         dag_emit(g, DAG_T_COMMIT, commit_h,
                     DAG_T_TREE,   tree_h);
         for (u32 i = 0; i < npar; i++) {
             u64 parent_h = WHIFFHashlet60(&parents[i]);
             dag_emit(g, DAG_T_COMMIT, commit_h,
                         DAG_T_COMMIT, parent_h);
+        }
+        for (u32 i = 0; i < nfost; i++) {
+            u64 foster_h = WHIFFHashlet60(&fosters[i]);
+            dag_emit(g, DAG_T_COMMIT, commit_h,
+                        DAG_T_FOSTER, foster_h);
+        }
+        for (u32 i = 0; i < npick; i++) {
+            u64 picked_h = WHIFFHashlet60(&pickeds[i]);
+            dag_emit(g, DAG_T_COMMIT, commit_h,
+                        DAG_T_PICKED, picked_h);
         }
 
         dag_batch_maybe_flush(g);

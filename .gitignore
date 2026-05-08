@@ -4,6 +4,7 @@ build-*/
 run-*/
 cmake-build-*/
 node_modules/
+.cache/
 
 # Build artifacts
 *.o

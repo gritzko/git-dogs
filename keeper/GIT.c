@@ -18,10 +18,12 @@
 
 GITLIT(GIT_FIELD_TREE,       "tree");
 GITLIT(GIT_FIELD_PARENT,     "parent");
+GITLIT(GIT_FIELD_FOSTER,     "foster");
 GITLIT(GIT_FIELD_AUTHOR,     "author");
 GITLIT(GIT_FIELD_COMMITTER,  "committer");
 GITLIT(GIT_FIELD_GPGSIG,     "gpgsig");
 GITLIT(GIT_FIELD_OBJECT,     "object");
+GITLIT(GIT_TRAILER_PICKED,   "picked: ");
 
 GITLIT(GIT_REFS_HEADS_PFX,   "refs/heads/");
 GITLIT(GIT_REFS_TAGS_PFX,    "refs/tags/");

@@ -35,6 +35,7 @@
 #include "dog/WHIFF.h"
 #include "graf/GRAF.h"
 #include "graf/JOIN.h"
+#include "graf/REBASE.h"
 #include "keeper/GIT.h"
 #include "keeper/KEEP.h"
 #include "keeper/REFS.h"
@@ -314,6 +315,13 @@ typedef struct {
     //  with this ts right after the write, so the ULOG row's ts and
     //  the on-disk mtimes stay in lock-step (stamp-set invariant).
     ron60 ts;
+    //  Cherry-pick base override.  For `#<sha>` the resolved fork is
+    //  parent(thr) — NOT reachable from ours — so the leaf 3-way
+    //  merge must use the fork blob (l->sha) as base, not auto-LCA
+    //  via GRAFGet (which would re-derive a base older than parent
+    //  and silently re-apply intermediate-commit diffs).  Set true
+    //  for cherry-pick PATCHApply, false otherwise.
+    b8    use_fork_base;
 } patch_stats;
 
 //  Emit a per-file status row in the `patch <status> <path>` form
@@ -600,16 +608,38 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
                     }
                 }
             }
-            if (wt_dirty) {
-                ok64 wmo = GRAFMergeWtFile(childpath, reporoot,
-                                           our, thr, mbuf);
+            //  Routing:
+            //
+            //    cherry-pick (`#<sha>`)     → GRAFMergeExplicit (JOIN
+            //         with explicit `parent(thr)` base — apply a
+            //         single commit's diff onto an unrelated `ours`).
+            //    squash / merge / rebase-one → GRAFMergeWtFileTunable
+            //         (WEAVE on parent ∪ foster ancestor closures —
+            //         foster-aware so prior `?br#`+post cycles'
+            //         absorbed work participates in reachability AND
+            //         in the topo replay order, keeping each token's
+            //         introducing-commit sc stable across both sides
+            //         so WEAVEMerge's `inrm.in`-mixed LCS aligns).
+            //         JOIN auto-LCA `fetch_merge` is the fallback when
+            //         the WEAVE side errors out (no DAG entries, etc.).
+            //         GRAFMergeWtFile already folds dirty wt bytes as
+            //         a final base-side layer; on a clean wt the layer
+            //         is a no-op.
+            if (st->use_fork_base) {
+                (void)GRAFMergeExplicit(&l->sha, &o->sha,
+                                        &t->sha, mbuf);
+            } else {
+                u32 edges = DAG_EDGE_PARENT | DAG_EDGE_FOSTER;
+                ok64 wmo = GRAFMergeWtFileTunable(childpath, reporoot,
+                                                  our, thr,
+                                                  edges, NULL, 0,
+                                                  mbuf);
                 if (wmo != OK) {
                     u8bReset(mbuf);
                     (void)fetch_merge(mbuf, childpath, our, thr);
                 }
-            } else {
-                (void)fetch_merge(mbuf, childpath, our, thr);
             }
+            (void)wt_dirty;
             a_dup(u8c, bytes, u8bData(mbuf));
             b8 conflict = has_conflict_marker(bytes);
             //  Write result using theirs' mode when ours == fork mode,
@@ -1107,44 +1137,152 @@ static ok64 patch_first_parent(sha1 *parent_out, sha1 const *commit_sha) {
     return found ? OK : PATCHFAIL;
 }
 
-//  Ancestor-skip walk for rebase-one (`?br#`): walk first-parent
-//  chain from `br_tip` toward `fork`.  Return the oldest commit
-//  whose parent equals `fork` (or any sha already-reachable from
-//  cur via parent chain — TODO: extend for foster reachability
-//  once foster-aware walks land).  This is the "next not-yet-
-//  replayed commit on the branch".
+//  Read `commit_sha`'s headers, append every parent + foster sha to
+//  `out` (capped at `cap` shas — caller's responsibility to size it).
+//  `*nout` is incremented by the number of refs appended; existing
+//  contents preserved.  Used by `build_reachable_via_links` to expand
+//  cur's reachability set across both DAG-edge kinds.
+static ok64 patch_links_of(sha1 *out, u32 cap, u32 *nout,
+                           sha1 const *commit_sha) {
+    sane(out && nout && commit_sha);
+    Bu8 cbuf = {};
+    call(u8bAllocate, cbuf, 1UL << 16);
+    u8 ct = 0;
+    ok64 ko = KEEPGetExact(&KEEP, commit_sha, cbuf, &ct);
+    if (ko != OK) { u8bFree(cbuf); return ko; }
+    if (ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); return PATCHFAIL; }
+
+    u8cs body = {u8bDataHead(cbuf), u8bIdleHead(cbuf)};
+    u8cs field = {}, value = {};
+    while (GITu8sDrainCommit(body, field, value) == OK) {
+        if ($empty(field)) break;
+        if (*nout >= cap) break;
+        b8 is_parent = ($len(field) == 6 &&
+                        memcmp(field[0], "parent", 6) == 0);
+        b8 is_foster = ($len(field) == 6 &&
+                        memcmp(field[0], "foster", 6) == 0);
+        if ((is_parent || is_foster) && $len(value) >= 40) {
+            sha1 *slot = &out[*nout];
+            u8s sb = {slot->data, slot->data + 20};
+            u8cs hx = {value[0], value[0] + 40};
+            HEXu8sDrainSome(sb, hx);
+            (*nout)++;
+        }
+    }
+    u8bFree(cbuf);
+    return OK;
+}
+
+//  Linear-scan membership in a `set[]` of `n` shas.  Used by the
+//  rebase-one reachability BFS — n is bounded by RBASEONE_REACH_MAX.
+static b8 reach_set_has(sha1 const *set, u32 nset, sha1 const *q) {
+    for (u32 i = 0; i < nset; i++) {
+        if (sha1eq(&set[i], q)) return YES;
+    }
+    return NO;
+}
+
+//  BFS from `seed` over parent ∪ foster edges, populating `set[]`.
+//  Caller-provided `set` array has capacity `cap` shas; `*nset` is
+//  the live count.  picked: trailers are intentionally NOT followed
+//  per VERBS.md §PATCH "Ancestor-skip walk" — they are dedup-only
+//  and do not participate in reachability.
+static ok64 build_reachable_via_links(sha1 *set, u32 cap, u32 *nset,
+                                      sha1 const *seed) {
+    sane(set && nset && seed);
+    *nset = 0;
+    if (sha1empty(seed)) return OK;
+    set[(*nset)++] = *seed;
+
+    //  BFS: walk index `i` over already-enqueued shas, expanding via
+    //  patch_links_of; the link list grows as we go (parents/fosters
+    //  enter the same `set` array).  Bound by `cap` to avoid runaway.
+    for (u32 i = 0; i < *nset && *nset < cap; i++) {
+        sha1 cur = set[i];
+        sha1 links[16] = {};
+        u32 nl = 0;
+        ok64 lo = patch_links_of(links, 16, &nl, &cur);
+        if (lo != OK) continue;       //  best-effort: skip on read fail
+        for (u32 k = 0; k < nl && *nset < cap; k++) {
+            if (reach_set_has(set, *nset, &links[k])) continue;
+            set[(*nset)++] = links[k];
+        }
+    }
+    return OK;
+}
+
+//  Ancestor-skip walk for rebase-one (`?br#`): pick the OLDEST commit
+//  on `br_tip`'s first-parent chain that is NOT already reachable
+//  from `our` via parent ∪ foster edges.
 //
-//    F1 ── F2 ── F3 = br_tip
-//    fork = T0; walking F3→F2→F1, parent(F1)==fork → return F1.
+//  Why foster matters: a previous `?br#` + `post` cycle attaches the
+//  absorbed commit as a `foster` header on cur's tip — that edge is
+//  in the commit body but NOT in the DAG-LCA-driven reach set, so a
+//  parent-only walk picks the same commit again, doubling the foster
+//  chain on the next post.  See test/patch/18-repeated-rebase and
+//  test/patch/19-feature-stack-rebase for the regressions that drove
+//  this rewrite.
 //
-//  Returns PATCHFAIL if br_tip equals fork (nothing to rebase) or
-//  the chain doesn't reach fork within RBASEONE_MAX hops.
+//    feature: F1 ── F2 ── F3 = br_tip
+//    iter 1: reach = {our..T0}; walk F3→F2→F1; F1's parent T0 ∈ reach
+//            → pick F1.
+//    iter 2: cur now has foster=F1; reach grows to include F1 → walk
+//            F3→F2; F2's parent F1 ∈ reach → pick F2.  Without foster
+//            following, reach would still be {our..T0} and the walk
+//            would pick F1 again.
+//
+//  picked: trailers NOT followed (spec: dedup-only).  Patch-id dedup
+//  as a broader safety net is a follow-up.
 #define RBASEONE_MAX 4096
+#define RBASEONE_REACH_MAX 4096
 static ok64 resolve_rebase_one(sha1 *out, sha1 const *br_tip,
-                               sha1 const *fork) {
-    sane(out && br_tip && fork);
-    if (sha1eq(br_tip, fork)) {
+                               sha1 const *our) {
+    sane(out && br_tip && our);
+    if (sha1eq(br_tip, our)) {
         fprintf(stderr,
             "sniff: patch: rebase-one — branch tip is already "
             "reachable from cur (nothing to replay)\n");
         return PATCHFAIL;
     }
+
+    //  Heap-alloc the reach set: 4096 × 20 = 80 KB, too big for the
+    //  stack frame.
+    sha1 *reach = (sha1 *)calloc(RBASEONE_REACH_MAX, sizeof(sha1));
+    if (reach == NULL) return PATCHFAIL;
+    u32 nreach = 0;
+    (void)build_reachable_via_links(reach, RBASEONE_REACH_MAX,
+                                    &nreach, our);
+
+    if (reach_set_has(reach, nreach, br_tip)) {
+        free(reach);
+        fprintf(stderr,
+            "sniff: patch: rebase-one — branch tip is already "
+            "reachable from cur (nothing to replay)\n");
+        return PATCHFAIL;
+    }
+
+    //  Walk br_tip's first-parent chain; stop at the first
+    //  already-reachable parent.  The cur sha at that step (= the
+    //  commit whose parent is reachable) is the one to replay.
     sha1 cur = *br_tip;
     for (u32 i = 0; i < RBASEONE_MAX; i++) {
         sha1 par = {};
         ok64 po = patch_first_parent(&par, &cur);
         if (po != OK) {
+            free(reach);
             fprintf(stderr,
                 "sniff: patch: rebase-one — chain from br_tip didn't "
-                "reach fork (root commit?)\n");
+                "reach a reachable commit (root commit hit?)\n");
             return po;
         }
-        if (sha1eq(&par, fork)) {
+        if (reach_set_has(reach, nreach, &par)) {
             *out = cur;
+            free(reach);
             return OK;
         }
         cur = par;
     }
+    free(reach);
     fprintf(stderr,
         "sniff: patch: rebase-one — chain longer than %u hops; "
         "giving up\n", RBASEONE_MAX);
@@ -1272,8 +1410,20 @@ ok64 PATCHApply(u8cs reporoot, uricp u) {
     if (shape == PATCH_SHAPE_REBASE1) {
         sha1 br_tip = thr_sha;
         sha1 picked = {};
-        call(resolve_rebase_one, &picked, &br_tip, &fork_sha);
+        //  Reachability seed = cur (our_sha), not fork_sha: prior
+        //  rebase-one + post cycles attach absorbed commits via
+        //  `foster` headers that aren't on the DAG-LCA fork chain.
+        call(resolve_rebase_one, &picked, &br_tip, &our_sha);
         thr_sha = picked;
+        //  Refresh fork to parent(picked) so the patch_walk tree
+        //  classification uses the immediate predecessor of theirs
+        //  (matches the rebase-one semantic: replay diff(parent(thr),
+        //  thr)).  Files added by parent(thr) end up in fork's tree
+        //  → not classified as "ours added" any more.
+        sha1 new_fork = {};
+        if (patch_first_parent(&new_fork, &thr_sha) == OK) {
+            fork_sha = new_fork;
+        }
     }
 
     //  Pick the patch row ts up-front.  SNIFFAtNow guarantees
@@ -1286,7 +1436,17 @@ ok64 PATCHApply(u8cs reporoot, uricp u) {
     struct timespec tv = {};
     SNIFFAtNow(&ts, &tv);
 
-    patch_stats st = { .ts = ts };
+    //  Cherry-pick AND rebase-one need the explicit-fork-base JOIN
+    //  path: each absorbs a single commit's diff into ours, so the
+    //  3-way base must be parent(thr) (= parent(picked) for rebase-
+    //  one).  fetch_merge's auto-LCA(our, thr) goes back further
+    //  than parent(thr) when thr's commit chain has work that ours
+    //  absorbed via foster (not an LCA-DAG ancestor) — the resulting
+    //  "both sides added X" framing then misclassifies as conflict.
+    //  Squash and merge keep the auto-LCA path: they're meant to
+    //  absorb the FULL stack between LCA and theirs's tip.
+    b8 explicit_fork = cherry || (shape == PATCH_SHAPE_REBASE1);
+    patch_stats st = { .ts = ts, .use_fork_base = explicit_fork };
     u8cs root = {NULL, NULL};   // empty dir_path → root tree
     call(patch_walk, reporoot, root,
          &fork_sha, &our_sha, &thr_sha, &st);

@@ -17,17 +17,18 @@ int neg(int a) {
 }
 
 void greet(const char *name) {
-    printf(>>>>"fix! %s\n"||||"trunk: %s\n"<<<<, name);
+    printf(<<<<"trunk: %s\n"||||"fix! %s\n">>>>, name);
 }
 
 int main(void) {
     int x = add(10, 20);
     int y = sub(50, 30);
     greet("world");
-    >>>>while (y > 0) {
+<<<<    int diff = x - y;
+    fputs("trunk done\n", stdout);
+||||    while (y > 0) {
         y = y - x;
     }
-    fprintf(stderr, "fix loop done\n");||||int diff = x - y;
-    fputs("trunk done\n", stdout);<<<<
-    return diff;
+    fprintf(stderr, "fix loop done\n");
+>>>>    return diff;
 }

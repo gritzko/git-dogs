@@ -51,6 +51,27 @@ con ok64 DAGNOPATH   = 0xd2905d864a751;
 #define DAG_T_COMMIT  1
 #define DAG_T_TREE    2
 #define DAG_T_BLOB    3
+//  Beagle-only edge kinds.  Recorded by GRAFDagUpdate alongside the
+//  standard parent edges; a tunable walker (DAGAncestorsTunable)
+//  opts in via the DAG_EDGE_* bitmask.
+//      (COMMIT, FOSTER) — `foster <hex>` header on the commit.
+//                         emitted by `?br#`/`?br` POSTs to record the
+//                         absorbed branch tip without making it a
+//                         standard parent.
+//      (COMMIT, PICKED) — `picked: <hex>` trailer on the commit.
+//                         emitted by `#<sha>` cherry-pick POSTs.
+//                         Walked one-step only by the tunable walker:
+//                         the picked target enters the reach set but
+//                         its own parents/fosters/pickeds are NOT
+//                         followed (per spec — picked is dedup-only).
+#define DAG_T_FOSTER  4
+#define DAG_T_PICKED  5
+
+// --- Reachability edge kinds (bitmask for DAGAncestorsTunable) ---
+
+#define DAG_EDGE_PARENT  (1u << 0)
+#define DAG_EDGE_FOSTER  (1u << 1)
+#define DAG_EDGE_PICKED  (1u << 2)   //  one-step only — see comment above
 
 // --- wh64 layout local to graf: hashlet[60] | type[4] (no id slot) ---
 //
@@ -169,6 +190,34 @@ ok64 DAGAncestors(Bwh128 set, wh128css runs, u64 tip);
 ok64 DAGAncestorsOfMany(Bwh128 set, wh128css runs,
                         u64 const *tips, u32 n);
 
+//  Tunable BFS over commit graph.  `edges` is a DAG_EDGE_* bitmask
+//  picking which edge kinds to traverse:
+//      DAG_EDGE_PARENT  — `parent` headers (= DAGAncestors).
+//      DAG_EDGE_FOSTER  — `foster` headers (beagle-only).
+//      DAG_EDGE_PICKED  — `picked: <sha>` trailers; targets are added
+//                         as reach-set leaves but their own outgoing
+//                         edges are NOT followed (one-step only).
+//  `skip_hl[0..nskip)` are commit hashlets to omit entirely from the
+//  reach set (also pruning traversal through them).  Pass nskip=0
+//  with skip_hl=NULL for an unfiltered walk.  `tip` itself is added
+//  unless it appears in skip.  DAGAncestors is equivalent to
+//  DAGAncestorsTunable with edges=DAG_EDGE_PARENT, nskip=0.
+ok64 DAGAncestorsTunable(Bwh128 set, wh128css runs, u64 tip,
+                         u32 edges,
+                         u64 const *skip_hl, u32 nskip);
+
+ok64 DAGAncestorsOfManyTunable(Bwh128 set, wh128css runs,
+                               u64 const *tips, u32 ntips,
+                               u32 edges,
+                               u64 const *skip_hl, u32 nskip);
+
+//  Helper: enumerate edges of one kind out of a commit.
+//  Caller-provided `out` (of capacity `cap`) gets target hashlets.
+//  *nout is set on return.  `kind` is one of DAG_T_COMMIT (parents),
+//  DAG_T_FOSTER, or DAG_T_PICKED.
+ok64 DAGEdgesOf(wh128css runs, u64 commit_h, u8 kind,
+                u64 *out, u32 cap, u32 *nout);
+
 //  Populate `set` with every commit hashlet recorded in the index
 //  (one record per (COMMIT, TREE) entry).  Use when there's no tip to
 //  scope the walk to and a full-history projection is wanted.
@@ -188,6 +237,19 @@ ok64 dag_anc_put(Bwh128 set, u64 commit_h);
 //  the routine returns what it has so far.
 u32 DAGTopoSort(u64 *out, u32 cap,
                 Bwh128 set, wh128css runs);
+
+//  Tunable variant: respects the `edges` bitmask when ordering — a
+//  commit C is held back until every edge target of the kinds in
+//  `edges` has been emitted.  `DAGTopoSort` is the legacy
+//  parent-only behaviour.
+//
+//  Foster targets (DAG_EDGE_FOSTER) order BEFORE their carrying
+//  commit.  Picked targets (DAG_EDGE_PICKED) do NOT impose ordering
+//  — they're leaves with no replay step of their own; callers that
+//  add DAG_EDGE_PICKED to the ancestor walk should NOT add it here.
+u32 DAGTopoSortTunable(u64 *out, u32 cap,
+                       Bwh128 set, wh128css runs,
+                       u32 edges);
 
 // --- hashlet width bridging ---
 //

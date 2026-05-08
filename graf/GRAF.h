@@ -273,6 +273,24 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
                      sha1 const *base, sha1 const *tgt,
                      u8b out);
 
+//  Tunable variant of GRAFMergeWtFile.  Both sides' ancestor closures
+//  are walked under the same DAG_EDGE_* `edges` bitmask + the same
+//  `skip_hl` set (caller-supplied 60-bit hashlets to omit; pass
+//  nskip=0 / NULL for none).  GRAFMergeWtFile is the same as calling
+//  this with `edges = DAG_EDGE_PARENT` and `nskip = 0`.
+//
+//  PATCH.c uses `DAG_EDGE_PARENT | DAG_EDGE_FOSTER` for squash /
+//  merge / rebase-one so that prior `?br#`+post cycles' absorbed
+//  trunk commits (attached via `foster` headers) participate in
+//  reachability — without it, repeated rebases see the same blob
+//  arriving from "two independent introductions" and produce
+//  duplicate / conflict-marked output.
+ok64 GRAFMergeWtFileTunable(u8cs path, u8cs reporoot,
+                            sha1 const *base, sha1 const *tgt,
+                            u32 edges,
+                            u64 const *skip_hl, u32 nskip,
+                            u8b out);
+
 // Render commit history one-per-line for `be log:[path]?<ref>#<N>`.
 // Branch-only URI (no path) walks the COMMIT_PARENT chain via the DAG
 // index; path-bearing URI uses PATH_VER + ancestor filter.  Output
