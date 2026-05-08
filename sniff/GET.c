@@ -79,7 +79,31 @@ static ok64 get_write_one(get_ctx *g, u8cs path, u8 kind, u8cp esha) {
     sha1 entry_sha = {};
     sha1Mv(&entry_sha, (sha1 const *)esha);
     ok64 o = KEEPGetExact(k, &entry_sha, bbuf, &bt);
-    if (o != OK) { u8bUnMap(bbuf); return o; }
+    if (o != OK) {
+        //  Empty-blob short-circuit.  The well-known empty-blob sha
+        //  e69de29b… isn't always stored as a packed object — git
+        //  trees can reference it without an explicit blob entry —
+        //  so a fresh-clone wt walk must materialise empty files
+        //  without going through KEEPGet.  Symmetric with POST's
+        //  zero-size handler (sniff/POST.c:128).
+        static u8 const EMPTY_BLOB_SHA[20] = {
+            0xe6, 0x9d, 0xe2, 0x9b, 0xb2, 0xd1, 0xd6, 0x43,
+            0x4b, 0x8b, 0x29, 0xae, 0x77, 0x5a, 0xd8, 0xc2,
+            0xe4, 0x8c, 0x53, 0x91
+        };
+        if (memcmp(entry_sha.data, EMPTY_BLOB_SHA, 20) == 0) {
+            u8bUnMap(bbuf);
+            int fd = -1;
+            ok64 co = FILECreate(&fd, $path(fp));
+            if (co != OK) return co;
+            FILEClose(&fd);
+            if (kind == WALK_KIND_EXE) FILEChmod($path(fp), 0755);
+            call(SNIFFAtStampPath, fp, g->ts);
+            done;
+        }
+        u8bUnMap(bbuf);
+        return o;
+    }
 
     if (kind == WALK_KIND_LNK) {
         FILEUnLink($path(fp));

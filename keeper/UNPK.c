@@ -504,17 +504,29 @@ worker_alloc_ok:;
 
         u8bReset(k->buf4);
         u64 idle_before = u8bIdleLen(k->buf4);
-        if (ZINFInflate(u8bIdle(k->buf4), from) != OK) { st.skipped++; continue; }
+        ok64 zr = ZINFInflate(u8bIdle(k->buf4), from);
+        if (zr != OK) {
+            st.skipped++; continue;
+        }
         u64 produced = idle_before - u8bIdleLen(k->buf4);
         if (produced == 0) { st.skipped++; continue; }
-        u8bFed(k->buf4, produced);
+        //  ZINFInflate writes via *into and advances *into by total_out;
+        //  since `into` was `&buf4[2]` the buffer's data range already
+        //  grew by `produced` bytes.  A second `u8bFed(buf4, produced)`
+        //  here used to double-advance, leaving delta_sl twice as long
+        //  as the actual delta and tripping DELTApply on a 0x00 byte
+        //  past the inflated data — which is why incremental
+        //  `be get be://...?tags/X` returned KEEPNONE for any tag whose
+        //  REF_DELTA base lived in an earlier already-fetched pack.
 
         u8bReset(k->buf1);
         a_dup(u8c, delta_sl, u8bDataC(k->buf4));
         a_dup(u8c, base_sl, u8bData(k->buf3));
         u8p rstart = u8bIdleHead(k->buf1);
         u8g aout = {rstart, rstart, u8bTerm(k->buf1)};
-        if (DELTApply(delta_sl, base_sl, aout) != OK) { st.skipped++; continue; }
+        if (DELTApply(delta_sl, base_sl, aout) != OK) {
+            st.skipped++; continue;
+        }
         u64 rsz = u8gLeftLen(aout);
 
         sha1 sha = {};

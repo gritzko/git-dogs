@@ -904,12 +904,20 @@ static ok64 post_scan_changeset(post_ctx *c, sha1 *base_tree_sha,
     Bu8 bu = {}, wu = {};
     Bu8 put_unsorted = {}, del_unsorted = {};
     Bu8 put_buf = {}, del_buf = {};
-    call(u8bAllocate, bu,           1UL << 20);
-    call(u8bAllocate, wu,           1UL << 20);
-    call(u8bAllocate, put_unsorted, 1UL << 16);
-    call(u8bAllocate, del_unsorted, 1UL << 16);
-    call(u8bAllocate, put_buf,      1UL << 16);
-    call(u8bAllocate, del_buf,      1UL << 16);
+    //  Sized for real-world wt: a single rsync-then-`be put .` over a
+    //  freshly checked-out git tag (~5k tracked files) easily fills
+    //  more than 64 KB of put-rows; bu/wu used to overflow on wt's
+    //  with > ~7k files at ~140 B/row.  Bump put/del to 4 MB and
+    //  bu/wu to 16 MB.  These are stack-of-pointers `Bu8` slabs
+    //  (malloc-backed); upgrading to `u8bMap` would drop the cost
+    //  but POST mixes Free/UnMap conventions across its many
+    //  cleanup paths — keep `Allocate` here for now.
+    call(u8bAllocate, bu,           1UL << 24);
+    call(u8bAllocate, wu,           1UL << 24);
+    call(u8bAllocate, put_unsorted, 1UL << 22);
+    call(u8bAllocate, del_unsorted, 1UL << 22);
+    call(u8bAllocate, put_buf,      1UL << 22);
+    call(u8bAllocate, del_buf,      1UL << 22);
 
 #define PD_FREE_ALL()                                  \
     do {                                                \

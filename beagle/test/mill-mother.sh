@@ -175,6 +175,14 @@ printf "%-20s  %s\n" "tag" "post"
 printf "%-20s  %s\n" "---" "----"
 for TAG in $TAGS; do
     TOTAL=$((TOTAL + 1))
+    #  Pause between tags: a single `be put .` over a few-thousand-file
+    #  wt self-bumps the .sniff tail timestamp ~N milliseconds (one per
+    #  staged row, see SNIFFAtNow's monotonicity guard).  Without a
+    #  wall-clock gap the next iteration's RONNow() lands before the
+    #  prior tail and SNIFFCheckClock fires CLOCKBAD.  Six seconds is
+    #  generous: comfortably above the 1 s skew tolerance and the 4.7 s
+    #  bump from a 4700-file rsync of git src.
+    sleep 6
     git -C "$TMILL/src01" checkout -q "refs/tags/$TAG"
     #  Mirror src01 onto dog01, preserving dog01's own meta dirs.
     #  `-c` forces checksum compare: git checkout preserves mtimes
@@ -185,7 +193,27 @@ for TAG in $TAGS; do
         "$TMILL/src01/" "$TMILL/dog01/"
     cd "$TMILL/dog01"
     T0=$(date +%s)
-    if "$BE" post -m "$TAG" "?tags/$TAG" >"$TMILL/be-post-$TAG.log" 2>&1; then
+    #  Stage every wt path before posting.  `be post` only commits
+    #  tracked files in implicit mode (per VERBS.md §POST: an untracked
+    #  sibling must be explicitly `be put`-staged), and `be put` does
+    #  NOT auto-record deletions — that's `be delete`'s job.  So we
+    #  need both:
+    #
+    #    `be put .`    — adds + modifications under reporoot
+    #    `be delete`   — sweep tracked-but-missing paths into the ULOG
+    #
+    #  Without the delete sweep, an rsync that removed a file (or a
+    #  whole directory rename like `include/` → `inc/`) leaves the
+    #  next commit's tree carrying both old + new, and Phase 3 dog01
+    #  fails to prune the obsolete clean files on cross-tag rollback.
+    "$BE" put .  >>"$TMILL/be-post-$TAG.log" 2>&1 || true
+    "$BE" delete >>"$TMILL/be-post-$TAG.log" 2>&1 || true
+    #  --force: real-world repos legitimately track files containing
+    #  conflict-marker-shaped lines (docs, conflict-resolution tools,
+    #  test fixtures).  In a treadmill we know the working tree just
+    #  came from `git checkout`, not a half-finished merge, so the
+    #  literal-marker safety check is noise here.
+    if "$BE" post --force -m "$TAG" "?tags/$TAG" >>"$TMILL/be-post-$TAG.log" 2>&1; then
         POST_T=$(( $(date +%s) - T0 ))
         printf "%-20s  be post=%2ds\n" "$TAG" "$POST_T"
     else

@@ -255,7 +255,11 @@ static ok64 dir_collect_step(class_step const *step, void *vctx) {
     //    BOTH    + mtime ∈ stamp-set   → settled, skip
     //    BOTH    + otherwise           → stage (tracked-and-dirty)
     //    WT_ONLY                       → stage (untracked sibling)
-    //    BASE_ONLY                     → skip (gone from disk; DEL territory)
+    //    BASE_ONLY                     → skip (gone from disk; staging
+    //                                    a vanished tracked path as a
+    //                                    deletion is `be delete`'s job,
+    //                                    not put's — put never removes
+    //                                    paths from the next commit).
     //
     //  Idempotence: any stamp-set match (get/post or put) counts as
     //  settled — re-staging would just shift ts forward for no
@@ -360,19 +364,31 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
         u8cs raw = {};
         SNIFFAtPathBytes(&uris[i], raw);
         if (u8csEmpty(raw)) continue;
-        if ($len(raw) >= 2 && raw[0][0] == '.' && raw[0][1] == '/')
+        //  Normalise reporoot references — `.`, `./`, leading `./` —
+        //  so `be put .` (and `be put ./`) means "stage everything
+        //  dirty/untracked under reporoot", same as `git add -A`.
+        //  The dir-form path below treats an empty prefix as the
+        //  reporoot directory.
+        if ($len(raw) == 1 && raw[0][0] == '.') {
+            raw[0] = raw[1];  // → empty = reporoot
+        } else if ($len(raw) >= 2 && raw[0][0] == '.' && raw[0][1] == '/') {
             raw[0] += 2;
+        }
         //  Refuse to stage sniff-meta paths (.sniff / .dogs/* / .git*)
         //  even when explicitly named — they leak into legacy trees
         //  but must not propagate forward.
-        if (SNIFFSkipMeta(raw)) {
+        if (!u8csEmpty(raw) && SNIFFSkipMeta(raw)) {
             fprintf(stderr,
                     "sniff: put: %.*s is a meta path — skipped\n",
                     (int)$len(raw), (char *)raw[0]);
             skipped++; continue;
         }
 
-        b8 is_dir = ($len(raw) > 0 && *(raw[1] - 1) == '/');
+        //  Empty raw (`.` or `./` after normalisation) is the
+        //  reporoot dir form; trailing `/` is the explicit subdir
+        //  dir form.  Both go through the dir-collect path.
+        b8 is_dir = u8csEmpty(raw) ||
+                    ($len(raw) > 0 && *(raw[1] - 1) == '/');
         if (is_dir) {
             //  Dir-form: confirm the dir exists, then expand into
             //  per-file `put` rows according to the tracked/untracked

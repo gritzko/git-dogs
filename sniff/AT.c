@@ -414,14 +414,18 @@ ok64 SNIFFCheckClock(void) {
     ron60 now = RONNow();
     if (now < tail.ts) {
         //  A burst of N rows in one wall-clock ms self-bumps the tail
-        //  N ms ahead (SNIFFAtNow's monotonicity guard).  Tolerate
-        //  sub-second skew; CLOCKBAD is for gross errors (NTP step,
-        //  DST, suspend/resume), not millisecond ordering noise.
+        //  N ms ahead (SNIFFAtNow's monotonicity guard).  A single
+        //  `be put .` over a several-thousand-file wt (e.g.
+        //  rsync-then-stage of an upstream tag) routinely bumps the
+        //  tail several seconds ahead — that's not a clock fault, just
+        //  the bulk-put serializing rows in millisecond ticks.
+        //  CLOCKBAD is for gross errors (NTP step, DST, suspend/resume)
+        //  so allow up to 30 s of self-bump headroom before refusing.
         struct timespec tail_tv = at_ts_of_ron60(tail.ts);
         struct timespec now_tv  = at_ts_of_ron60(now);
         i64 skew_ms = ((i64)tail_tv.tv_sec - (i64)now_tv.tv_sec) * 1000
                     + ((i64)tail_tv.tv_nsec - (i64)now_tv.tv_nsec) / 1000000;
-        if (skew_ms > 1000) {
+        if (skew_ms > 30000) {
             fprintf(stderr,
                     "sniff: clock skew — system clock is before the latest "
                     ".sniff row; refusing every command until clock catches "

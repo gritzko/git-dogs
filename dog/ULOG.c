@@ -193,11 +193,18 @@ ok64 ULOGOpenBooked(u8bp *data, kv64bp idx, path8s path,
         call(FILEBookCreate, data, path, book_size, init_size);
     }
 
-    if (idx) call(kv64bAllocate, idx, 1024);
+    //  Use mmap (lazy-paged) for the index so it grows with the log.
+    //  16-byte entries × 1M slots = 16 MB virtual; only touched pages
+    //  are committed.  The earlier `kv64bAllocate(1024)` was a hard
+    //  cap that fired SNOROOM after the 1024th `kv64bPush` — fatal
+    //  for a single `be put .` over a wt with > ~1k files (e.g. a
+    //  freshly-rsync'd src/git tag) and silently re-tripped on every
+    //  subsequent be invocation in the same dog.
+    if (idx) call(kv64bMap, idx, 1UL << 20);
 
     ok64 so = ulog_rebuild_idx(*data, idx);
     if (so != OK) {
-        if (idx && idx[0]) kv64bFree(idx);
+        if (idx && idx[0]) kv64bUnMap(idx);
         if (*data && (*data)[0]) FILEUnBook(*data);
         return so;
     }
@@ -215,11 +222,11 @@ ok64 ULOGOpenRO(u8bp *data, kv64bp idx, path8s path) {
     //  RO map only — fails if file is missing (no implicit create).
     call(FILEBookRO, data, path, ULOG_BOOK_DEFAULT);
 
-    if (idx) call(kv64bAllocate, idx, 1024);
+    if (idx) call(kv64bMap, idx, 1UL << 20);
 
     ok64 so = ulog_rebuild_idx(*data, idx);
     if (so != OK) {
-        if (idx && idx[0]) kv64bFree(idx);
+        if (idx && idx[0]) kv64bUnMap(idx);
         if (*data && (*data)[0]) FILEUnBook(*data);
         return so;
     }
@@ -238,7 +245,7 @@ ok64 ULOGClose(u8bp data, kv64bp idx, b8 rw) {
         if (rw) FILETrimBook(data);
         FILEUnBook(data);     // also nullifies the buffer slots
     }
-    if (idx && idx[0]) kv64bFree(idx);   // also nullifies
+    if (idx && idx[0]) kv64bUnMap(idx);  // also nullifies
     done;
 }
 
