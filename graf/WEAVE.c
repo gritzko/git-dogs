@@ -62,13 +62,18 @@ typedef struct {
 static ok64 weave_blob_cb(u8 tag, u8cs tok, void *vctx) {
     sane(vctx);
     weave_blob_ctx *ctx = vctx;
-    //  Split whitespace tokens at every '\n' so that "end-of-line +
-    //  next-line indent" don't fuse into one token.  Without this
-    //  split, an LCS that classifies the fused token as DEL drags
-    //  the next line's indent into the deleted region — making the
-    //  diff falsely flag the (otherwise unchanged) next line as
-    //  modified.
-    if (tag == 'W' && $len(tok) > 1) {
+    //  Split any token containing '\n' so each emitted token sits on
+    //  exactly one line.  Whitespace tokens always need this (so
+    //  "end-of-line + next-line indent" don't fuse and drag a clean
+    //  next line into a DEL region).  Multi-line tokens of any other
+    //  kind — e.g. C char/string literals or block comments that the
+    //  lexer hands us as one chunk, including malformed/unterminated
+    //  cases on adversarial input — also need it: `WEAVEEmitDiff`'s
+    //  windowing classifies tokens by their *start* line, so a
+    //  multi-line token whose start line is outside a window orphans
+    //  every byte it carries on the windowed lines, producing hunk
+    //  text that begins mid-line and breaks line-based rendering.
+    if ($len(tok) > 1 && memchr(tok[0], '\n', (size_t)$len(tok)) != NULL) {
         u8c *p = tok[0];
         u8c *e = tok[1];
         while (p < e) {
@@ -101,28 +106,30 @@ ok64 WEAVEFromBlob(weave *w, u8cs data, u8cs ext, u32 src) {
     TOKstate st = {.data = {data[0], data[1]}, .cb = weave_blob_cb, .ctx = &ctx};
     TOKLexer(&st, ext);  // best effort
 
-    //  Fallback: lexer produced no tokens (binary / unknown ext).
-    if (u32bDataLen(w->toks) == 0) {
-        u32 end = (u32)$len(data);
-        call(u32bFeed1, w->toks, tok32Pack('S', end));
-        call(u64bFeed1, w->hashlets, RAPHash(data));
-    } else {
-        //  Lexer may bail mid-input on malformed source (unterminated
-        //  string, unbalanced comment, etc.) — TOKLexer returns a
-        //  non-OK code but we ignore it ("best effort" above).  The
-        //  bytes after the last emitted token still get appended to
-        //  `w->text` below, which would leave them untokenized — the
-        //  WEAVEDiff round-trip property fails because the token
-        //  walk reproduces only the parsed prefix.  Catch the gap
-        //  here: emit a synthetic 'S' token covering the trailing
-        //  un-tokenized bytes.
-        u32 last_end = tok32Offset(((u32cp)w->toks[1])
-                                   [u32bDataLen(w->toks) - 1]);
-        u32 total    = (u32)$len(data);
-        if (last_end < total) {
-            u8cs tail = {data[0] + last_end, data[1]};
-            call(u32bFeed1, w->toks, tok32Pack('S', total));
-            call(u64bFeed1, w->hashlets, RAPHash(tail));
+    //  Fallback / tail-fill: emit synthetic 'S' tokens covering any
+    //  bytes the lexer didn't tokenize (binary input or mid-input bail
+    //  on malformed source — unterminated string/comment, etc.;
+    //  TOKLexer returns non-OK but we ignore it, "best effort" above).
+    //  Without a synthetic, those bytes still get appended to `w->text`
+    //  below and the WEAVEDiff round-trip would lose them.  Split the
+    //  tail at every '\n' so each emitted token starts on a single
+    //  line — `WEAVEEmitDiff`'s windowing classifies tokens by their
+    //  start line, and a single multi-line synthetic would orphan the
+    //  bytes whose line falls in a later window.
+    u32 last_end = (u32bDataLen(w->toks) == 0) ? 0
+        : tok32Offset(((u32cp)w->toks[1])
+                      [u32bDataLen(w->toks) - 1]);
+    u32 total = (u32)$len(data);
+    {
+        u32 lo = last_end;
+        while (lo < total) {
+            u32 hi = lo;
+            while (hi < total && data[0][hi] != '\n') hi++;
+            if (hi < total) hi++;  // include the '\n' itself
+            u8cs piece = {data[0] + lo, data[0] + hi};
+            call(u32bFeed1, w->toks, tok32Pack('S', hi));
+            call(u64bFeed1, w->hashlets, RAPHash(piece));
+            lo = hi;
         }
     }
 
