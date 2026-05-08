@@ -21,11 +21,11 @@ jobs:
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_C_COMPILER=clang -GNinja
     - name: Build
-      run: ninja -C build be/be spot/spot
+      run: ninja -C build be-cli spot-cli
     - name: Strip
-      run: strip build/be/be build/spot/spot
+      run: strip build/bin/be build/bin/spot
     - name: Package
-      run: tar czf librdx-linux-x86_64.tar.gz -C build be/be spot/spot
+      run: tar czf librdx-linux-x86_64.tar.gz -C build/bin be spot
     - uses: actions/upload-artifact@v4
       with:
         name: librdx-linux-x86_64
@@ -38,17 +38,17 @@ jobs:
       with:
         submodules: recursive
     - name: Install dependencies
-      run: brew install ninja
+      run: brew install ninja libsodium lz4
     - name: Configure
       run: >
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         -DWITH_ROCKS=OFF -GNinja
     - name: Build
-      run: ninja -C build spot/spot
+      run: ninja -C build spot-cli
     - name: Strip
-      run: strip build/spot/spot
+      run: strip build/bin/spot
     - name: Package
-      run: tar czf librdx-macos-arm64.tar.gz -C build spot/spot
+      run: tar czf librdx-macos-arm64.tar.gz -C build/bin spot
     - uses: actions/upload-artifact@v4
       with:
         name: librdx-macos-arm64
