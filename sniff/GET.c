@@ -142,9 +142,22 @@ static ok64 get_visit(u8cs path, u8 kind, u8cp esha, u8cs blob,
     //  Sniff-meta paths (.sniff, .dogs/*, .git*) sometimes leak into
     //  legacy trees but must never be materialised on disk — the live
     //  ULOG / store dir would be clobbered.  Skip both the dir creation
-    //  and the file write.
-    if (!$empty(path) && SNIFFSkipMeta(path)) {
-        return (kind == WALK_KIND_DIR) ? WALKSKIP : OK;
+    //  and the file write.  The check is hard-coded to the literal
+    //  meta names rather than going through `SNIFFSkipMeta` (which
+    //  also applies user-loaded .gitignore patterns and would cause
+    //  large gitignores to skip arbitrary tracked subtrees during
+    //  cross-tag rollbacks — see git/contrib/* in mill-mother).
+    if (!$empty(path)) {
+        a_cstr(m_git, ".git");
+        a_cstr(m_dogs, ".dogs");
+        a_cstr(m_sniff, ".sniff");
+        b8 hit = NO;
+        $eachseg(seg, path) {
+            if (u8csEq(seg, m_git))   { hit = YES; break; }
+            if (u8csEq(seg, m_dogs))  { hit = YES; break; }
+            if (u8csEq(seg, m_sniff)) { hit = YES; break; }
+        }
+        if (hit) return (kind == WALK_KIND_DIR) ? WALKSKIP : OK;
     }
 
     if (kind == WALK_KIND_DIR) {
