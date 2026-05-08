@@ -115,8 +115,8 @@ static ok64 BEReap(pid_t pid, u8csc tool) {
 //  `bro` for paging and coloring.  Spawns both children, pumps bytes
 //  from producer's stdout into pager's stdin in the parent, then
 //  reaps both.  Returns the worse of the two exit codes.
-static ok64 BERunPipe(u8csc prod, u8css prod_argv,
-                      u8csc pager, u8css pager_argv) {
+static ok64 BERunPipe(path8sc prod, u8css prod_argv,
+                      path8sc pager, u8css pager_argv) {
     sane($ok(prod) && $ok(pager));
     int to_pager_w = -1;
     pid_t pager_pid = 0;

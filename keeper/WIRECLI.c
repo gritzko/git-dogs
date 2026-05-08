@@ -191,6 +191,9 @@ static ok64 wcli_spawn(u8csc remote_uri, char const *verb,
             a_cstr(git_dash, "git-");
             u8bFeed(gitverb, git_dash);
             u8bFeed(gitverb, verb_s);
+            //  NUL-terminate so the slice satisfies path8sc's
+            //  C-string contract for execvp.
+            PATHu8bTerm(gitverb);
             u8cs argv_arr[2] = {
                 {u8bDataHead(gitverb), u8bIdleHead(gitverb)},
                 {path[0], path[1]},
