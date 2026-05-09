@@ -9,7 +9,6 @@
 #include <unistd.h>
 
 #include "abc/FILE.h"
-#include "abc/HEX.h"
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "keeper/PKT.h"
@@ -24,22 +23,6 @@ static u8c const WIRE_CAP_SIDE_BAND_64K_S[] = "side-band-64k";
 static u8c const WIRE_CAP_MULTI_ACK_DET_S[] = "multi_ack_detailed";
 static u8c const WIRE_CAP_THIN_PACK_S[]     = "thin-pack";
 static u8c const WIRE_CAP_NO_PROGRESS_S[]   = "no-progress";
-
-//  Parse a 40-hex SHA into `out`.  Returns NO on shape/format error.
-static b8 wire_decode_sha(sha1 *out, u8csc hex) {
-    if (u8csLen(hex) != 40) return NO;
-    a_dup(u8c, hex_dup, hex);
-    u8s bin = {out->data, out->data + 20};
-    if (HEXu8sDrainSome(bin, hex_dup) != OK) return NO;
-    if (bin[0] != out->data + 20) return NO;
-    return YES;
-}
-
-//  Slice [head, term) literal-prefix match.
-static b8 wire_starts_with(u8csc s, u8c const *pfx, size_t plen) {
-    if ((size_t)u8csLen(s) < plen) return NO;
-    return memcmp(s[0], pfx, plen) == 0;
-}
 
 //  Token equality: |s| == plen && bytes equal.
 static b8 wire_token_eq(u8csc s, u8c const *tok, size_t tlen) {
@@ -128,40 +111,30 @@ ok64 WIREReadRequest(int in_fd, wire_reqp req) {
         //  Trim trailing '\n' if present.
         if (u8csLen(line) > 0 && line[1][-1] == '\n') line[1]--;
 
-        if (wire_starts_with(line, (u8c *)"want ", 5)) {
-            if (req->nwants >= WIRE_MAX_WANTS) { rc = WIREBADREQ; break; }
-            //  Layout: "want <40-hex>[ SP <caps>]".
-            u8cs rest = {line[0] + 5, line[1]};
-            if (u8csLen(rest) < 40) { rc = WIREBADREQ; break; }
-            u8csc hex = {rest[0], rest[0] + 40};
-            sha1 sha = {};
-            if (!wire_decode_sha(&sha, hex)) { rc = WIREBADREQ; break; }
-            req->wants[req->nwants++] = sha;
+        wire_evt ev = {};
+        if (WIREClassify(line, WIRE_UPLOAD, &ev) != OK) continue;
+
+        switch (ev.kind) {
+        case WIRE_WANT:
+            if (req->nwants >= WIRE_MAX_WANTS) { rc = WIREBADREQ; goto out; }
+            req->wants[req->nwants++] = ev.sha;
             //  Capabilities ride on the first want line only.
-            if (!saw_want && u8csLen(rest) > 40) {
-                u8csc tail = {rest[0] + 40, rest[1]};
-                wire_parse_caps(&req->caps, tail);
-            }
+            if (!saw_want && !u8csEmpty(ev.caps))
+                wire_parse_caps(&req->caps, (u8csc){ev.caps[0], ev.caps[1]});
             saw_want = YES;
-        } else if (wire_starts_with(line, (u8c *)"have ", 5)) {
-            if (req->nhaves >= WIRE_MAX_HAVES) {
-                //  Drop excess silently — over-ship is the failure mode.
-                continue;
-            }
-            u8cs rest = {line[0] + 5, line[1]};
-            if (u8csLen(rest) < 40) { rc = WIREBADREQ; break; }
-            u8csc hex = {rest[0], rest[0] + 40};
-            sha1 sha = {};
-            if (!wire_decode_sha(&sha, hex)) { rc = WIREBADREQ; break; }
-            req->haves[req->nhaves++] = sha;
-        } else if (wire_starts_with(line, (u8c *)"done", 4)) {
-            saw_done = YES;
             break;
-        } else {
-            //  Unknown line type — be tolerant, ignore.
-            continue;
+        case WIRE_HAVE:
+            //  Over-cap haves dropped silently — over-ship is the failure mode.
+            if (req->nhaves < WIRE_MAX_HAVES)
+                req->haves[req->nhaves++] = ev.sha;
+            break;
+        case WIRE_DONE:
+            saw_done = YES;
+            goto out;
+        default: /* shallow / unknown: ignore */ break;
         }
     }
+out:;
 
     u8bFree(buf);
     return rc;

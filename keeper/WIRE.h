@@ -191,4 +191,40 @@ ok64 WIREPush(keeper *k, u8csc remote_uri, u8csc local_branch,
 //  transport failure or peer refusal.
 ok64 WIREPushDelete(keeper *k, u8csc remote_uri, u8csc local_branch);
 
+// --- pkt-line text payload classifier -----------------------------------
+//
+//  Pure function.  Caller has already extracted one complete pkt-line
+//  payload (e.g. via PKTu8sDrain) and chosen a role.  Slices in *out
+//  point into `payload`; copy what you want to outlive it.
+//
+//    OK           — out populated.
+//    WIREBADREQ   — payload is malformed for this role.
+
+typedef enum {
+    WIRE_WANT,
+    WIRE_HAVE,
+    WIRE_DONE,
+    WIRE_SHALLOW,
+    WIRE_ACK,
+    WIRE_NAK,
+    WIRE_REF,             // <sha> SP <name>[\0 caps]
+    WIRE_UPDATE,          // <old> SP <new> SP <name>[\0 caps]
+} wire_evt_kind;
+
+typedef enum {
+    WIRE_UPLOAD,          // client → server (fetch): want/have/done/shallow
+    WIRE_RECEIVE,         // client → server (push):  <old> <new> <name>
+    WIRE_ADVERT,          // server → client:         ref advert lines
+    WIRE_CLIENT,          // server → client during nego: ack/nak/ref
+} wire_role;
+
+typedef struct {
+    wire_evt_kind kind;
+    sha1          sha, old_sha;
+    u8cs          caps;
+    u8cs          name;
+} wire_evt;
+
+ok64 WIREClassify(u8csc payload, wire_role role, wire_evt *out);
+
 #endif
