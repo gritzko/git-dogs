@@ -339,12 +339,12 @@ ok64 GRAFExec(cli *c) {
         //    diff:file.c            → wt vs base    (single file)
         //    diff:?branch           → branch vs base (whole tree, ref-to-ref)
         //    diff:file.c?branch     → branch vs base (single file, ref-to-ref)
-        //    diff:?h1..h2           → h1 vs h2      (whole tree, explicit)
-        //    diff:file.c?h1..h2     → h1 vs h2      (single file, explicit)
+        //    diff:?from#to          → from vs to    (whole tree, explicit)
+        //    diff:file.c?from#to    → from vs to    (single file, explicit)
         //
         //  The base sha comes from `--at`'s fragment (the worktree's
         //  current baseline, forwarded by `be`).  Every form except the
-        //  explicit `?h1..h2` range needs it; missing → `GRAFNOAT`.
+        //  explicit `?from#to` range needs it; missing → `GRAFNOAT`.
         pid_t pager = graf_start_pager(c->tty_out, force_tlv);
         uri *u = &c->uris[0];
 
@@ -357,14 +357,12 @@ ok64 GRAFExec(cli *c) {
         u8csMv(path, u->path);
 
         u8cs wf = {}, wt = {};
-        a_dup(u8c, q, u->query);
-        u8cs dots = {(u8cp)"..", (u8cp)".." + 2};
-        b8 has_range = !$empty(q) && (u8csFindS(q, dots) == OK);
+        b8 has_range = !$empty(u->query) && !$empty(u->fragment);
 
         if (has_range) {
-            //  Explicit `?h1..h2` — no baseline needed.
-            wf[0] = u->query[0]; wf[1] = q[0];
-            wt[0] = q[0] + 2;    wt[1] = u->query[1];
+            //  Explicit `?from#to` — no baseline needed.
+            u8csMv(wf, u->query);
+            u8csMv(wt, u->fragment);
             if (!$empty(path)) {
                 ret = GRAFWeaveDiff(&KEEP, path, reporoot, wf, wt);
             } else {
@@ -374,7 +372,7 @@ ok64 GRAFExec(cli *c) {
             if ($empty(base_hex)) {
                 fprintf(stderr,
                     "graf: diff: no --at baseline; need explicit"
-                    " 'diff:?<h1>..<h2>' or a sniff anchor\n");
+                    " 'diff:?<from>#<to>' or a sniff anchor\n");
                 graf_stop_pager(pager);
                 KEEPClose();
                 return GRAFNOAT;

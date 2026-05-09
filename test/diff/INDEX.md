@@ -1,8 +1,8 @@
-# diff/ — `be get diff:<path>?<from>..<to>` projector cases
+# diff/ — `be get diff:<path>?<from>#<to>` projector cases
 
 * `01-3revs/` — three commits of `foo.c`, each tagged via
   `be post -m vN '?tags/vN'`.  Captures the byte-exact unified-diff
-  output for `tags/v1..tags/v2` and `tags/v2..tags/v3`.
+  output for `tags/v1#tags/v2` and `tags/v2#tags/v3`.
 * `02-divergent-children/` — trunk baseline, two child branches
   `?fix1` and `?fix2` (created via `be post ?./fixN`) each with one
   commit editing disjoint lines of `foo.c`.  Captures the byte-exact

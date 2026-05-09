@@ -12,7 +12,7 @@
 #  diff output.  `Stock` should appear exactly once in the merged
 #  hunk text and never under a `+` or `-` prefix.
 #
-#  Observed behaviour (BUG): with `be diff:?h1..h2` going through the
+#  Observed behaviour (BUG): with `be diff:?from#to` going through the
 #  WEAVE 2-layer engine, NEIL kills small EQs around the comment-block
 #  insertion and the renderer emits a partial `+//  Stock` (truncated
 #  insert) plus a full `-//  Stock comparators for ...` (deletion),
@@ -39,7 +39,7 @@ sleep 0.02; cp "$CASE/02.foo.new.h" foo.h
 "$BE" post 'v2 msg'       >/dev/null
 NEW_SHA=$(grep -oE '#[0-9a-f]{40}' .sniff | tail -1 | tr -d '#')
 
-"$BE" "diff:foo.h?${OLD_SHA}..${NEW_SHA}" \
+"$BE" "diff:foo.h?${OLD_SHA}#${NEW_SHA}" \
     >"$OUT/diff.got.out" 2>"$OUT/diff.got.err" || true
 
 #  Pull the slice around the Stock line out for inspection.

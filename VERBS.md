@@ -201,7 +201,7 @@ streams for bro to page; they never mutate.
 | `commit:` | commit object body                               | `be commit:?123abc` |
 | `log:`    | `REFS` tail, newest-first, one commit per line (`#N` = last N) | `be log:?feat#10` |
 | `refs:`   | list refs under a dir (`**` = recursive)         | `be refs:?**` |
-| `diff:`   | weave-based unified diff; right-hand side is *ours* (the changed state).  `diff:` and `diff:<path>` use the wt as *ours* and the sniff `--at` baseline as the from-side; `diff:?<branch>` and `diff:<path>?<branch>` use the baseline as *ours* and `<branch>` as the from-side; `diff:?<h1>..<h2>` is explicit. | `be diff:file.c`, `be diff:?main` |
+| `diff:`   | weave-based unified diff; right-hand side is *ours* (the changed state).  `diff:` and `diff:<path>` use the wt as *ours* and the sniff `--at` baseline as the from-side; `diff:?<branch>` and `diff:<path>?<branch>` use the baseline as *ours* and `<branch>` as the from-side; `diff:?<from>#<to>` is explicit (query = from-rev, fragment = to-rev). | `be diff:file.c`, `be diff:?main`, `be diff:?v1#v2` |
 | `size:`   | byte size of the resource                        | `be size:?#abc1234` |
 | `type:`   | object type (`commit`/`tree`/`blob`/`tag`)       | `be type:?#abc1234` |
 | `spot:`   | structural search; body in fragment, optional `.ext` filter | `be spot:#'u8sFeed( a, b )'.c` |

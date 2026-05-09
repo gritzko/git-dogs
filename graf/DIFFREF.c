@@ -22,7 +22,7 @@
 #include "keeper/WALK.h"
 
 #define DIFFREF_PATH_MAX  256
-//  Cap for the ref-vs-ref tree diff (`diff:?h1..h2`).  The wt-vs-base
+//  Cap for the ref-vs-ref tree diff (`diff:?from#to`).  The wt-vs-base
 //  path streams from the visitor (no cap), but ref-vs-ref needs both
 //  trees in memory to pair entries by path before diffing.
 #define DIFFREF_MAX_FILES 8192

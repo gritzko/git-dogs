@@ -7,8 +7,8 @@
 #    diff:file.c           → wt vs base    (single file)
 #    diff:?branch          → branch vs base (whole tree, ref-to-ref)
 #    diff:file.c?branch    → branch vs base (single file, ref-to-ref)
-#    diff:?h1..h2          → h1 vs h2      (whole tree, explicit)
-#    diff:file.c?h1..h2    → h1 vs h2      (single file, explicit)
+#    diff:?from#to         → from vs to    (whole tree, explicit)
+#    diff:file.c?from#to   → from vs to    (single file, explicit)
 #
 #  Output is unified-diff-shape; we don't assert exact bytes — graf's
 #  diff is token-level and its renderer evolves.
@@ -116,15 +116,15 @@ want_all "$T/D.out" '^--- a/a\.txt$' '\-goodnight moon' '\+goodbye moon' \
                     '^--- a/b\.txt$' '\+one two'
 grep -q 'universe' "$T/D.out" && fail "D.out should NOT mention 'universe'"
 
-# --- Case E: file ref-to-ref range — `diff:<path>?<h1>..<h2>` ------
+# --- Case E: file ref-to-ref range — `diff:<path>?<from>#<to>` ------
 CASE=E
-be get 'diff:a.txt?tags/v1..tags/v2' > "$T/E.out" 2>&1 || true
+be get 'diff:a.txt?tags/v1#tags/v2' > "$T/E.out" 2>&1 || true
 want_all "$T/E.out" '^--- a/a\.txt$' '\-goodnight moon' '\+goodbye moon'
 grep -q 'universe' "$T/E.out" && fail "E.out should NOT mention 'universe'"
 
-# --- Case F: tree ref-to-ref range — `diff:?<h1>..<h2>` ------------
+# --- Case F: tree ref-to-ref range — `diff:?<from>#<to>` ------------
 CASE=F
-be get 'diff:?tags/v1..tags/v2' > "$T/F.out" 2>&1 || true
+be get 'diff:?tags/v1#tags/v2' > "$T/F.out" 2>&1 || true
 want_all "$T/F.out" '^--- a/a\.txt$' '\-goodnight moon' '\+goodbye moon' \
                     '^--- a/b\.txt$' '\+one two'
 grep -q 'universe' "$T/F.out" && fail "F.out should NOT mention 'universe'"
