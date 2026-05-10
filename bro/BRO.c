@@ -1177,7 +1177,23 @@ static void bro_goto(int row, int col) {
     bro_write(u8bDataC(tmp));
 }
 
-// Feed one byte with fg tag, bg tag, and search highlight
+//  Last SGR state emitted on the current screen row.  scr_emit_char
+//  skips the SGR open when the desired state matches; the row driver
+//  invokes scr_emit_reset() at row end to drop any open attrs in one
+//  final `\033[0m`.  See abc/ANSI.h for the ansi64 layout and the
+//  ANSIu8sFeedDelta / ANSIu8sFeedReset spellers.
+static ansi64 bro_emit_cur;
+
+static void scr_emit_reset(void) {
+    ANSIu8sFeedReset(u8bIdle(bro_scr), bro_emit_cur);
+    bro_emit_cur = ANSI_DEFAULT;
+}
+
+// Feed one codepoint with fg tag, bg tag, and search highlight.
+// Emits an SGR transition only when the packed state differs from
+// bro_emit_cur — runs of identical-style chars share one open-SGR.
+// Callers MUST invoke scr_emit_reset() at row end (or before any raw
+// escape sequence written via scr_puts) to flush trailing state.
 static void scr_emit_char(u8cp p, u32 n, u8 fg_tag, u8 bg_tag, b8 in_search) {
     b8 bold = NO;
     int fg = BROTagColor(fg_tag, &bold);
@@ -1189,7 +1205,7 @@ static void scr_emit_char(u8cp p, u32 n, u8 fg_tag, u8 bg_tag, b8 in_search) {
     //   'd' = mid pink    rgb(255,175,175)  (RM  bytes in split rm-pass)
     //   'g' = pale green  (eq context in in-pass — same as 'I')
     //   'p' = pale pink   (eq context in rm-pass — same as 'D')
-    int bg = 0;
+    u8 bg = 0;
     switch (bg_tag) {
     case 'I': bg = 194; break;
     case 'D': bg = 224; break;
@@ -1199,28 +1215,29 @@ static void scr_emit_char(u8cp p, u32 n, u8 fg_tag, u8 bg_tag, b8 in_search) {
     case 'p': bg = 224; break;
     }
 
+    //  Translate BRO's fg encoding (positive = basic SGR, negative =
+    //  -(256-color N), 0 = default) into ansi64's mode-tagged fg.
+    u32 fg_val = 0;
+    u8  fg_mode = ANSI_MODE_DEFAULT;
+    if (fg > 0)      { fg_val = (u32)fg;  fg_mode = ANSI_MODE_BASIC; }
+    else if (fg < 0) { fg_val = (u32)-fg; fg_mode = ANSI_MODE_256;   }
+
+    u32 bg_val = bg;
+    u8  bg_mode = (bg != 0) ? ANSI_MODE_256 : ANSI_MODE_DEFAULT;
+
+    u8 flags = 0;
+    if (bold)      flags |= ANSI_BOLD;
+    if (in_search) flags |= ANSI_REVERSE;
+
+    ansi64 want = ansi64Pack(fg_val, fg_mode, bg_val, bg_mode, flags);
+
     u8sp out = u8bIdle(bro_scr);
-    if (fg != 0 || bold || bg != 0 || in_search) {
-        if (bold) escfeed(out, BOLD);
-        if (fg < 0) {
-            // 256-color FG: \033[38;5;Nm
-            u8sFeed1(out, 033); u8sFeed1(out, '[');
-            u8sFeed1(out, '3'); u8sFeed1(out, '8');
-            u8sFeed1(out, ';'); u8sFeed1(out, '5'); u8sFeed1(out, ';');
-            utf8sFeed10(out, (u64)(-fg));
-            u8sFeed1(out, 'm');
-        } else if (fg > 0) {
-            escfeed(out, (u8)fg);
-        }
-        if (bg != 0) escfeedBG256(out, (u8)bg);
-        else if (in_search) escfeed(out, 7);
-        u8cs chars = {p, p + n};
-        u8sFeed(out, chars);
-        escfeed(out, 0);  // reset
-    } else {
-        u8cs chars = {p, p + n};
-        u8sFeed(out, chars);
+    if (want != bro_emit_cur) {
+        ANSIu8sFeedDelta(out, want, bro_emit_cur);
+        bro_emit_cur = want;
     }
+    u8cs chars = {p, p + n};
+    u8sFeed(out, chars);
 }
 
 // Check if search pattern matches at position pos
@@ -1362,6 +1379,7 @@ static void BRORender(BROstate *st) {
             else search_left = 0;
             j += clen;
         }
+        scr_emit_reset();
     }
 
     for (u32 row = end - st->scroll + 1; row < st->rows; row++) {
@@ -1858,6 +1876,7 @@ static ok64 BROPlain(hunk const *hunks, u32 nhunks) {
             scr_emit_char(hk->text[0] + pos, clen, fg_tag, bg_tag, NO);
             j += clen;
         }
+        scr_emit_reset();
         u8sFeed1(u8bIdle(bro_scr), '\n');
         BROScreenFlush();
     }
