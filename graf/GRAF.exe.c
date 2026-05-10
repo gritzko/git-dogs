@@ -181,7 +181,7 @@ ok64 GRAFExec(cli *c) {
     b8 force_tlv = CLIHas(c, "--tlv") || CLIHas(c, "-t");
 
     u8cs reporoot = {};
-    u8csMv(reporoot, c->repo);
+    if (u8bHasData(c->repo)) u8csMv(reporoot, $path(c->repo));
     // If CLI parsing didn't supply a repo, fall back to h->root.
     if ($empty(reporoot) && g->h && g->h->root[0]) {
         a_dup(u8c, hs, u8bDataC(g->h->root));

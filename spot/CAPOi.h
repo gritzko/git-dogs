@@ -26,10 +26,12 @@
 ok64 spot_branch_dir(path8b out, home *h, u8cs leaf_branch);
 
 // --- Display helpers ---
-void CAPOProgress(const char *line);
+//  Empty `line` clears the progress row (the previous-API NULL).
+void CAPOProgress(u8csc line);
 b8 CAPOExtIs(u8csc ext, const char *a, const char *b);
-void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
-                   char *out, size_t outsz);
+//  Drains the trimmed header line into `out` (writable slice).
+//  Caller reads the result from `out`'s pre-call vs post-call head.
+void CAPOFindFunc(u8csc source, u32 pos, u8csc ext, u8s out);
 void CAPOGrepCtx(u8csc source, u32 match_pos, u32 nctx,
                   u32 *lo, u32 *hi);
 
@@ -104,7 +106,7 @@ ok64 CAPOTrigramFilterRegex(Bu64 hashbuf, b8 *has_trigrams,
 // --- Hunk building (shared by SPOT/GREP) ---
 ok64 CAPOBuildHunk(u8csc source, u32cs htoks, u32 ctx_lo, u32 ctx_hi,
                    range32 const *hls, int nhl,
-                   u8csc file_ext, const char *filepath,
+                   u8csc file_ext, u8csc filepath,
                    b8 needs_title, b8 *first_hunk);
 
 #endif

@@ -33,8 +33,7 @@ typedef struct {
     u32    nflags;                   // count of entries (= 2 * npairs)
     uri    uris[CLI_MAX_URIS];       // parsed URI targets
     u32    nuris;
-    char   _repo[1024];              // owned storage for repo root
-    u8cs   repo;                     // repo root (points into _repo)
+    path8b repo;                     // repo root path; heap-allocated by CLIParse, freed by CLIClose
     b8     tty_out;                  // isatty(STDOUT)
 } cli;
 
@@ -44,6 +43,8 @@ typedef struct {
 // Flags that take values: if the flag appears in val_flags
 // (e.g. "-g\0-C\0-r\0"), the next arg is consumed as value.
 // Otherwise value is set to an empty (non-NULL) sentinel.
+// Caller pre-allocates `c->repo` (PATHu8bAlloc) and frees it
+// (PATHu8bFree) — CLAUDE.md §5: alloc at the top of the call chain.
 ok64 CLIParse(cli *c, char const *const *verb_names,
               char const *val_flags);
 

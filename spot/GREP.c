@@ -75,7 +75,7 @@ static ok64 capo_grep_file_cb(void *ctx, u8csc relpath, u8csc source,
         CAPOGrepCtx(source, match_pos, gc->ctx_lines, &ctx_lo, &ctx_hi);
 
         if (!found_any) {
-            CAPOProgress(NULL);
+            CAPOProgress((u8csc){});
             found_any = YES;
             if (!$empty(file_ext) && CAPOKnownExt(file_ext)) {
                 size_t maxlen = $len(source) + 1;
@@ -117,14 +117,8 @@ static ok64 capo_grep_file_cb(void *ctx, u8csc relpath, u8csc source,
         b8 contiguous = (ctx_lo <= prev_hi);
         if (ctx_lo < prev_hi) ctx_lo = prev_hi;
         if (ctx_lo < ctx_hi) {
-            // NUL-terminate relpath for CAPOBuildHunk
-            char rpz[FILE_PATH_MAX_LEN] = {};
-            size_t rlen = (size_t)$len(relpath);
-            if (rlen >= sizeof(rpz)) rlen = sizeof(rpz) - 1;
-            memcpy(rpz, relpath[0], rlen);
-
             call(CAPOBuildHunk, source, gts, ctx_lo, ctx_hi,
-                 hls, nhl, file_ext, rpz,
+                 hls, nhl, file_ext, relpath,
                  !contiguous, &first_hunk);
         }
         prev_hi = ctx_hi;
@@ -187,7 +181,7 @@ ok64 CAPOGrep(u8csc substring, u8csc ext, u8csc reporoot, u32 ctx_lines,
     }
     (void)scan_ret;
 
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
     if (less_nhunks > 0)
         LESSRun(less_hunks, less_nhunks);
     LESSArenaCleanup();
@@ -285,11 +279,6 @@ static ok64 capo_pcre_file_cb(void *ctx, u8csc relpath, u8csc source,
     b8 found_any = NO;
     b8 first_hunk = YES;
 
-    char rpz[FILE_PATH_MAX_LEN] = {};
-    size_t rlen = (size_t)$len(relpath);
-    if (rlen >= sizeof(rpz)) rlen = sizeof(rpz) - 1;
-    memcpy(rpz, relpath[0], rlen);
-
     u8cp lp = source[0];
     u8cp se = source[1];
     while (lp < se) {
@@ -303,7 +292,7 @@ static ok64 capo_pcre_file_cb(void *ctx, u8csc relpath, u8csc source,
             CAPOGrepCtx(source, match_pos, pc->ctx_lines, &ctx_lo, &ctx_hi);
 
             if (!found_any) {
-                CAPOProgress(NULL);
+                CAPOProgress((u8csc){});
                 found_any = YES;
                 if (!$empty(file_ext) && CAPOKnownExt(file_ext)) {
                     size_t maxlen = $len(source) + 1;
@@ -381,7 +370,7 @@ static ok64 capo_pcre_file_cb(void *ctx, u8csc relpath, u8csc source,
             if (ctx_lo < prev_hi) ctx_lo = prev_hi;
             if (ctx_lo < ctx_hi) {
                 call(CAPOBuildHunk, source, gts, ctx_lo, ctx_hi,
-                     hls, nhl, file_ext, rpz,
+                     hls, nhl, file_ext, relpath,
                      !contiguous, &first_hunk);
             }
             prev_hi = ctx_hi;
@@ -487,7 +476,7 @@ ok64 CAPOPcreGrep(u8csc pattern, u8csc ext, u8csc reporoot, u32 ctx_lines,
         CAPOScan(reporoot, &opts);
     }
 
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
     if (less_nhunks > 0)
         LESSRun(less_hunks, less_nhunks);
     LESSArenaCleanup();

@@ -48,7 +48,8 @@ typedef struct { u64 offset; u32 child; u32 sibling; } unpk_node;
 //  Waiter: REF_DELTA indexed by sha8 of its base.
 //  val = 1-based index into nodes[].
 static void unpk_drain_waiters(wh128cs waiters, unpk_node *nodes,
-                               b8 *resolved, u64 sha_key, u32 parent_idx) {
+                               b8 *resolved, sha1 const *sha, u32 parent_idx) {
+    u64 sha_key = WHIFFHashlet60(sha);
     wh128cp wbuf = waiters[0];
     size_t wlen = (size_t)(waiters[1] - waiters[0]);
     size_t lo = 0, hi = wlen;
@@ -214,9 +215,7 @@ static void unpk_worker_main(unpk_worker *w) {
                 unpk_dispatch(w->in, stk[0].base_type, &sha, dct);
             }
 
-            u64 sha_key = 0;
-            memcpy(&sha_key, sha.data, 8);
-            unpk_drain_waiters(waiters, nodes, resolved, sha_key, child);
+            unpk_drain_waiters(waiters, nodes, resolved, &sha, child);
 
             top++;
             stk[top].d_start = rstart;
@@ -303,9 +302,9 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
         pack_obj obj = {};
         u8cs from = {packbase + offsets[i], packbase + packlen};
         if (PACKDrainObjHdr(from, &obj) != OK) { st.skipped++; continue; }
-        u64 sha_key = 0;
-        memcpy(&sha_key, obj.ref_delta[0], 8);
-        wh128 w = { .key = sha_key, .val = i + 1 };
+        sha1 base_sha = {};
+        (void)sha1Drain(obj.ref_delta, &base_sha);
+        wh128 w = { .key = WHIFFHashlet60(&base_sha), .val = i + 1 };
         wh128bPush(waiters_buf, &w);
     }
     a_dup(wh128, wsorted, wh128bData(waiters_buf));
@@ -339,9 +338,7 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
             unpk_dispatch(in, types[i], &sha, dct);
         }
 
-        u64 sha_key = 0;
-        memcpy(&sha_key, sha.data, 8);
-        unpk_drain_waiters(waiters, nodes, resolved, sha_key, i + 1);
+        unpk_drain_waiters(waiters, nodes, resolved, &sha, i + 1);
         //  keep buf1 contents for the DFS walk below
     }
 

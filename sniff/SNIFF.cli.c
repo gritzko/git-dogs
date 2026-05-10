@@ -20,31 +20,29 @@
 #include "keeper/KEEP.h"
 #include "AT.h"
 
-ok64 sniffcli() {
-    sane(1);
+static ok64 sniffcli_inner(cli *c) {
+    sane(c);
     call(FILEInit);
-
-    cli c = {};
-    call(CLIParse, &c, SNIFF_VERBS, SNIFF_VAL_FLAGS);
+    call(CLIParse, c, SNIFF_VERBS, SNIFF_VAL_FLAGS);
 
     char cwd[1024];
     u8cs reporoot = {};
-    if (!u8csEmpty(c.repo)) {
-        u8csMv(reporoot, c.repo);
+    if (u8bHasData(c->repo)) {
+        u8csMv(reporoot, $path(c->repo));
     } else {
         if (!getcwd(cwd, sizeof(cwd))) fail(SNIFFFAIL);
         a_cstr(cwds, cwd);
-        u8csMv(reporoot, cwds);
-        u8csMv(c.repo, cwds);
+        (void)PATHu8bFeed(c->repo, cwds);
+        u8csMv(reporoot, $path(c->repo));
     }
 
     // Help and stop don't need an open state.
     a_cstr(v_help, "help");
     a_cstr(v_stop, "stop");
-    b8 need_state = !u8csEq(c.verb, v_help) && !u8csEq(c.verb, v_stop)
-                 && !CLIHas(&c, "-h") && !CLIHas(&c, "--help");
+    b8 need_state = !u8csEq(c->verb, v_help) && !u8csEq(c->verb, v_stop)
+                 && !CLIHas(c, "-h") && !CLIHas(c, "--help");
 
-    if (!need_state) return SNIFFExec(&c);
+    if (!need_state) return SNIFFExec(c);
 
     // rw for anything that mutates the ULOG at `<wt>/.sniff` or the
     // store.  View projectors (verbless `sniff <proj>:<URI>`) are
@@ -57,8 +55,8 @@ ok64 sniffcli() {
     a_cstr(v_post,   "post");
     a_cstr(v_commit, "commit");
     a_cstr(v_mflag,  "-m");
-    b8 is_projector = u8csEmpty(c.verb) && c.nuris > 0 &&
-                      DOGIsProjector(c.uris[0].scheme);
+    b8 is_projector = u8csEmpty(c->verb) && c->nuris > 0 &&
+                      DOGIsProjector(c->uris[0].scheme);
     //  `be post` always opens the home rw — even bare `be post`, which
     //  used to be a pure dry-run, can now compose a commit when patch
     //  rows are present (see VERBS.md §POST and POSTPatchDefaults).
@@ -66,7 +64,7 @@ ok64 sniffcli() {
     //  we can't pick rw vs ro at CLI-open time.  The rare bare status
     //  preview pays an unnecessary write lock — acceptable.
     b8 is_post_dryrun = NO;
-    b8 ro = u8csEq(c.verb, v_status) || u8csEq(c.verb, v_list) || is_projector
+    b8 ro = u8csEq(c->verb, v_status) || u8csEq(c->verb, v_list) || is_projector
          || is_post_dryrun;
     b8 rw = !ro;
 
@@ -75,7 +73,7 @@ ok64 sniffcli() {
     //  HOMEOpen when reporoot is empty).
     home h = {};
     uri at = {};
-    CLIAtURI(&at, &c);
+    CLIAtURI(&at, c);
     if (u8csEmpty(at.path) && u8csOK(reporoot) && !u8csEmpty(reporoot))
         u8csMv(at.path, reporoot);
     call(HOMEOpen, &h, &at, rw);
@@ -101,12 +99,12 @@ ok64 sniffcli() {
     //  forks a parallel graf-rw child whose lock would race with
     //  the sniff-rw lock if we opened it here (long flock waits
     //  on big-repo clones).
-    b8 needs_graf = !u8csEq(c.verb, v_get) && !u8csEq(c.verb, v_checkout)
-                 && (rw || u8csEq(c.verb, v_post) || u8csEq(c.verb, v_commit)
-                        || u8csEq(c.verb, v_patch));
+    b8 needs_graf = !u8csEq(c->verb, v_get) && !u8csEq(c->verb, v_checkout)
+                 && (rw || u8csEq(c->verb, v_post) || u8csEq(c->verb, v_commit)
+                        || u8csEq(c->verb, v_patch));
     ok64 go = needs_graf ? GRAFOpen(&h, rw) : NONE;
 
-    ok64 ret = SNIFFExec(&c);
+    ok64 ret = SNIFFExec(c);
 
     //  Post-exec reindex for rw verbs that landed a commit.  Walk the
     //  new tip into graf's DAG so subsequent `sniff patch` LCAs see
@@ -126,6 +124,15 @@ ok64 sniffcli() {
     SNIFFClose();
     HOMEClose(&h);
     return ret;
+}
+
+ok64 sniffcli() {
+    sane(1);
+    cli c = {};
+    call(PATHu8bAlloc, c.repo);
+    try(sniffcli_inner, &c);
+    PATHu8bFree(c.repo);
+    done;
 }
 
 MAIN(sniffcli);

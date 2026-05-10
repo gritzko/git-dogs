@@ -75,54 +75,61 @@ static ok64 keeper_receive_pack(cli *c) {
     return ro;
 }
 
-ok64 keepercli() {
-    sane(1);
+static ok64 keepercli_inner(cli *c) {
+    sane(c);
     call(FILEInit);
-
-    cli c = {};
-    call(CLIParse, &c, KEEP_CLI_VERBS, KEEP_CLI_VAL_FLAGS);
+    call(CLIParse, c, KEEP_CLI_VERBS, KEEP_CLI_VAL_FLAGS);
 
     //  upload-pack short-circuits the standard cwd-derived HOME/KEEP
     //  open: it opens the repo named in argv (the ssh contract), runs
     //  the wire negotiator on stdin/stdout, and exits.  Falls through
     //  to the generic dispatch on argless invocation.
     a_cstr(v_upload_pack, "upload-pack");
-    if ($eq(c.verb, v_upload_pack)) {
-        return keeper_upload_pack(&c);
+    if ($eq(c->verb, v_upload_pack)) {
+        return keeper_upload_pack(c);
     }
     a_cstr(v_receive_pack, "receive-pack");
-    if ($eq(c.verb, v_receive_pack)) {
-        return keeper_receive_pack(&c);
+    if ($eq(c->verb, v_receive_pack)) {
+        return keeper_receive_pack(c);
     }
 
     a_cstr(v_status, "status");
     a_cstr(v_refs,   "refs");
     a_cstr(v_verify, "verify");
-    b8 ro = $eq(c.verb, v_status) || $eq(c.verb, v_refs)
-         || $eq(c.verb, v_verify);
+    b8 ro = $eq(c->verb, v_status) || $eq(c->verb, v_refs)
+         || $eq(c->verb, v_verify);
     //  Verb-less projector dispatch (`keeper tree:?...`, `commit:`,
     //  `blob:`) is also read-only — no pack ingest, no ref writes.
-    if (!ro && $empty(c.verb) && c.nuris > 0) {
-        char const *dog = DOGProjectorDog(c.uris[0].scheme);
+    if (!ro && $empty(c->verb) && c->nuris > 0) {
+        char const *dog = DOGProjectorDog(c->uris[0].scheme);
         if (dog != NULL && strcmp(dog, "keeper") == 0) ro = YES;
     }
     b8 rw = !ro;
 
-    //  Prefer `--at` from be; fall back to cwd-walk via c.repo.
+    //  Prefer `--at` from be; fall back to cwd-walk via c->repo.
     home h = {};
     uri at = {};
-    CLIAtURI(&at, &c);
-    if (u8csEmpty(at.path) && $ok(c.repo) && !u8csEmpty(c.repo))
-        u8csMv(at.path, c.repo);
+    CLIAtURI(&at, c);
+    if (u8csEmpty(at.path) && u8bHasData(c->repo))
+        u8csMv(at.path, $path(c->repo));
     call(HOMEOpen, &h, &at, rw);
 
     call(KEEPOpen, &h, rw);
 
-    ok64 ret = KEEPExec(&KEEP, &c);
+    ok64 ret = KEEPExec(&KEEP, c);
 
     KEEPClose();
     HOMEClose(&h);
     return ret;
+}
+
+ok64 keepercli() {
+    sane(1);
+    cli c = {};
+    call(PATHu8bAlloc, c.repo);
+    try(keepercli_inner, &c);
+    PATHu8bFree(c.repo);
+    done;
 }
 
 MAIN(keepercli);

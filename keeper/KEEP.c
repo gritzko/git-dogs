@@ -728,10 +728,8 @@ static ok64 KEEPGetPacked(keeper *k, u64 val, u8bp out, u8p out_type) {
                 if (rc != OK) goto cleanup;
                 obj_type = btype;
                 // buf3 has the base content; copy to buf1
-                a_dup(u8c, bdata, u8bData(k->buf3));
-                memcpy(buf1, bdata[0], u8csLen(bdata));
-                result = buf1;
-                outsz = u8csLen(bdata);
+                (void)u8bFeed(k->buf1, u8bData(k->buf3));
+                outsz = u8bDataLen(k->buf1);
                 break;  // apply delta chain from here
             }
             cur = wh64Off(base_val);

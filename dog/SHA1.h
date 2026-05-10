@@ -70,6 +70,14 @@ fun ok64 sha1FromBin(sha1 *out, u8cs bin) {
     return OK;
 }
 
+// Drain a 20-byte sha1 from `from`, advancing its head.
+fun ok64 sha1Drain(u8cs from, sha1 *into) {
+    if (u8csLen(from) < 20) return NODATA;
+    memcpy(into->data, *from, 20);
+    *from += 20;
+    return OK;
+}
+
 // --- ABC type system ---
 
 #define X(M, n) M##sha1##n

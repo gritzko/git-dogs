@@ -1114,8 +1114,8 @@ ok64 SNIFFExec(cli *c) {
     sane(c);
 
     u8cs reporoot = {};
-    if (!$ok(c->repo)) fail(SNIFFFAIL);
-    $mv(reporoot, c->repo);
+    if (!u8bHasData(c->repo)) fail(SNIFFFAIL);
+    u8csMv(reporoot, $path(c->repo));
 
     a_cstr(v_help, "help");
     a_cstr(v_update, "update");

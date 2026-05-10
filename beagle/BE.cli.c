@@ -166,41 +166,6 @@ drain_done:
     done;
 }
 
-// --- Read .dogs/DOGS list ---
-
-static u32 BEReadDogs(char out[][64], u32 maxn) {
-    home h = {};
-    uri at = {};
-    if (HOMEOpen(&h, &at, NO) != OK) return 0;
-    a_path(p);
-    a_dup(u8c, root_s, u8bDataC(h.root));
-    if (PATHu8bFeed(p, root_s) != OK) { HOMEClose(&h); return 0; }
-    a_cstr(rel, ".dogs/DOGS");
-    if (PATHu8bAdd(p, rel) != OK) { HOMEClose(&h); return 0; }
-
-    u8bp mapped = NULL;
-    if (FILEMapRO(&mapped, $path(p)) != OK) { HOMEClose(&h); return 0; }
-    a_dup(u8c, data, u8bDataC(mapped));
-
-    u32 count = 0;
-    while (!$empty(data) && count < maxn) {
-        u8cp nl = data[0];
-        while (nl < data[1] && *nl != '\n') nl++;
-        size_t len = (size_t)(nl - data[0]);
-        if (len > 0 && data[0][0] != '#') {
-            if (len >= 64) len = 63;
-            memcpy(out[count], data[0], len);
-            out[count][len] = 0;
-            count++;
-        }
-        data[0] = (nl < data[1]) ? nl + 1 : data[1];
-    }
-
-    FILEUnMap(mapped);
-    HOMEClose(&h);
-    return count;
-}
-
 // --- Verb dispatch: forward URI to dogs in order ---
 //
 // Each dog parses the URI and handles its part:
@@ -280,9 +245,15 @@ static ok64 BEDispatch(cli *c, dog_step const *steps, u32 nsteps,
 //  keeper/graf/spot with the primary repo via symlinks; sniff is
 //  real (per-worktree).  Returns OK after setup whether or not any
 //  action was taken; only dies on a real error (mkdir/symlink fail).
-// Static storage for the rewritten URI after a worktree is wired up:
-// "?<40-hex-sha>" points every downstream dog at the primary's HEAD.
-static u8 wt_uri_text[42];  // '?' + 40 hex + NUL
+//  Static storage for the rewritten URI after a worktree is wired up:
+//  "?<6..40-hex-hashlet>" points every downstream dog at the primary's
+//  HEAD.  Re-filled on each BEGetWorktree call.
+static u8  wt_uri_storage[64];
+static Bu8 wt_uri_buf = {
+    wt_uri_storage, wt_uri_storage,
+    wt_uri_storage,
+    wt_uri_storage + sizeof(wt_uri_storage)
+};
 
 static b8 be_promote_to_ref(uri *u);
 
@@ -331,22 +302,21 @@ static ok64 BEGetWorktree(uri *u) {
     uri prim_uri = {};
     u8csMv(prim_uri.data, u8bDataC(prim_at));
     URILexer(&prim_uri);
-    if (u8csLen(prim_uri.fragment) != 40) done;
-    wt_uri_text[0] = '?';
-    memcpy(wt_uri_text + 1, prim_uri.fragment[0], 40);
-    wt_uri_text[41] = 0;
+    //  Hashlet: 6..40 hex chars (full sha1 = 40, prefix abbreviations
+    //  shorter).  Anything outside that range is not a valid pin.
+    size_t flen = u8csLen(prim_uri.fragment);
+    if (flen < 6 || flen > 40) done;
 
-    u->data[0]      = wt_uri_text;
-    u->data[1]      = wt_uri_text + 41;
-    u->scheme[0]    = u->scheme[1]    = NULL;
-    u->authority[0] = u->authority[1] = NULL;
-    u->host[0]      = u->host[1]      = NULL;
-    u->port[0]      = u->port[1]      = NULL;
-    u->user[0]      = u->user[1]      = NULL;
-    u->path[0]      = u->path[1]      = NULL;
-    u->query[0]     = wt_uri_text + 1;
-    u->query[1]     = wt_uri_text + 41;
-    u->fragment[0]  = u->fragment[1]  = NULL;
+    //  Compose "?<hashlet>" into the static buffer; expose data and
+    //  query slices into it (other URI components stay empty).
+    u8bReset(wt_uri_buf);
+    call(u8bFeed1, wt_uri_buf, '?');
+    call(u8bFeed,  wt_uri_buf, prim_uri.fragment);
+
+    zerop(u);
+    u8csMv(u->data,  u8bDataC(wt_uri_buf));
+    u8csMv(u->query, u->data);
+    u8csUsed1(u->query);  //  drop leading '?'
     done;
 }
 
@@ -623,22 +593,16 @@ static ok64 be_reindex(cli *c) {
     //  because CLIParse's cwd-walk happened before the post created
     //  the store.  Walk again here so SNIFFAtTailOf can read `.sniff`.
     u8cs repo = {};
-    if ($ok(c->repo) && !u8csEmpty(c->repo)) {
-        $mv(repo, c->repo);
+    if (u8bHasData(c->repo)) {
+        u8csMv(repo, $path(c->repo));
     } else {
         home rh = {};
         uri none = {};
         if (HOMEOpen(&rh, &none, NO) == OK) {
-            //  HOMEOpen owns its `rh` storage; copy the slice into the
-            //  cli's `_repo` buffer (still alive on the parent stack)
-            //  and re-export via c->repo.
-            size_t rlen = u8bDataLen(rh.root);
-            if (rlen >= sizeof(c->_repo)) rlen = sizeof(c->_repo) - 1;
-            memcpy(c->_repo, u8bDataHead(rh.root), rlen);
-            c->_repo[rlen] = 0;
-            c->repo[0] = (u8cp)c->_repo;
-            c->repo[1] = (u8cp)c->_repo + rlen;
-            $mv(repo, c->repo);
+            //  HOMEOpen owns its `rh` storage; feed it into the cli's
+            //  path8b (NUL-terminated by construction) for re-export.
+            (void)PATHu8bFeed(c->repo, u8bDataC(rh.root));
+            if (u8bHasData(c->repo)) u8csMv(repo, $path(c->repo));
         }
         HOMEClose(&rh);
     }
@@ -983,17 +947,16 @@ static ok64 BEDefault(void) {
 
 // --- Main ---
 
-ok64 becli() {
-    sane(1);
+static ok64 becli_inner(cli *c) {
+    sane(c);
     call(FILEInit);
 
     //  -m / --author take a following value (legacy commit-message
     //  flag — the new convention is to fold trailing words into the
     //  URI fragment, but `-m` remains accepted).
-    cli c = {};
-    call(CLIParse, &c, BE_VERB_NAMES, "-m\0--author\0");
+    call(CLIParse, c, BE_VERB_NAMES, "-m\0--author\0");
 
-    if (CLIHas(&c, "-h") || CLIHas(&c, "--help")) {
+    if (CLIHas(c, "-h") || CLIHas(c, "--help")) {
         BEUsage();
         done;
     }
@@ -1011,21 +974,21 @@ ok64 becli() {
     a_pad(u8, bareword_scratch, CLI_MAX_URIS * 65);
     {
         u8 def = 'p';
-        if (!$empty(c.verb)) {
+        if (!$empty(c->verb)) {
             a_cstr(_v_post,  "post");
             a_cstr(_v_get,   "get");
             a_cstr(_v_head,  "head");
             a_cstr(_v_patch, "patch");
             a_cstr(_v_diff,  "diff");
-            if      ($eq(c.verb, _v_post))  def = 'f';
-            else if ($eq(c.verb, _v_get))   def = 'q';
-            else if ($eq(c.verb, _v_head))  def = 'q';
-            else if ($eq(c.verb, _v_patch)) def = 'q';
-            else if ($eq(c.verb, _v_diff))  def = 'q';
+            if      ($eq(c->verb, _v_post))  def = 'f';
+            else if ($eq(c->verb, _v_get))   def = 'q';
+            else if ($eq(c->verb, _v_head))  def = 'q';
+            else if ($eq(c->verb, _v_patch)) def = 'q';
+            else if ($eq(c->verb, _v_diff))  def = 'q';
         }
         if (def != 'p') {
-            for (u32 i = 0; i < c.nuris; i++) {
-                uri *u = &c.uris[i];
+            for (u32 i = 0; i < c->nuris; i++) {
+                uri *u = &c->uris[i];
                 u8cs orig_path = {u->path[0], u->path[1]};
                 ok64 pr = DOGPromoteBareword(u, def);
                 if (pr != OK) continue;
@@ -1052,13 +1015,13 @@ ok64 becli() {
     //  `c.repo` is the cwd-walked wt root resolved by `CLIParse`.
     //  Absent / empty `.sniff` (fresh dir, pre-clone bootstrap) →
     //  buffer stays empty and no `--at` flag is forwarded.
-    if ($ok(c.repo) && !u8csEmpty(c.repo)) {
+    if (u8bHasData(c->repo)) {
         u8bReset(be_at_buf);
-        (void)SNIFFAtTailOf(c.repo, be_at_buf);
+        (void)SNIFFAtTailOf($path(c->repo), be_at_buf);
     }
 
     // No args → default
-    if ($empty(c.verb) && c.nuris == 0 && c.nflags == 0) {
+    if ($empty(c->verb) && c->nuris == 0 && c->nflags == 0) {
         call(BEDefault);
         done;
     }
@@ -1072,12 +1035,12 @@ ok64 becli() {
     a_cstr(v_status, "status");
 
     u8cs verb = {};
-    $mv(verb, c.verb);
+    $mv(verb, c->verb);
 
     // Get first URI if available
-    uri *u = (c.nuris > 0) ? &c.uris[0] : NULL;
+    uri *u = (c->nuris > 0) ? &c->uris[0] : NULL;
 
-    b8 seq = CLIHas(&c, "--seq");
+    b8 seq = CLIHas(c, "--seq");
 
     //  Projector URIs are pure views (VERBS.md Invariant 7).  Route
     //  them through BEProjector regardless of verb — `be get diff:f?r`
@@ -1086,7 +1049,7 @@ ok64 becli() {
     //  VERBS.md, but the table only specifies the read-only intent;
     //  any verb on a projector URI is treated as GET-equivalent here.
     if (u != NULL && DOGIsProjector(u->scheme)) {
-        call(BEProjector, &c, u);
+        call(BEProjector, c, u);
         done;
     }
 
@@ -1107,26 +1070,35 @@ ok64 becli() {
             call(BEDefault);
         }
     } else if ($eq(verb, v_head)) {
-        call(BEHead, &c, seq);
+        call(BEHead, c, seq);
     } else if ($eq(verb, v_get)) {
-        call(BEGet, &c, seq);
+        call(BEGet, c, seq);
     } else if ($eq(verb, v_post)) {
-        call(BEPost, &c, seq);
+        call(BEPost, c, seq);
     } else if ($eq(verb, v_put)) {
-        call(BEPut, &c, seq);
+        call(BEPut, c, seq);
     } else if ($eq(verb, v_delete)) {
-        call(BEDelete, &c, seq);
+        call(BEDelete, c, seq);
     } else if ($eq(verb, v_status)) {
         call(BEDefault);
     } else if ($eq(verb, v_diff)) {
-        call(BEDiff, &c, seq);
+        call(BEDiff, c, seq);
     } else if ($eq(verb, v_patch)) {
-        call(BEPatch, &c, seq);
+        call(BEPatch, c, seq);
     } else {
         fprintf(stderr, "be: verb '" U8SFMT "' not yet implemented\n",
                 u8sFmt(verb));
     }
 
+    done;
+}
+
+ok64 becli() {
+    sane(1);
+    cli c = {};
+    call(PATHu8bAlloc, c.repo);
+    try(becli_inner, &c);
+    PATHu8bFree(c.repo);
     done;
 }
 

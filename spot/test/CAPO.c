@@ -332,8 +332,9 @@ ok64 CAPOtestHunkEmit() {
 
     range32 hls[1] = {{18, 28}};
     b8 first = YES;
+    a_cstr(fp, "test.c");
     call(CAPOBuildHunk, source, htoks, 0, (u32)strlen(src),
-         hls, 1, ext, "test.c", YES, &first);
+         hls, 1, ext, fp, YES, &first);
 
     close(fd);
     spot_out_fd = -1;

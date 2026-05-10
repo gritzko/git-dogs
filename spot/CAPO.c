@@ -593,11 +593,11 @@ void CAPOFilterInPlace(u64bp hashbuf, u64css iter, u64 prefix) {
     u64bShed(hashbuf, (size_t)(data[1] - w));
 }
 
-void CAPOProgress(const char *line) {
+void CAPOProgress(u8csc line) {
     if (!CAPO_TERM) return;
     fprintf(stderr, "\r\033[K");
-    if (line != NULL)
-        fprintf(stderr, "\033[%dm%s\033[0m", GRAY, line);
+    if (!u8csEmpty(line))
+        fprintf(stderr, "\033[%dm" U8SFMT "\033[0m", GRAY, u8sFmt(line));
 }
 
 // --- Function name finder (heuristic) ---
@@ -621,10 +621,12 @@ b8 CAPOExtIs(u8csc ext, const char *a, const char *b) {
 //   md/markdown/rst/txt: line starting with '#'
 //   py: col-0 'def ' or 'class '
 //   default (C-like): col-0 identifier + '('
-void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
-                   char *out, size_t outsz) {
-    out[0] = 0;
-    if (u8csEmpty(source) || pos == 0 || outsz < 2) return;
+//
+// Writes the (trimmed) header line into `out` via slice drain;
+// caller reads the result from `out`'s consumed prefix (i.e. the
+// original head down to the post-call head).
+void CAPOFindFunc(u8csc source, u32 pos, u8csc ext, u8s out) {
+    if (u8csEmpty(source) || pos == 0 || u8sEmpty(out)) return;
     u8cp base = source[0];
     u32 slen = (u32)u8csLen(source);
     if (pos > slen) pos = slen;
@@ -656,8 +658,12 @@ void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
             if (ch != '#') continue;
         } else if (is_py) {
             // Python: col-0 'def ' or 'class '
-            if (linelen >= 4 && memcmp(base + ls, "def ", 4) == 0) {}
-            else if (linelen >= 6 && memcmp(base + ls, "class ", 6) == 0) {}
+            a_cstr(def_lit,   "def ");
+            a_cstr(class_lit, "class ");
+            u8csc head = {base + ls,
+                          base + ls + (linelen < 6 ? linelen : 6)};
+            if (linelen >= 4 && u8csHasPrefix(head, def_lit)) {}
+            else if (linelen >= 6 && u8csHasPrefix(head, class_lit)) {}
             else continue;
         } else {
             // C-like: col-0 identifier + '('
@@ -674,16 +680,17 @@ void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
             if (!has_paren) continue;
         }
 
-        // Copy line, trim trailing { / : and whitespace
-        u32 copylen = linelen;
-        if (copylen >= outsz) copylen = (u32)(outsz - 1);
-        memcpy(out, base + ls, copylen);
-        out[copylen] = 0;
-        while (copylen > 0 &&
-               (out[copylen - 1] == '{' || out[copylen - 1] == ':' ||
-                out[copylen - 1] == ' ' || out[copylen - 1] == '\t' ||
-                out[copylen - 1] == '\r'))
-            out[--copylen] = 0;
+        // Bound to [ls, le); trim trailing punct/whitespace; drain
+        // what fits into `out`.
+        a_rest(u8c, after_ls, source, ls);
+        a_head(u8c, line, after_ls, le - ls);
+        while (!u8csEmpty(line)) {
+            u8c last = *u8csLast(line);
+            if (last != '{' && last != ':' && last != ' ' &&
+                last != '\t' && last != '\r') break;
+            u8csShed1(line);
+        }
+        (void)u8sDrain(out, line);
         return;
     }
 }
@@ -692,7 +699,7 @@ void CAPOFindFunc(u8csc source, u32 pos, u8csc ext,
 
 ok64 CAPOBuildHunk(u8csc source, u32cs htoks, u32 ctx_lo, u32 ctx_hi,
                    range32 const *hls, int nhl,
-                   u8csc file_ext, const char *filepath,
+                   u8csc file_ext, u8csc filepath,
                    b8 needs_title, b8 *first_hunk) {
     sane(less_nhunks < LESS_MAX_HUNKS);
     LESShunk *hk = &less_hunks[less_nhunks];
@@ -700,25 +707,18 @@ ok64 CAPOBuildHunk(u8csc source, u32cs htoks, u32 ctx_lo, u32 ctx_hi,
 
     // Compose URI: path#symbol:lineno
     {
-        char funcname[256] = {};
+        a_pad(u8, funcname, 256);
         if (needs_title || *first_hunk)
-            CAPOFindFunc(source, ctx_lo, file_ext,
-                         funcname, sizeof(funcname));
+            CAPOFindFunc(source, ctx_lo, file_ext, funcname_idle);
         u32 ln = 1;
         $for(u8c, ch, source) {
             if (ch >= source[0] + ctx_lo) break;
             if (*ch == '\n') ln++;
         }
         u8cs fp = {};
-        if (filepath) {
-            fp[0] = (u8cp)filepath;
-            fp[1] = (u8cp)filepath + strlen(filepath);
-        }
+        u8csMv(fp, filepath);
         u8cs fn = {};
-        if (funcname[0]) {
-            fn[0] = (u8cp)funcname;
-            fn[1] = (u8cp)funcname + strlen(funcname);
-        }
+        u8csMv(fn, u8bDataC(funcname));
         u8gp ug = u8aOpen(less_arena);
         HUNKu8sMakeURI(u8gRest(ug), fp, fn, ln);
         u8cs uri_s = {};
@@ -765,7 +765,7 @@ ok64 CAPOBuildHunk(u8csc source, u32cs htoks, u32 ctx_lo, u32 ctx_hi,
 
 static ok64 CAPOSpotReplace(u8csc source, u8bp mapped, u32cs htoks,
                              u8csc needle, u8csc replace, u8csc file_ext,
-                             u8bp fpbuf, const char *line,
+                             u8bp fpbuf, u8csc line,
                              int *total_replacements,
                              int *total_files_replaced) {
     sane(!$empty(replace));
@@ -786,9 +786,9 @@ static ok64 CAPOSpotReplace(u8csc source, u8bp mapped, u32cs htoks,
             if (wo == OK) {
                 FILEFeedAll(fd, result);
                 close(fd);
-                CAPOProgress(NULL);
-                fprintf(stderr, "replaced: %s (%d)\n",
-                        line, file_matches);
+                CAPOProgress((u8csc){});
+                fprintf(stderr, "replaced: " U8SFMT " (%d)\n",
+                        u8sFmt(line), file_matches);
                 *total_replacements += file_matches;
                 (*total_files_replaced)++;
             }
@@ -801,7 +801,7 @@ static ok64 CAPOSpotReplace(u8csc source, u8bp mapped, u32cs htoks,
 // --- Per-file search+display ---
 
 static ok64 CAPOSpotFile(u8csc source, u32cs htoks, u8csc needle,
-                          u8csc file_ext, const char *line) {
+                          u8csc file_ext, u8csc line) {
     sane(!$empty(needle));
     aBpad(u32, nbuf, 4096);
     SPOTstate st = {};
@@ -826,7 +826,7 @@ static ok64 CAPOSpotFile(u8csc source, u32cs htoks, u8csc needle,
         if (shi <= slo || shi > (u32)$len(source)) continue;
 
         if (!found_any) {
-            CAPOProgress(NULL);
+            CAPOProgress((u8csc){});
             found_any = YES;
         }
 
@@ -929,21 +929,16 @@ static ok64 capo_spot_file_cb(void *ctx, u8csc relpath, u8csc source,
     u32cs htoks = {(u32cp)u32bDataHead(toks),
                    (u32cp)u32bIdleHead(toks)};
 
-    char rpz[FILE_PATH_MAX_LEN] = {};
-    size_t rlen = (size_t)$len(relpath);
-    if (rlen >= sizeof(rpz)) rlen = sizeof(rpz) - 1;
-    memcpy(rpz, relpath[0], rlen);
-
     signal(SIGABRT, capo_abrt_handler);
     capo_in_match = 1;
     if (sigsetjmp(capo_jmpbuf, 1) == 0) {
         if (!$empty(sc->replace))
             CAPOSpotReplace(source, mapped, htoks, sc->needle,
-                            sc->replace, file_ext, fpbuf, rpz,
+                            sc->replace, file_ext, fpbuf, relpath,
                             &sc->total_replacements,
                             &sc->total_files_replaced);
         else
-            CAPOSpotFile(source, htoks, sc->needle, file_ext, rpz);
+            CAPOSpotFile(source, htoks, sc->needle, file_ext, relpath);
     }
     capo_in_match = 0;
     signal(SIGABRT, SIG_DFL);
@@ -1008,7 +1003,7 @@ ok64 CAPOSpot(u8csc needle, u8csc replace, u8csc ext, u8csc reporoot,
         CAPOScan(reporoot, &opts);
     }
 
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
 
     if ($empty(replace) && less_nhunks > 0)
         LESSRun(less_hunks, less_nhunks);
@@ -1128,12 +1123,7 @@ static ok64 capo_class_step(class_step const *step, void *ctx_) {
     if (PATHu8bFeed(fpbuf, root_s) != OK) return OK;
     if (PATHu8bAdd(fpbuf, path)    != OK) return OK;
 
-    //  NUL-terminated relpath for the progress line.
-    char rpz[FILE_PATH_MAX_LEN] = {};
-    size_t rlen = (size_t)$len(path);
-    if (rlen >= sizeof(rpz)) rlen = sizeof(rpz) - 1;
-    memcpy(rpz, path[0], rlen);
-    CAPOProgress(rpz);
+    CAPOProgress(path);
 
     u8bp mapped = NULL;
     ok64 mo = FILEMapRO(&mapped, $path(fpbuf));
@@ -1182,7 +1172,7 @@ ok64 CAPOScan(u8csc reporoot, CAPOScanOpts const *opts) {
         = SPOT_SCAN_SCANNED = 0;
     ok64 cr = SNIFFClassify(capo_class_step, &cx);
 
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
 
     if (getenv("SPOT_TRACE_QUERY")) {
         fprintf(stderr,
@@ -1235,7 +1225,7 @@ static ok64 capo_ref_visit(u8cs path, u8 kind, u8cp esha,
         !TOKSameLexer(file_ext, cx->opts->target_ext)) return OK;
 
     sha1 bsha = {};
-    memcpy(bsha.data, esha, 20);
+    sha1Mv(&bsha, (sha1 const *)esha);
 
     Bu8 bbuf = {};
     if (u8bAllocate(bbuf, 1UL << 22) != OK) return OK;
@@ -1247,11 +1237,7 @@ static ok64 capo_ref_visit(u8cs path, u8 kind, u8cp esha,
     }
     u8cs source = {u8bDataHead(bbuf), u8bIdleHead(bbuf)};
 
-    //  NUL-terminate the path for CAPOProgress.
-    char pnul[FILE_PATH_MAX_LEN] = {};
-    size_t cp = plen < sizeof(pnul) - 1 ? plen : sizeof(pnul) - 1;
-    memcpy(pnul, path[0], cp);
-    CAPOProgress(pnul);
+    CAPOProgress(path);
 
     ok64 fo = cx->opts->file_fn(cx->opts->file_ctx, path, source,
                                  file_ext, NULL, NULL);
@@ -1267,7 +1253,7 @@ ok64 CAPOScanRef(keeper *k, uri const *target,
     //  KEEPLsFiles takes a non-const uri*, but the function body only
     //  reads from it.  Cast away const — the callee does not mutate.
     ok64 o = KEEPLsFiles(k, (uricp)target, capo_ref_visit, &cx);
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
     if (cx.last_err != OK) return cx.last_err;
     return o;
 }
@@ -1280,10 +1266,6 @@ ok64 CAPOScanFiles(u8css files, CAPOScanOpts const *opts) {
         size_t flen = (size_t)$len(*fp);
         if (flen == 0) continue;
 
-        char line[FILE_PATH_MAX_LEN] = {};
-        if (flen >= sizeof(line)) continue;
-        memcpy(line, (*fp)[0], flen);
-
         u8cs file_ext = {};
         PATHu8sExt(file_ext, *fp);
         if ($empty(file_ext)) continue;
@@ -1292,27 +1274,25 @@ ok64 CAPOScanFiles(u8css files, CAPOScanOpts const *opts) {
             if (!TOKSameLexer(file_ext, opts->target_ext)) continue;
         }
 
-        CAPOProgress(line);
+        CAPOProgress(*fp);
 
         a_path(fpbuf);
-        u8cs fps = {(u8cp)line, (u8cp)line + flen};
-        if (PATHu8bFeed(fpbuf, fps) != OK) continue;
+        if (PATHu8bFeed(fpbuf, *fp) != OK) continue;
 
         u8bp mapped = NULL;
         if (FILEMapRO(&mapped, $path(fpbuf)) != OK) continue;
 
         u8cs source = {};
         $mv(source, u8bDataC(mapped));
-        u8cs relpath = {(u8cp)line, (u8cp)line + flen};
 
-        ok64 o = opts->file_fn(opts->file_ctx, relpath, source,
+        ok64 o = opts->file_fn(opts->file_ctx, *fp, source,
                                file_ext, mapped, fpbuf);
         if (o != OK) {
             FILEUnMap(mapped);
             if (o != OK) return o;
         }
     }
-    CAPOProgress(NULL);
+    CAPOProgress((u8csc){});
     return OK;
 }
 

@@ -475,12 +475,10 @@ static b8 wcli_haves_decode_val(sha1 *out, u8csc val) {
     if (u8csLen(hex) == 41 && hex[0][0] == '?') u8csUsed(hex, 1);
     if (u8csLen(hex) != 40) return NO;
     a_dup(u8c, hex_dup, hex);
-    u8 buf[20] = {};
-    u8s bin = {buf, buf + 20};
+    u8s bin = {out->data, out->data + 20};
     if (HEXu8sDrainSome(bin, hex_dup) != OK) return NO;
-    if (bin[0] != buf + 20) return NO;
+    if (bin[0] != out->data + 20) return NO;
     if (!u8csEmpty(hex_dup)) return NO;
-    memcpy(out->data, buf, 20);
     return YES;
 }
 
@@ -970,7 +968,7 @@ static ok64 wpush_walk_tree(keeper *k, sha1 const *tree_sha,
             is_submodule = YES;
         if (is_submodule) continue;
         sha1 entry_sha = {};
-        memcpy(entry_sha.data, sha[0], 20);
+        (void)sha1Drain(sha, &entry_sha);
         if (have && sha_set_has(have, &entry_sha)) continue;
         if (add_to_have && sha_set_has(add_to_have, &entry_sha)) continue;
         if (is_tree) {

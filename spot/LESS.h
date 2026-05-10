@@ -33,8 +33,7 @@ extern spot_emit_fn spot_emit;
 
 ok64 LESSArenaInit(void);
 void LESSArenaCleanup(void);
-u8p  LESSArenaWrite(void const *data, size_t len);
-void LESSDefer(u8bp mapped, Bu32 toks);
+void LESSDefer(u8bp mapped, u32bp toks);
 
 // Serialize less_hunks[less_nhunks] via spot_emit, write to spot_out_fd,
 // rewind the staging arena.  Single-buffered: each emit reuses the slot.

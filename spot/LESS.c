@@ -41,18 +41,13 @@ void LESSArenaCleanup(void) {
     less_nmaps  = 0;
 }
 
-u8p LESSArenaWrite(void const *data, size_t len) {
-    if (u8bIdleLen(less_arena) < len) return NULL;
-    u8p p = u8bIdleHead(less_arena);
-    memcpy(p, data, len);
-    u8bFed(less_arena, len);
-    return p;
-}
-
-void LESSDefer(u8bp mapped, Bu32 toks) {
+//  Take ownership of `mapped` and `toks` (4-pointer buffer
+//  descriptors).  Caller must not use them after the call —
+//  buffers are single-owner; LESS will unmap them at cleanup.
+void LESSDefer(u8bp mapped, u32bp toks) {
     if (less_nmaps >= LESS_MAX_MAPS) return;
     less_maps[less_nmaps] = mapped;
-    memcpy(less_toks[less_nmaps], toks, sizeof(Bu32));
+    for (int i = 0; i < 4; i++) less_toks[less_nmaps][i] = toks[i];
     less_nmaps++;
 }
 

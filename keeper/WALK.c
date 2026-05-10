@@ -81,7 +81,7 @@ static ok64 walk_tree_dive(keeper *k, sha1 const *tree_sha,
         if (eager && is_file) {
             if (u8bAllocate(bbuf, 1UL << 20) == OK) {
                 sha1 entry_sha = {};
-                memcpy(entry_sha.data, esha[0], 20);
+                sha1Mv(&entry_sha, (sha1cp)esha[0]);
                 u8 btype = 0;
                 if (KEEPGetExact(k, &entry_sha, bbuf, &btype) == OK &&
                     btype == DOG_OBJ_BLOB) {
@@ -96,7 +96,7 @@ static ok64 walk_tree_dive(keeper *k, sha1 const *tree_sha,
 
         if (vo == OK && kind == WALK_KIND_DIR) {
             sha1 sub = {};
-            memcpy(sub.data, esha[0], 20);
+            sha1Mv(&sub, (sha1cp)esha[0]);
             vo = walk_tree_dive(k, &sub, pathbuf, eager, visit, ctx);
         }
 
@@ -118,7 +118,7 @@ static ok64 walk_tree_entry(keeper *k, u8cp tree_sha, b8 eager,
     sane(k && tree_sha && visit);
     a_pad(u8, pathbuf, 2048);
     sha1 root = {};
-    memcpy(root.data, tree_sha, 20);
+    sha1Mv(&root, (sha1cp)tree_sha);
 
     u8cs empty_path = {}, empty_blob = {};
     ok64 vo = visit(empty_path, WALK_KIND_DIR, tree_sha, empty_blob, ctx);
@@ -216,7 +216,7 @@ static ok64 lsf_descend(keeper *k, sha1 const *root_tree, u8cs subpath,
             if (u8csLen(name_s) != u8csLen(seg)) continue;
             if (memcmp(name_s[0], seg[0], u8csLen(name_s)) != 0) continue;
             next_kind = WALKu8sModeKind(mode_s);
-            memcpy(next_sha.data, esha[0], 20);
+            (void)sha1Drain(esha, &next_sha);
             found = YES;
             break;
         }

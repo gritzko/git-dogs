@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "DOG.h"
+#include "abc/FILE.h"
 #include "abc/PRO.h"
 
 // Check if flag appears in the val_flags string (NUL-separated list).
@@ -22,23 +23,19 @@ static b8 cli_takes_val(char const *val_flags, u8csc flag) {
 
 ok64 CLIParse(cli *c, char const *const *verb_names,
               char const *val_flags) {
-    sane(c != NULL);
-    *c = (cli){};
+    //  Caller must PATHu8bAlloc(c->repo) before invoking CLIParse
+    //  (CLAUDE.md §5: alloc at the top of the call chain).
+    sane(c != NULL && c->repo[0] != NULL);
     c->tty_out = isatty(STDOUT_FILENO) ? YES : NO;
 
-    // Repo root — copy into owned storage.  Borrow a temporary `home`
-    // just to walk up to the workspace; caller may open its own home
-    // later from c->repo.
+    // Repo root — feed into the caller-owned path buffer.  Borrow a
+    // temporary `home` just to walk up to the workspace; caller may
+    // open its own home later from $path(c->repo).
     {
         home rh = {};
         uri none = {};
         if (HOMEOpen(&rh, &none, NO) == OK) {
-            size_t rlen = u8bDataLen(rh.root);
-            if (rlen >= sizeof(c->_repo)) rlen = sizeof(c->_repo) - 1;
-            memcpy(c->_repo, u8bDataHead(rh.root), rlen);
-            c->_repo[rlen] = 0;
-            c->repo[0] = (u8cp)c->_repo;
-            c->repo[1] = (u8cp)c->_repo + rlen;
+            (void)PATHu8bFeed(c->repo, u8bDataC(rh.root));
         }
         HOMEClose(&rh);
     }
