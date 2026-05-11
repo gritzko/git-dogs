@@ -35,12 +35,14 @@
 //  The index is sorted by key (== ts) by construction (monotonic
 //  appends).  The LAST entry of a non-empty index is a TAIL SENTINEL,
 //  not a row:
-//    sentinel.key = ts of the last row (0 if log is empty)
+//    sentinel.key = log file's `mtime` (ron60) at the moment the
+//                   sentinel was last written (typically Close).
 //    sentinel.val = wh64Pack(0, 0, log_byte_size)
 //  `wh128bDataLen(idx)` is therefore `row_count + 1`.  The sentinel is
-//  used to (a) detect a stale sidecar on Open (compare its offset to
-//  the log file size) and (b) cheaply read the tail ts for the next
-//  monotonicity guard.
+//  used to detect a stale sidecar on Open: if BOTH the recorded mtime
+//  and byte size match the log file's current stat, the sidecar is
+//  fresh and is mapped as-is — no rebuild scan, no row re-parse.  A
+//  mismatch in either field falls through to a linear-scan rebuild.
 //
 //  Sidecar file: hidden sibling of the log path — `<dir>/.<base>.idx`.
 //  Wire format: a packed array of wh128 entries; the file is just the
@@ -102,10 +104,18 @@ fun wh128 ulogIdxEntry(ron60 ts, ron60 verb, u64 off) {
     return e;
 }
 
-fun wh128 ulogIdxSentinel(ron60 last_ts, u64 log_size) {
-    wh128 e = {.key = (u64)last_ts,
+fun wh128 ulogIdxSentinel(ron60 log_mtime, u64 log_size) {
+    wh128 e = {.key = (u64)log_mtime,
                .val = wh64Pack(0, 0, log_size)};
     return e;
+}
+
+fun ron60 ulogIdxSentinelMtime(wh128 sentinel) {
+    return (ron60)sentinel.key;
+}
+
+fun u64 ulogIdxSentinelSize(wh128 sentinel) {
+    return wh64Off(sentinel.val);
 }
 
 // --- one parsed row -------------------------------------------------

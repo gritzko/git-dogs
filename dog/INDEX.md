@@ -13,7 +13,7 @@ but without the tree-sitter dependency.
 | DEF.h   | Mark symbol definitions (S→N) via enrichment + NFA patterns, see [DEF.md](DEF.md) |
 | HUNK.h  | Hunk TLV wire format (`HUNKu8sFeed`/`Drain`) + plain ASCII renderer (`HUNKu8sFeedText`), `HUNKu32sClip`, `HUNKu32bTokenize`, `HUNKu8sMakeURI`, `HUNKcb` |
 | HOME.h  | Workspace finder + branch-sharding scaffolding: `HOMEFind` walks up to the nearest `.dogs` directory, `HOMEResolveSibling` finds tools next to the running binary, `HOMEOpenBranch`/`HOMEWriteBranch`/`HOMEBranchVisible` track the process-wide open-branch stack (slot 0 = writable, frozen at first rw open). Branch paths canonicalised via `dog/DPATH` helpers `DPATHBranchNormFeed`/`DPATHBranchAncestor`. |
-| ULOG.h  | Append-only `<ts>\t<verb>\t<uri>\n` event log + persistent `wh128` sidecar index (`<dir>/.<base>.idx`). Index entries pack ts (60b key) and offset (40b) + verb-hash (20b prefilter) (val); tail sentinel records `(last_ts, log_size)` for staleness check. RO+missing sidecar quietly falls back to anonymous mmap. |
+| ULOG.h  | Append-only `<ts>\t<verb>\t<uri>\n` event log + persistent `wh128` sidecar index (`<dir>/.<base>.idx`). Index entries pack ts (60b key) and offset (40b) + verb-hash (20b prefilter) (val); tail sentinel records `(log_mtime, log_size)` — on Open, sidecar is trusted as-is when both match `fstat`, rebuilt on any mismatch. RO+missing sidecar quietly falls back to anonymous mmap. |
 | WHIFF.h | `wh64` packed words (off40 \| id20 \| type4) and `wh128` (key, val) pairs. Used by ULOG idx, keeper LSM index, graf entries. SHA-1 hashlet helpers (40-bit / 60-bit). |
 
 ## Tag mapping

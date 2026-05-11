@@ -269,25 +269,53 @@ static void ulog_idx_free_anon(wh128bp idx) {
     free((void *)idx);
 }
 
-//  Validate the sidecar's tail sentinel against the log's actual size.
-//  Returns YES iff the sidecar is current.
+//  Fetch the log file's mtime via fstat on the booked fd.  Returns 0
+//  if the buffer isn't booked or the fstat fails — both treated as
+//  "force rebuild" by the freshness check.
+static ron60 ulog_log_mtime(u8b data) {
+    int fd = FILEBookedFD((u8bp)data);
+    if (fd < 0) return 0;
+    filestat fs = {};
+    if (FILEFStat(&fs, &fd) != OK) return 0;
+    return fs.mtime;
+}
+
+//  Validate the sidecar's tail sentinel against the log's actual size
+//  AND mtime.  Returns YES iff both match — neither size-only matches
+//  nor mtime-only matches qualify (rebuild on any discrepancy).
 static b8 ulog_idx_is_fresh(wh128bp idx, u8b data) {
     size_t n = wh128bDataLen(idx);
     if (n == 0) return NO;
     wh128 sentinel = ulog_idx_at(idx, (u32)(n - 1));
-    u64 logged_size = ulogIdxOff(sentinel);
+    u64 logged_size = ulogIdxSentinelSize(sentinel);
     u64 actual_size = (u64)((u8 const *)data[2] - (u8 const *)data[0]);
-    return logged_size == actual_size;
+    if (logged_size != actual_size) return NO;
+    ron60 logged_mtime = ulogIdxSentinelMtime(sentinel);
+    if (logged_mtime == 0) return NO;  // no mtime recorded yet
+    ron60 actual_mtime = ulog_log_mtime(data);
+    return logged_mtime == actual_mtime;
 }
 
-//  Append the tail sentinel to idx (called after a fresh scan or after
-//  an Append).  The sentinel records the LOG file's current byte size
-//  so a future Open can detect a stale sidecar in O(1).
+//  Append the tail sentinel to idx.  The sentinel records the log's
+//  current byte size and mtime; on the close path (after FILETrimBook)
+//  the mtime captured here is what the next Open will compare against.
+//  Mid-stream pushes (after each Append) write a best-effort mtime —
+//  the close-time refresh is what makes the freshness check load-bearing.
 static ok64 ulog_idx_push_sentinel(wh128bp idx, u8b data) {
     u64 log_size = (u64)((u8 const *)data[2] - (u8 const *)data[0]);
-    u32 n = ULOGCount(idx);
-    ron60 last_ts = n ? (ron60)ulog_idx_at(idx, n - 1).key : 0;
-    return ulog_idx_push(idx, ulogIdxSentinel(last_ts, log_size));
+    ron60 mtime = ulog_log_mtime(data);
+    return ulog_idx_push(idx, ulogIdxSentinel(mtime, log_size));
+}
+
+//  Overwrite the tail sentinel in place (no push) — used on the close
+//  path after FILETrimBook so the recorded mtime reflects the final
+//  on-disk state.  Caller guarantees a sentinel already exists.
+static void ulog_idx_refresh_sentinel(wh128bp idx, u8b data) {
+    size_t n = wh128bDataLen(idx);
+    if (n == 0) return;
+    u64 log_size = (u64)((u8 const *)data[2] - (u8 const *)data[0]);
+    ron60 mtime = ulog_log_mtime(data);
+    *ulog_idx_slot(idx, (u32)(n - 1)) = ulogIdxSentinel(mtime, log_size);
 }
 
 //  Rebuild idx by linear scan of the log, then append the sentinel.
@@ -443,7 +471,6 @@ ok64 ULOGOpenRO(u8bp *data, wh128bp *idx, path8s path) {
 
 ok64 ULOGClose(u8bp data, wh128bp *idx, b8 rw) {
     sane(data);
-    if (idx) ULOGCloseIdx(idx);
     if (data[0]) {
         //  Any RW open page-aligned the file via FILEBook's
         //  ftruncate, so Close must trim back regardless of
@@ -452,6 +479,14 @@ ok64 ULOGClose(u8bp data, wh128bp *idx, b8 rw) {
         //  visible to the next reader.  RO opens (FILEBookRO)
         //  never grew the file — skip the trim.
         if (rw) FILETrimBook(data);
+        //  Refresh the sidecar sentinel's mtime/size BEFORE closing
+        //  the idx so the persisted sentinel matches what fstat would
+        //  see on the next Open.  RO closes have a private (or anon)
+        //  idx that won't flush to disk — refresh is a no-op there.
+        if (rw && idx && *idx) ulog_idx_refresh_sentinel(*idx, data);
+    }
+    if (idx) ULOGCloseIdx(idx);
+    if (data[0]) {
         FILEUnBook(data);     // also nullifies the buffer slots
     }
     done;

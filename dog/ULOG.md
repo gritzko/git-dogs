@@ -62,23 +62,27 @@ clock jumps (NTP steps, VM time travel, `date -s`).
   appends extend the file and the mapping without relocating the base
   pointer.  `FILETrimBook` on close writes the real length back so the
   next open sees no zero-padded tail.
-- **In RAM**: one `Bkv64` index — packed `{u64 timestamp, u64 offset}`
-  pairs, naturally sorted by timestamp because appends are monotonic.
-  The index is rebuilt by a single linear scan on `ULOGOpen`; there is
-  no sidecar index file.
+- **Sidecar index**: hidden sibling at `<dir>/.<base>.idx`, a packed
+  array of `wh128` entries — `{u64 ts-key, u64 (offset40, verbHash20,
+  type4)}`.  One entry per row plus a tail sentinel that records the
+  log's `(mtime, byte size)` as of the last close.  On open, if the
+  sentinel's mtime AND size match the log file's current `fstat`, the
+  sidecar is mapped as-is and the open completes in O(1) — no scan,
+  no row re-parse.  Any mismatch falls through to a linear rebuild
+  (and the rebuilt index is written back to the sidecar).
+- **In RAM**: the sidecar mapping itself.  Reads index into it directly.
 
-The mmap-backed text is the ground truth; the in-memory `Bkv64` is a
-cheap cursor that turns "which row has timestamp T?" and "give me row
-i" into O(log N) and O(1) respectively, without ever re-parsing text.
-`ULOGRow` returns a `uri` whose component slices point into the mmap,
-so there is no per-row allocation.
+The mmap-backed log text is the ground truth; the sidecar is a derived
+cache, recoverable any time by rescanning the log.  `ULOGRow` returns a
+`uri` whose component slices point into the log mmap, so there is no
+per-row allocation.
 
 ## Operations
 
 | Call | Cost | What |
 |------|------|------|
-| `ULOGOpen` | O(N) | mmap + rebuild index; verify monotonicity |
-| `ULOGClose` | O(1) | trim book, unmap, free index |
+| `ULOGOpen` | O(1) fresh / O(N) stale | sidecar mtime+size match → map as-is; mismatch → linear rescan + sidecar rewrite |
+| `ULOGClose` | O(1) | trim book, refresh sentinel (mtime+size), flush sidecar, unmap |
 | `ULOGAppend` / `ULOGAppendAt` | O(1) amortised | emit row, push index entry |
 | `ULOGCount` | O(1) | index size |
 | `ULOGRow(i)` | O(1) | index lookup + parse one line |
@@ -138,6 +142,8 @@ partial bytes.
 - **No concurrent writers**.  Single-writer by construction; use an
   external lock (`flock`, keeper's shard lock, etc.) if multiple
   processes may append.
-- **No sidecar index file**.  The scan on open is cheap enough
-  (~200 ms per million rows) that an on-disk index would be a
-  premature optimisation and a second thing to keep consistent.
+- **No partial-trust sidecar**.  The freshness check is whole-file
+  (mtime AND size); there is no per-entry validation.  A torn sidecar
+  whose sentinel happens to match the log's mtime+size by accident
+  would be trusted — but the sentinel is the LAST write, so a torn
+  sidecar normally has a sentinel that does NOT match.

@@ -647,6 +647,71 @@ static ok64 T_sidecar_stale_rebuild(void) {
     done;
 }
 
+//  Sidecar fast-path: when the log is unchanged (same size AND same
+//  mtime), Open must trust the on-disk sidecar verbatim — NO rebuild
+//  scan.  Verified by poking a bogus verb-hash into a row entry
+//  between close and reopen; the bogus byte survives iff the rebuild
+//  was skipped (a rebuild would recompute the verb hash from the log).
+static ok64 T_sidecar_fast_path(void) {
+    sane(1);
+    rm_tmp("/tmp/ulog-fp.log");
+    rm_tmp("/tmp/.ulog-fp.log.idx");
+    LOGPATH(path, "/tmp/ulog-fp.log");
+
+    saved_uri s = {};
+    call(parse_uri_lit, &s, "?heads/main");
+
+    {   //  Append two rows, close.
+        u8bp    l_data = NULL;
+        wh128bp l_idx  = NULL;
+        call(ULOGOpen, &l_data, &l_idx, path);
+        for (u32 i = 0; i < 2; i++) {
+            ulogrec r = rec_of((ron60)(200 + i), verb_of("get"), &s);
+            call(ULOGAppendAt, l_data, l_idx, &r);
+        }
+        call(ULOGClose, l_data, &l_idx, YES);
+    }
+
+    //  Poke a sentinel verb-hash value into the FIRST row's val (the
+    //  20-bit id field of wh64).  Real `get` hash is whatever
+    //  ulogVerbHash(verb_of("get")) returns; we slam a known different
+    //  20-bit pattern into the bits and check it survives.
+    u32 marker_hash = 0x12345;
+    {
+        int fd = open("/tmp/.ulog-fp.log.idx", O_RDWR);
+        if (fd < 0) fail(TESTFAIL);
+        wh128 e = {};
+        if (pread(fd, &e, sizeof(e), 0) != (ssize_t)sizeof(e)) {
+            close(fd); fail(TESTFAIL);
+        }
+        //  Replace the 20-bit id field (verb hash) in val.
+        u64 v = e.val;
+        v &= ~(WHIFF_ID_MASK << WHIFF_ID_SHIFT);
+        v |=  ((u64)marker_hash & WHIFF_ID_MASK) << WHIFF_ID_SHIFT;
+        e.val = v;
+        if (pwrite(fd, &e, sizeof(e), 0) != (ssize_t)sizeof(e)) {
+            close(fd); fail(TESTFAIL);
+        }
+        close(fd);
+    }
+
+    //  Reopen: if the fast path triggers, our marker is preserved;
+    //  if a rebuild ran, the real `get`-hash overwrites it.
+    {
+        u8bp    l_data = NULL;
+        wh128bp l_idx  = NULL;
+        call(ULOGOpen, &l_data, &l_idx, path);
+        want(ULOGCount(l_idx) == 2);
+        wh128 const *a = (wh128 const *)l_idx[0];
+        want(wh64Id(a[0].val) == marker_hash);
+        call(ULOGClose, l_data, &l_idx, YES);
+    }
+
+    rm_tmp("/tmp/ulog-fp.log");
+    rm_tmp("/tmp/.ulog-fp.log.idx");
+    done;
+}
+
 //  RO open with no sidecar present: must succeed via the anonymous
 //  mmap fallback and surface every row from the log.  The idx slot
 //  must NOT register as booked (FILEIsBooked == NO).
@@ -750,6 +815,7 @@ ok64 ULOGtest(void) {
     fprintf(stderr, "T_aborted_leftover...\n"); call(T_aborted_leftover);
     fprintf(stderr, "T_sidecar_reuse...\n");        call(T_sidecar_reuse);
     fprintf(stderr, "T_sidecar_stale_rebuild...\n");call(T_sidecar_stale_rebuild);
+    fprintf(stderr, "T_sidecar_fast_path...\n");    call(T_sidecar_fast_path);
     fprintf(stderr, "T_sidecar_ro_fallback...\n");  call(T_sidecar_ro_fallback);
     fprintf(stderr, "T_verb_prefilter...\n");       call(T_verb_prefilter);
     done;
