@@ -1,9 +1,20 @@
 //
-// JOIN01 - Property tests for token-level 3-way merge
+// JOIN01 - Property tests for token-level 3-way merge.
 //
 // Same core logic as JOINFUZZ.c, with fixed test cases.
 // Fuzz crash repros go into the cases table below.
 //
+// JOINMerge is deprecated (see JOIN.h) — these tests exist solely to
+// characterise the historic merge behaviour during the WEAVE
+// migration.  The local pragma below silences the deprecation
+// warning so the test file keeps building under -Werror; new code
+// must call `GRAFMerge3Bytes` / `GRAFMergeWtFileTunable` instead.
+//
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 #include "JOIN.h"
 
@@ -282,3 +293,6 @@ ok64 JOINtest() {
 }
 
 TEST(JOINtest);
+
+#pragma GCC diagnostic pop
+#pragma clang diagnostic pop

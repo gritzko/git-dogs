@@ -670,113 +670,118 @@ ok64 WEAVEMerge(weave *dst, weave const *a, weave const *b) {
         for (u32 j = 0; j < sum_ins && bi + j < b_len; j++)
             if (b_irm[bi + j].rm == 0) b_alive++;
 
-        //  Detect alive-byte agreement to dedup; otherwise both
-        //  sides' tokens go into dst with their original inrm and the
-        //  renderer (not us) decides whether to wrap them in markers.
-        b8 alive_agree = NO;
+        //  Compute the longest common prefix of alive tokens between
+        //  a-side and b-side of this non-EQ run.  Dedup only when one
+        //  side is a strict alive-prefix of the other — that is the
+        //  "same edit reached both sides through different attribution"
+        //  shape (e.g. ours absorbed theirs's commits via foster).
+        //  Partial matches inside otherwise-divergent blocks fall
+        //  through to the disjoint-insert branch so the renderer can
+        //  wrap them in conflict markers.
+        //
+        //  Regressions this rule fixes:
+        //    - test/patch/15-ancestor-skip step 2: ours had {sub, mul}
+        //      via foster absorption, theirs had {sub, mul, divmod}.
+        //      Strict prefix (a fully in b) → dedup sub+mul, emit
+        //      divmod as theirs-only INS.
+        //    - test/patch/04-conflict-resolve: ours and theirs both
+        //      inserted different multi-line blocks starting with
+        //      "int" / "while".  Only the first ~1 token matches as
+        //      prefix — far short of either side's alive count — so
+        //      no dedup; both blocks emit and the renderer wraps them.
+        u32 dedup_count = 0;
+        u32 dedup_ja    = 0;
+        u32 dedup_jb    = 0;
         if (a_alive > 0 && b_alive > 0) {
-            //  Quick path: no dead intermixed → direct memcmp.
-            if (sum_del == a_alive && sum_ins == b_alive &&
-                weave_byte_equal(a_text, a_toks, ai, sum_del,
-                                 b_text, b_toks, bi, sum_ins)) {
-                alive_agree = YES;
-            } else {
-                //  Alive-only byte-equality: walk paired alive tokens.
-                u32 ja = 0, jb = 0;
-                u32 acnt = 0, bcnt = 0;
-                b8 same = YES;
-                while (acnt < a_alive || bcnt < b_alive) {
-                    while (ja < sum_del && a_irm[ai + ja].rm != 0) ja++;
-                    while (jb < sum_ins && b_irm[bi + jb].rm != 0) jb++;
-                    if (ja >= sum_del || jb >= sum_ins) break;
-                    if (!weave_byte_equal(a_text, a_toks, ai + ja, 1,
-                                          b_text, b_toks, bi + jb, 1)) {
-                        same = NO; break;
-                    }
-                    ja++; jb++; acnt++; bcnt++;
-                }
-                alive_agree = same;
-            }
-        }
-
-        if (a_alive > 0 && b_alive > 0 && alive_agree) {
-            //  Both sides alive but byte-equal — emit a's tokens
-            //  (one copy), reconciling `in` to the lower commit per
-            //  alive pair to keep determinism.  Dead tokens from
-            //  each side carry through verbatim.
             u32 ja = 0, jb = 0;
-            //  Emit a's dead-prefix
-            while (ja < sum_del && a_irm[ai + ja].rm != 0) {
+            while (ja < sum_del && jb < sum_ins) {
+                while (ja < sum_del && a_irm[ai + ja].rm != 0) ja++;
+                while (jb < sum_ins && b_irm[bi + jb].rm != 0) jb++;
+                if (ja >= sum_del || jb >= sum_ins) break;
+                if (!weave_byte_equal(a_text, a_toks, ai + ja, 1,
+                                      b_text, b_toks, bi + jb, 1)) break;
+                ja++; jb++; dedup_count++;
+            }
+            dedup_ja = ja;
+            dedup_jb = jb;
+        }
+        //  Strict alive-prefix containment: shorter side must match
+        //  fully into the longer side's prefix.
+        u32 alive_min = (a_alive < b_alive) ? a_alive : b_alive;
+        b8 alive_agree = (dedup_count > 0 && dedup_count == alive_min);
+        if (!alive_agree) { dedup_count = 0; dedup_ja = 0; dedup_jb = 0; }
+
+        if (alive_agree) {
+            //  Deduped prefix: emit alive pairs once with `in = min`,
+            //  preserving each side's dead tokens that intersperse
+            //  the prefix in their original positions (a's deads
+            //  first, then b's).  Surplus alive tokens past
+            //  `dedup_ja`/`dedup_jb` fall through to the disjoint-
+            //  insert tail below.
+            u32 ja = 0, jb = 0;
+            //  a's leading dead tokens before the dedup prefix.
+            while (ja < dedup_ja && a_irm[ai + ja].rm != 0) {
                 __ = weave_append(dst, a_text, a_toks, a_hash,
                                   ai + ja, a_irm[ai + ja]);
                 if (__ != OK) goto cleanup;
                 ja++;
             }
-            //  Emit b's dead-prefix
-            while (jb < sum_ins && b_irm[bi + jb].rm != 0) {
+            //  b's leading dead tokens.
+            while (jb < dedup_jb && b_irm[bi + jb].rm != 0) {
                 __ = weave_append(dst, b_text, b_toks, b_hash,
                                   bi + jb, b_irm[bi + jb]);
                 if (__ != OK) goto cleanup;
                 jb++;
             }
-            //  Emit alive pairs (a's bytes, in = min)
+            //  Emit the deduped alive pairs.  Dead tokens encountered
+            //  between alive pairs are passed through (a's side only —
+            //  b's interspersed deads are dropped to avoid duplicate
+            //  text; they were aligned in the EQ runs around this run).
+            //
+            //  Deduped tokens get `in = 0` (pre-timeframe spine) — the
+            //  bytes reached both sides through different attribution
+            //  (e.g. foster absorption), so neither side's `in` value
+            //  alone reflects the truth.  WEAVEEmitMerged treats
+            //  `in == 0` as member-of-every-predicate, which is what
+            //  shared content needs to avoid being grouped with one
+            //  side's non-spine tokens into a spurious conflict run.
             u32 acnt = 0;
-            while (acnt < a_alive && ja < sum_del && jb < sum_ins) {
-                while (ja < sum_del && a_irm[ai + ja].rm != 0) {
+            while (acnt < dedup_count && ja < dedup_ja && jb < dedup_jb) {
+                while (ja < dedup_ja && a_irm[ai + ja].rm != 0) {
                     __ = weave_append(dst, a_text, a_toks, a_hash,
                                       ai + ja, a_irm[ai + ja]);
                     if (__ != OK) goto cleanup;
                     ja++;
                 }
-                while (jb < sum_ins && b_irm[bi + jb].rm != 0) {
-                    //  b's interspersed dead tokens: skip (keeping
-                    //  one copy from a is enough; b's deads were
-                    //  already aligned in the EQ run, but if they
-                    //  ended up in this run they'd duplicate text;
-                    //  drop them).
-                    jb++;
-                }
-                if (ja >= sum_del || jb >= sum_ins) break;
-                inrm ea = a_irm[ai + ja];
-                inrm eb = b_irm[bi + jb];
-                inrm out = {.in = (ea.in < eb.in) ? ea.in : eb.in,
-                            .rm = 0};
+                while (jb < dedup_jb && b_irm[bi + jb].rm != 0) jb++;
+                if (ja >= dedup_ja || jb >= dedup_jb) break;
+                inrm out = {.in = 0, .rm = 0};
                 __ = weave_append(dst, a_text, a_toks, a_hash,
                                   ai + ja, out);
                 if (__ != OK) goto cleanup;
                 ja++; jb++; acnt++;
             }
-            //  Drain any remaining dead from either side.
-            while (ja < sum_del) {
-                if (a_irm[ai + ja].rm != 0) {
-                    __ = weave_append(dst, a_text, a_toks, a_hash,
-                                      ai + ja, a_irm[ai + ja]);
-                    if (__ != OK) goto cleanup;
-                }
-                ja++;
-            }
-            while (jb < sum_ins) {
-                if (b_irm[bi + jb].rm != 0) {
-                    __ = weave_append(dst, b_text, b_toks, b_hash,
-                                      bi + jb, b_irm[bi + jb]);
-                    if (__ != OK) goto cleanup;
-                }
-                jb++;
-            }
-            ai += sum_del;
-            bi += sum_ins;
-        } else {
-            //  Disjoint inserts (or pure deletes) — no overlap, no
-            //  conflict.  Canonical splice order: a's tokens first,
-            //  then b's, with each side's original inrm.
-            for (u32 j = 0; j < sum_del && ai < a_len; j++, ai++) {
-                __ = weave_append(dst, a_text, a_toks, a_hash, ai, a_irm[ai]);
-                if (__ != OK) goto cleanup;
-            }
-            for (u32 j = 0; j < sum_ins && bi < b_len; j++, bi++) {
-                __ = weave_append(dst, b_text, b_toks, b_hash, bi, b_irm[bi]);
-                if (__ != OK) goto cleanup;
-            }
+            //  Advance cursors past the deduped prefix.  The surplus
+            //  (anything past dedup_ja on a, dedup_jb on b) gets
+            //  emitted by the disjoint-insert tail.
+            ai += dedup_ja;
+            bi += dedup_jb;
+            sum_del -= dedup_ja;
+            sum_ins -= dedup_jb;
+        }
+
+        //  Disjoint inserts / pure deletes / post-dedup surplus —
+        //  canonical splice order: a's tokens first, then b's, with
+        //  each side's original inrm.  When no dedup ran, sum_del /
+        //  sum_ins are the whole-run counts; after partial dedup they
+        //  are the trailing remainder.
+        for (u32 j = 0; j < sum_del && ai < a_len; j++, ai++) {
+            __ = weave_append(dst, a_text, a_toks, a_hash, ai, a_irm[ai]);
+            if (__ != OK) goto cleanup;
+        }
+        for (u32 j = 0; j < sum_ins && bi < b_len; j++, bi++) {
+            __ = weave_append(dst, b_text, b_toks, b_hash, bi, b_irm[bi]);
+            if (__ != OK) goto cleanup;
         }
     }
 

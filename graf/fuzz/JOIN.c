@@ -1,11 +1,20 @@
 //
-// JOIN fuzz test - token-level 3-way merge
+// JOIN fuzz test - token-level 3-way merge.
 //
 // Input format: [base bytes] \0 [edit ops]
 // Edit ops: for each base token, 2 bytes: ours_op, theirs_op
 //   op & 0x3: 0=keep, 1=delete, 2=replace (next N bytes)
 //   op >> 2:  replacement length (for op==2)
 //
+// JOINMerge is deprecated — see JOIN.h.  This fuzzer is retained
+// alongside the JOIN01 property tests purely to characterise the
+// historic merge behaviour during the WEAVE migration.
+//
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 #include "JOIN.h"
 

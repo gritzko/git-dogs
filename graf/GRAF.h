@@ -307,6 +307,16 @@ ok64 GRAFMergeWtFileTunable(u8cs path, u8cs reporoot,
                             u64 const *skip_hl, u32 nskip,
                             u8b out);
 
+//  3-way blob merge from raw bytes (no keeper / no DAG walk).
+//  Pipeline: WEAVEFromBlob ×3 → WEAVEDiff ×2 → WEAVEMerge →
+//  WEAVEEmitMerged.  Marker shape: `<<<<` / `||||` / `>>>>` with the
+//  1/4-line realignment pass applied.  Empty `base` is allowed
+//  (no common ancestor); empty `ours` or `theirs` short-circuits to
+//  the other side.  `out` is reset on entry.  `ext` selects the
+//  tokenizer (file extension, no dot).
+ok64 GRAFMerge3Bytes(u8cs base, u8cs ours, u8cs theirs,
+                     u8cs ext, u8b out);
+
 // Render commit history one-per-line for `be log:[path]?<ref>#<N>`.
 // Branch-only URI (no path) walks the COMMIT_PARENT chain via the DAG
 // index; path-bearing URI uses PATH_VER + ancestor filter.  Output

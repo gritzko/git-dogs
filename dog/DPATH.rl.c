@@ -1,17 +1,16 @@
 
-/* #line 1 "dog/DPATH.c.rl" */
+/* #line 1 "DPATH.c.rl" */
 #include "DPATH.h"
 
 
-/* #line 27 "dog/DPATH.c.rl" */
+/* #line 30 "DPATH.c.rl" */
 
 
 
-/* #line 6 "dog/DPATH.rl.c" */
-static const unsigned char _dpath_key_offsets[] = {
+/* #line 6 "DPATH.rl.c" */
+static const char _dpath_key_offsets[] = {
 	0, 0, 18, 20, 22, 24, 26, 28, 
-	30, 32, 54, 71, 88, 107, 126, 145, 
-	164
+	30, 32, 54, 71, 88, 107, 126
 };
 
 static const unsigned char _dpath_trans_keys[] = {
@@ -19,43 +18,36 @@ static const unsigned char _dpath_trans_keys[] = {
 	128u, 193u, 194u, 223u, 225u, 239u, 241u, 243u, 
 	245u, 255u, 128u, 191u, 160u, 191u, 128u, 191u, 
 	128u, 159u, 144u, 191u, 128u, 191u, 128u, 143u, 
-	0u, 46u, 47u, 68u, 71u, 92u, 100u, 103u, 
+	0u, 46u, 47u, 66u, 71u, 92u, 98u, 103u, 
 	224u, 237u, 240u, 244u, 128u, 193u, 194u, 223u, 
 	225u, 239u, 241u, 243u, 245u, 255u, 0u, 47u, 
 	92u, 224u, 237u, 240u, 244u, 128u, 193u, 194u, 
 	223u, 225u, 239u, 241u, 243u, 245u, 255u, 0u, 
 	47u, 92u, 224u, 237u, 240u, 244u, 128u, 193u, 
 	194u, 223u, 225u, 239u, 241u, 243u, 245u, 255u, 
-	0u, 47u, 79u, 92u, 111u, 224u, 237u, 240u, 
+	0u, 47u, 69u, 92u, 101u, 224u, 237u, 240u, 
 	244u, 128u, 193u, 194u, 223u, 225u, 239u, 241u, 
-	243u, 245u, 255u, 0u, 47u, 71u, 92u, 103u, 
+	243u, 245u, 255u, 0u, 47u, 73u, 92u, 105u, 
 	224u, 237u, 240u, 244u, 128u, 193u, 194u, 223u, 
 	225u, 239u, 241u, 243u, 245u, 255u, 0u, 47u, 
-	83u, 92u, 115u, 224u, 237u, 240u, 244u, 128u, 
+	84u, 92u, 116u, 224u, 237u, 240u, 244u, 128u, 
 	193u, 194u, 223u, 225u, 239u, 241u, 243u, 245u, 
-	255u, 0u, 47u, 73u, 92u, 105u, 224u, 237u, 
-	240u, 244u, 128u, 193u, 194u, 223u, 225u, 239u, 
-	241u, 243u, 245u, 255u, 0u, 47u, 84u, 92u, 
-	116u, 224u, 237u, 240u, 244u, 128u, 193u, 194u, 
-	223u, 225u, 239u, 241u, 243u, 245u, 255u, 0
+	255u, 0
 };
 
 static const char _dpath_single_lengths[] = {
 	0, 8, 0, 0, 0, 0, 0, 0, 
-	0, 12, 7, 7, 9, 9, 9, 9, 
-	9
+	0, 12, 7, 7, 9, 9, 9
 };
 
 static const char _dpath_range_lengths[] = {
 	0, 5, 1, 1, 1, 1, 1, 1, 
-	1, 5, 5, 5, 5, 5, 5, 5, 
-	5
+	1, 5, 5, 5, 5, 5, 5
 };
 
-static const unsigned char _dpath_index_offsets[] = {
+static const char _dpath_index_offsets[] = {
 	0, 0, 14, 16, 18, 20, 22, 24, 
-	26, 28, 46, 59, 72, 87, 102, 117, 
-	132
+	26, 28, 46, 59, 72, 87, 102
 };
 
 static const char _dpath_trans_targs[] = {
@@ -63,21 +55,17 @@ static const char _dpath_trans_targs[] = {
 	0, 2, 4, 7, 0, 11, 11, 0, 
 	2, 0, 2, 0, 2, 0, 4, 0, 
 	4, 0, 4, 0, 0, 10, 0, 12, 
-	15, 0, 12, 15, 3, 5, 6, 8, 
+	13, 0, 12, 13, 3, 5, 6, 8, 
 	0, 2, 4, 7, 0, 11, 0, 0, 
 	0, 3, 5, 6, 8, 0, 2, 4, 
 	7, 0, 11, 0, 0, 0, 3, 5, 
 	6, 8, 0, 2, 4, 7, 0, 11, 
-	0, 0, 13, 0, 13, 3, 5, 6, 
+	0, 0, 10, 0, 10, 3, 5, 6, 
 	8, 0, 2, 4, 7, 0, 11, 0, 
 	0, 14, 0, 14, 3, 5, 6, 8, 
 	0, 2, 4, 7, 0, 11, 0, 0, 
 	10, 0, 10, 3, 5, 6, 8, 0, 
-	2, 4, 7, 0, 11, 0, 0, 16, 
-	0, 16, 3, 5, 6, 8, 0, 2, 
-	4, 7, 0, 11, 0, 0, 10, 0, 
-	10, 3, 5, 6, 8, 0, 2, 4, 
-	7, 0, 11, 0
+	2, 4, 7, 0, 11, 0
 };
 
 static const int dpath_start = 1;
@@ -85,7 +73,7 @@ static const int dpath_start = 1;
 static const int dpath_en_main = 1;
 
 
-/* #line 30 "dog/DPATH.c.rl" */
+/* #line 33 "DPATH.c.rl" */
 
 ok64 DPATHu8sDrainSeg(u8cs input, u8cs out) {
     if (input[0] == NULL || input[0] >= input[1])
@@ -97,14 +85,14 @@ ok64 DPATHu8sDrainSeg(u8cs input, u8cs out) {
     int cs = 0;
 
     
-/* #line 92 "dog/DPATH.rl.c" */
+/* #line 80 "DPATH.rl.c" */
 	{
 	cs = dpath_start;
 	}
 
-/* #line 41 "dog/DPATH.c.rl" */
+/* #line 44 "DPATH.c.rl" */
     
-/* #line 95 "dog/DPATH.rl.c" */
+/* #line 83 "DPATH.rl.c" */
 	{
 	int _klen;
 	unsigned int _trans;
@@ -174,7 +162,7 @@ _match:
 	_out: {}
 	}
 
-/* #line 42 "dog/DPATH.c.rl" */
+/* #line 45 "DPATH.c.rl" */
 
     if (cs < 11)
         return DPATHBAD;

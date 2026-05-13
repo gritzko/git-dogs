@@ -3,11 +3,11 @@
 #
 #  Builds a tiny 3-commit history via `be post`, then exercises the
 #  URI-driven `graf get` entry point:
-#    - `path?<sha>`           single-tip identity (blob at commit)
-#    - `path?<sha1>&<sha2>`   multi-tip weave replay
-#  over a linear history, the N-tip call must converge to the tip
-#  blob (weave projection keeps only tokens alive at the last fed
-#  gen).
+#    - `path?<sha>`           single-tip blob read at commit
+#    - `dir/?<sha>`           single-tip tree read at commit
+#  Multi-tip merge URIs (`path?A&B...`) and tree merge URIs are no
+#  longer supported — 3-way merge is PATCH territory (use
+#  `be patch ?<branch>` instead).
 #
 #  Run:     BIN=build-debug/bin bash graf/test/get.sh
 #  CTest:   registered by graf/test/CMakeLists.txt.
@@ -74,22 +74,7 @@ echo "$OUT" | sed 's/^/    /'
 echo "$OUT" | grep -qF 'x + 3' || fail "single-tip tip: expected v3 content"
 echo "$OUT" | grep -qF 'h3'    || fail "single-tip tip: expected h3"
 
-echo "=== 5. graf get f.c?<sha1>&<sha3>  (multi-tip linear) ==="
-OUT=$("$GRAF" get "f.c?$SHA1&$SHA3")
-echo "$OUT" | sed 's/^/    /'
-#  Linear history v1 → v2 → v3: weave projection converges to the
-#  latest-fed gen, i.e. v3's content.  A diverged-branch scenario
-#  would produce richer merge output but needs branch support in
-#  be/sniff first.
-echo "$OUT" | grep -qF 'x + 3' || fail "multi-tip: expected v3 content"
-echo "$OUT" | grep -qF 'h3'    || fail "multi-tip: expected h3"
-
-echo "=== 6. graf get f.c?<sha1>&<sha2>&<sha3>  (3-way linear) ==="
-OUT=$("$GRAF" get "f.c?$SHA1&$SHA2&$SHA3")
-echo "$OUT" | sed 's/^/    /'
-echo "$OUT" | grep -qF 'x + 3' || fail "3-way: expected v3 content"
-
-echo "=== 7. graf get /?<sha3>  (root tree, single tip) ==="
+echo "=== 5. graf get /?<sha3>  (root tree, single tip) ==="
 #  Tree output is binary: "<mode> <name>\0<20-byte sha>" entries.
 #  Must be non-empty and contain at least one f.c entry.
 "$GRAF" get "/?$SHA3" > "$TMP/tree_single.bin"
@@ -98,29 +83,13 @@ grep -qF 'f.c' "$TMP/tree_single.bin" \
     || fail "root tree single: f.c not found"
 note "single-tip root tree size $(wc -c < "$TMP/tree_single.bin") bytes"
 
-echo "=== 8. graf get /?<sha1>&<sha3>  (root tree, linear merge) ==="
-"$GRAF" get "/?$SHA1&$SHA3" > "$TMP/tree_merge.bin"
-[ -s "$TMP/tree_merge.bin" ] || fail "root tree merge: empty output"
-#  Entries that didn't change between v1 and v3 (sniff's flat `.git/…`
-#  ingestion) carry matching shas on both sides and pass through.
-#  f.c's blob changed between v1 and v3, so its entry's sha must be
-#  the 20-byte zero marker (unresolvable — caller re-fetches via
-#  graf with the same child URI).  Byte-for-byte v3 equality must
-#  therefore FAIL.
-if cmp -s "$TMP/tree_single.bin" "$TMP/tree_merge.bin"; then
-    fail "root tree merge: did not emit zero sha for disagreeing f.c"
+echo "=== 6. multi-tip merge URIs must be rejected ==="
+#  `path?A&B...` and tree merge URIs are no longer accepted — merge
+#  is PATCH territory now.  The CLI should fail (non-zero exit).
+if "$GRAF" get "f.c?$SHA1&$SHA3" >/dev/null 2>&1; then
+    fail "graf get f.c?sha1&sha3 should have failed (merge URI retired)"
 fi
-note "merged root tree differs from v3 (f.c's sha zeroed on disagreement)"
-#  The f.c entry must sit at `100644 f.c\0` + 20 NUL bytes.
-#  POSIX-friendly: dump to hex, scan for the literal pattern.
-HEX=$(xxd -p -c 999999 "$TMP/tree_merge.bin" | tr -d '\n')
-#  "100644 f.c\0" = 31 30 30 36 34 34 20 66 2e 63 00
-#  Followed by 40 hex chars of zero = the 20-byte zero sha.
-PAT='31303036343420662e6300'$(printf '0%.0s' $(seq 1 40))
-case "$HEX" in
-    *"$PAT"*) note "f.c entry carries a zero sha as expected" ;;
-    *)        fail "f.c sha not zeroed (expected 100644 f.c\\0<20 NULs>)" ;;
-esac
+note "graf get f.c?A&B correctly rejected"
 
 echo
 echo "=== graf get: OK ==="

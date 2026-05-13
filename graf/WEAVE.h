@@ -100,10 +100,14 @@ ok64 WEAVEDiff (weave *dst, weave const *src, weave const *nu, u32 src_commit);
 //  `in` for determinism), and non-EQ runs canonicalize as INS-then-DEL
 //  with each side's tokens carrying their original `inrm`.  When both
 //  sides have *alive* tokens at the same logical slot whose bytes
-//  agree, the alive token is dedup'd (one copy with `in = min`).
-//  When the alive bytes differ, both sides' tokens are emitted in
-//  order with their original `inrm` — the weave records both
-//  histories.  Conflict-marker bytes (`<<<<` etc.) are NEVER stored
+//  agree, the alive token is dedup'd (one copy with `in = 0` —
+//  pre-timeframe spine, so `WEAVEEmitMerged` treats it as member
+//  of every predicate; neither side's commit stamp alone correctly
+//  reflects "shared content reached both sides through different
+//  attribution" — e.g. tokens absorbed via foster on one side and
+//  original on the other).  When the alive bytes differ, both
+//  sides' tokens are emitted in order with their original `inrm`
+//  — the weave records both histories.  Conflict-marker bytes (`<<<<` etc.) are NEVER stored
 //  in the weave; producing them is a render-time concern (a renderer
 //  walking dst can detect concurrent-alive divergence by inrm and
 //  emit framing bytes in its output stream).  dst is reset before

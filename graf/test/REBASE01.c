@@ -277,125 +277,6 @@ ok64 test_patchid(void) {
     done;
 }
 
-ok64 test_merge_explicit(void) {
-    sane(1);
-    call(setup_repo);
-
-    keep_pack p = {};
-    call(KEEPPackOpen, &KEEP, &p);
-    p.strict_order = NO;
-
-    //  base = "int x = 1;\nint y = 2;\n"
-    sha1 sb = {};
-    {
-        a_cstr(c, "int x = 1;\nint y = 2;\n");
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c, 0, &sb);
-    }
-    //  ours_e: same as base
-    sha1 sb_eq = sb;
-    //  theirs_t1: changes y to 20
-    sha1 st1 = {};
-    {
-        a_cstr(c, "int x = 1;\nint y = 20;\n");
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c, 0, &st1);
-    }
-    //  ours_o1: changes x to 10
-    sha1 so1 = {};
-    {
-        a_cstr(c, "int x = 10;\nint y = 2;\n");
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c, 0, &so1);
-    }
-    //  conflicting: both change x but to different values
-    sha1 so_c = {}, st_c = {};
-    {
-        a_cstr(c, "int x = 11;\nint y = 2;\n");
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, c, 0, &so_c);
-        a_cstr(d, "int x = 22;\nint y = 2;\n");
-        call(KEEPPackFeed, &KEEP, &p, DOG_OBJ_BLOB, d, 0, &st_c);
-    }
-
-    call(KEEPPackClose, &KEEP, &p);
-
-    //  (e) base == ours, theirs differs → output = theirs
-    {
-        Bu8 out = {};
-        call(u8bMap, out, 1UL << 20);
-        call(GRAFMergeExplicit, &sb, &sb_eq, &st1, out);
-        a_dup(u8c, od, u8bData(out));
-        u8cs want_s = {(u8cp)"int x = 1;\nint y = 20;\n",
-                       (u8cp)"int x = 1;\nint y = 20;\n" + 23};
-        if ($len(od) != $len(want_s) ||
-            memcmp(od[0], want_s[0], $len(od)) != 0) {
-            fprintf(stderr, "  (e) FAIL: got %.*s\n",
-                    (int)$len(od), (char const *)od[0]);
-            u8bUnMap(out);
-            fail(TESTFAIL);
-        }
-        u8bUnMap(out);
-    }
-
-    //  (f) base == theirs, ours differs → output = ours
-    {
-        Bu8 out = {};
-        call(u8bMap, out, 1UL << 20);
-        call(GRAFMergeExplicit, &sb, &so1, &sb, out);
-        a_dup(u8c, od, u8bData(out));
-        u8cs want_s = {(u8cp)"int x = 10;\nint y = 2;\n",
-                       (u8cp)"int x = 10;\nint y = 2;\n" + 23};
-        if ($len(od) != $len(want_s) ||
-            memcmp(od[0], want_s[0], $len(od)) != 0) {
-            fprintf(stderr, "  (f) FAIL\n");
-            u8bUnMap(out);
-            fail(TESTFAIL);
-        }
-        u8bUnMap(out);
-    }
-
-    //  (g) non-conflicting divergence → merged should contain both x=10 and y=20
-    {
-        Bu8 out = {};
-        call(u8bMap, out, 1UL << 20);
-        call(GRAFMergeExplicit, &sb, &so1, &st1, out);
-        a_dup(u8c, od, u8bData(out));
-        u8cs s10 = {(u8cp)"x = 10", (u8cp)"x = 10" + 6};
-        u8cs s20 = {(u8cp)"y = 20", (u8cp)"y = 20" + 6};
-        b8 got_10 = NO, got_20 = NO;
-        for (u8c *q = od[0]; q + 6 <= od[1]; q++) {
-            if (memcmp(q, s10[0], 6) == 0) got_10 = YES;
-            if (memcmp(q, s20[0], 6) == 0) got_20 = YES;
-        }
-        if (!got_10 || !got_20) {
-            fprintf(stderr, "  (g) FAIL: 10=%d 20=%d\n", got_10, got_20);
-            u8bUnMap(out);
-            fail(TESTFAIL);
-        }
-        u8bUnMap(out);
-    }
-
-    //  (h) conflicting divergence → contains '<<<<' markers
-    {
-        Bu8 out = {};
-        call(u8bMap, out, 1UL << 20);
-        call(GRAFMergeExplicit, &sb, &so_c, &st_c, out);
-        a_dup(u8c, od, u8bData(out));
-        b8 has_marker = NO;
-        for (u8c *q = od[0]; q + 4 <= od[1]; q++) {
-            if (q[0] == '<' && q[1] == '<' &&
-                q[2] == '<' && q[3] == '<') { has_marker = YES; break; }
-        }
-        if (!has_marker) {
-            fprintf(stderr, "  (h) FAIL: no <<<< markers\n");
-            u8bUnMap(out);
-            fail(TESTFAIL);
-        }
-        u8bUnMap(out);
-    }
-
-    teardown_repo();
-    fprintf(stderr, "  merge_explicit (e)PASS (f)PASS (g)PASS (h)PASS\n");
-    done;
-}
-
 //  Build a small repo with this layout:
 //
 //      base_old → child1 → child2  (linear)
@@ -818,7 +699,6 @@ ok64 test_rebase_blob_merge(void) {
 ok64 maintest(void) {
     sane(1);
     call(test_patchid);
-    call(test_merge_explicit);
     call(test_rebase);
     call(test_rebase_file_weave);
     call(test_rebase_blob_merge);

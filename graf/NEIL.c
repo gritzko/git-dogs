@@ -246,6 +246,36 @@ ok64 NEILCleanup(e32g edl, u32cs old_toks, u32cs new_toks,
                 }
             }
 
+            // Protect EQs that contain a newline (`\n`) token.
+            // Newlines are structural line boundaries — even a short
+            // EQ like `"0;}\n"` between two edits represents real
+            // shared line context that the LCS picked up correctly.
+            // Killing it forces ours's and theirs's bytes around the
+            // newline into one non-EQ run, doubling the spine on emit
+            // (graf/test/WEAVE01 del_ins_plus_tail_repeats and
+            // del_ins_in_func_plus_tail_zones, derived from
+            // test/patch/19-feature-stack-rebase iter 2).  Runs
+            // BEFORE the line-fraction kill below so a structural
+            // newline EQ never gets killed.
+            {
+                u32 eq_from = new_off[k];
+                b8 has_newline = NO;
+                for (u32 j = 0; j < eq_len && !has_newline; j++) {
+                    u32 ti = eq_from + j;
+                    u32 lo = (ti > 0) ? tok32Offset(new_toks[0][ti - 1]) : 0;
+                    u32 hi = tok32Offset(new_toks[0][ti]);
+                    for (u32 b = lo; b < hi; b++) {
+                        if (new_src[0][b] == '\n') {
+                            has_newline = YES;
+                            break;
+                        }
+                    }
+                }
+                if (has_newline) {
+                    tmp[w++] = buf[k]; continue;
+                }
+            }
+
             // Line-fraction kill: if the EQ is a small fragment of the
             // line(s) it spans, drop it.  Common case is incidental
             // bracket / punctuation matches inside otherwise-different

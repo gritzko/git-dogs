@@ -23,8 +23,8 @@
     # keeper's UNPK (git pack imports), not a signal that our own
     # workspace uses `.git` — it does not.
     dotgit  = '.' [gG][iI][tT] ;
-    dotdogs = '.' [dD][oO][gG][sS] ;
-    bad     = '.' | '..' | dotgit | dotdogs ;
+    dotbe   = '.' [bB][eE] ;
+    bad     = '.' | '..' | dotgit | dotbe ;
 
     main := ( safe+ - bad ) ;
 }%%

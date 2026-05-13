@@ -31,6 +31,30 @@
 #define WEAVE_CSV(name, lit)                                              \
     u8cs name = {(u8cp)(lit), (u8cp)(lit) + ((lit) ? strlen(lit) : 0)}
 
+//  Dump a weave's tokens with inrm + bytes to stderr.  Used by
+//  failure paths in test cases to localise WEAVE pipeline bugs.
+static void weave_dump_tokens(char const *label, weave const *w) {
+    fprintf(stderr, "  %s tokens (%u):\n", label,
+            (u32)((u32cp)w->toks[2] - (u32cp)w->toks[1]));
+    u32cp toks = (u32cp)w->toks[1];
+    u32cp toks_e = (u32cp)w->toks[2];
+    u32 ntok = (u32)(toks_e - toks);
+    inrmcp irm = (inrmcp)w->inrm[1];
+    u8cp text = (u8cp)w->text[1];
+    for (u32 i = 0; i < ntok; i++) {
+        u32 lo = (i == 0) ? 0 : tok32Offset(toks[i - 1]);
+        u32 hi = tok32Offset(toks[i]);
+        fprintf(stderr, "    [%u] in=%08x rm=%08x \"", i,
+                irm[i].in, irm[i].rm);
+        for (u32 j = lo; j < hi && j < lo + 16; j++) {
+            u8 c = text[j];
+            if (c >= 0x20 && c < 0x7f) fputc(c, stderr);
+            else fprintf(stderr, "\\x%02x", c);
+        }
+        fprintf(stderr, "\"\n");
+    }
+}
+
 //  Walk a weave and reproduce its alive byte stream into `out`.
 static ok64 weave_repro_alive(u8bp out, weave const *w) {
     sane(out && w);
@@ -133,6 +157,35 @@ static ok64 weave_run(WEAVECase const *c) {
     call(WEAVEDiff, &wa, &wo, &wa_raw, WEAVE_TEST_A);
     call(WEAVEDiff, &wb, &wo, &wb_raw, WEAVE_TEST_B);
 
+    //  Sanity: each post-WEAVEDiff weave's alive bytes must equal
+    //  its source blob (a's alive == adata, b's alive == bdata).
+    //  Catches bugs in WEAVEDiff before they propagate into the
+    //  WEAVEMerge assertions below.
+    call(weave_repro_alive, outbuf, &wa);
+    {
+        u8s wa_got = {u8bDataHead(outbuf),
+                      u8bDataHead(outbuf) + u8bDataLen(outbuf)};
+        if (!weave_slice_eq_lit(wa_got, c->a)) {
+            fprintf(stderr,
+                    " FAIL: WEAVEDiff(wo,a) alive != a\n"
+                    "  got:  '%.*s'\n  want: '%s'\n",
+                    (int)$len(wa_got), (char *)wa_got[0], c->a);
+            fail(TESTFAIL);
+        }
+    }
+    call(weave_repro_alive, outbuf, &wb);
+    {
+        u8s wb_got = {u8bDataHead(outbuf),
+                      u8bDataHead(outbuf) + u8bDataLen(outbuf)};
+        if (!weave_slice_eq_lit(wb_got, c->b)) {
+            fprintf(stderr,
+                    " FAIL: WEAVEDiff(wo,b) alive != b\n"
+                    "  got:  '%.*s'\n  want: '%s'\n",
+                    (int)$len(wb_got), (char *)wb_got[0], c->b);
+            fail(TESTFAIL);
+        }
+    }
+
     call(WEAVEMerge, &wm, &wa, &wb);
 
     call(weave_repro_alive, outbuf, &wm);
@@ -145,6 +198,10 @@ static ok64 weave_run(WEAVECase const *c) {
                     " FAIL: merged mismatch\n  got:  '%.*s'\n  want: '%s'\n",
                     (int)$len(got),  (char *)got[0],
                     c->expected_merged);
+            weave_dump_tokens("wo", &wo);
+            weave_dump_tokens("wa (post WEAVEDiff)", &wa);
+            weave_dump_tokens("wb (post WEAVEDiff)", &wb);
+            weave_dump_tokens("wm (post WEAVEMerge)", &wm);
             fail(TESTFAIL);
         }
     } else if (c->contains_a || c->contains_b) {
@@ -237,15 +294,22 @@ static ok64 weave_test_pre_lca(void) {
         fail(TESTFAIL);
     }
 
-    //  Pick a known token (the literal 'x') and verify in == min(A,B).
+    //  Pick a known token (the literal 'x') and verify in == 0.
+    //  Deduped alive-on-both tokens get `in = 0` (pre-timeframe
+    //  spine) — neither side's stamp alone reflects the truth, and
+    //  WEAVEEmitMerged needs them to be auto-member-of-every-
+    //  predicate so shared content doesn't get grouped with one
+    //  side's non-spine tokens into a spurious conflict run
+    //  (regression: test/patch/15-ancestor-skip step 2 produced
+    //  a `<<<<sub mul||||divmod>>>>` conflict when the dedup
+    //  inherited a one-sided commit stamp).
     WEAVE_CSV(xtok, "x");
     u64 h = RAPHash(xtok);
     u32 in_stamp = weave_alive_in(&wm, h);
-    u32 want_in = (WEAVE_TEST_A < WEAVE_TEST_B) ? WEAVE_TEST_A : WEAVE_TEST_B;
-    if (in_stamp != want_in) {
+    if (in_stamp != 0) {
         fprintf(stderr,
-                " FAIL: 'x' token in=%08x, want %08x (min(A,B))\n",
-                in_stamp, want_in);
+                " FAIL: 'x' token in=%08x, want 00000000 (spine)\n",
+                in_stamp);
         fail(TESTFAIL);
     }
 
@@ -312,6 +376,36 @@ static WEAVECase cases[] = {
      "int x = 1;\nint y = 2;\n",
      "int x = 1;\nint y = 2;\n",
      "int x = 1;\nint y = 2;\n", NULL, NULL},
+
+    //  Repeated-token LCS ambiguity + theirs DEL-then-INS + ours
+    //  tail-append.  Reduced repro of the test/patch/19-feature-stack-
+    //  rebase iter-2 failure.  Base has two `"0"` tokens (both with
+    //  in=0).  Theirs replaces the second `"0"` with `"f(0)"` (DEL
+    //  the `"0"` + INS `"f("`, `"0"`, `")"`).  Ours appends `"TAG\n"`
+    //  at end-of-file.  Correct merged alive bytes:
+    //  `"a=0;\nb=f(0);\nTAG\n"` — theirs's replacement applies, ours's
+    //  tail preserved.  Pre-fix WEAVE drops theirs's DEL and emits
+    //  ours's `"b=0;\n"` alive alongside theirs's `"f(0);\n"`.
+    {"del_ins_plus_tail_repeats",
+     "a=0;\nb=0;\n",
+     "a=0;\nb=0;\nTAG\n",
+     "a=0;\nb=f(0);\n",
+     "a=0;\nb=f(0);\nTAG\n", NULL, NULL},
+
+    //  Same shape as above but with the DEL-then-INS landing inside a
+    //  function body (`{ }` brace pair around the changed token), and
+    //  one extra base zone declaration to broaden the LCS-ambiguity
+    //  surface.  Closer mirror of test/patch/19-feature-stack-rebase
+    //  iter 2: base has 3 zones (a=0, b=0, c=0) plus a `main(){return
+    //  0;}` line; theirs replaces main's `"0"` with `"f(0)"`; ours
+    //  appends a comment line.  Correct merged alive bytes have
+    //  theirs's replacement applied AND ours's tail preserved with no
+    //  duplicate spine.
+    {"del_ins_in_func_plus_tail_zones",
+     "a=0;\nb=0;\nc=0;\nm(){return 0;}\n",
+     "a=0;\nb=0;\nc=0;\nm(){return 0;}\nT\n",
+     "a=0;\nb=0;\nc=0;\nm(){return f(0);}\n",
+     "a=0;\nb=0;\nc=0;\nm(){return f(0);}\nT\n", NULL, NULL},
 
     {NULL, NULL, NULL, NULL, NULL, NULL, NULL},
 };

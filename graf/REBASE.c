@@ -240,11 +240,12 @@ fail:
 }
 
 // ---------------------------------------------------------------------
-//  Primitive 2: GRAFMergeExplicit
+//  Primitive 2: rebase_blob_at — fetch one blob's bytes by sha.
 // ---------------------------------------------------------------------
 
 //  Helper: fetch blob bytes by sha into `buf`.  Empty `buf` on
-//  KEEPNONE so JOINMerge can degenerate gracefully.
+//  KEEPNONE so callers can degenerate gracefully (empty-side merge
+//  shape).
 static ok64 rebase_blob_at(u8 *const *buf, sha1 const *sha) {
     sane(buf);
     if (sha1empty(sha)) return OK;  //  treat as empty
@@ -254,44 +255,6 @@ static ok64 rebase_blob_at(u8 *const *buf, sha1 const *sha) {
     if (o != OK) return o;
     if (t != DOG_OBJ_BLOB) return KEEPFAIL;
     done;
-}
-
-ok64 GRAFMergeExplicit(sha1 const *base, sha1 const *ours,
-                       sha1 const *theirs, u8 *const *out) {
-    sane(base && ours && theirs && out);
-
-    Bu8 bbuf = {}, obuf = {}, tbuf = {};
-    call(u8bMap, bbuf, REBASE_BLOB_MAX);
-    call(u8bMap, obuf, REBASE_BLOB_MAX);
-    call(u8bMap, tbuf, REBASE_BLOB_MAX);
-
-    ok64 ret = OK;
-    ret = rebase_blob_at(bbuf, base);
-    if (ret == OK) ret = rebase_blob_at(obuf, ours);
-    if (ret == OK) ret = rebase_blob_at(tbuf, theirs);
-    if (ret != OK) goto cleanup;
-
-    //  Tokenize each.  An empty side is fine: JOINTokenize on empty
-    //  data yields zero tokens; JOINMerge handles that correctly.
-    a_dup(u8c, bdata, u8bData(bbuf));
-    a_dup(u8c, odata, u8bData(obuf));
-    a_dup(u8c, tdata, u8bData(tbuf));
-
-    JOINfile bjf = {}, ojf = {}, tjf = {};
-    a_cstr(c_ext, "c");
-    ret = JOINTokenize(&bjf, bdata, c_ext);
-    if (ret == OK) ret = JOINTokenize(&ojf, odata, c_ext);
-    if (ret == OK) ret = JOINTokenize(&tjf, tdata, c_ext);
-    if (ret == OK) ret = JOINMerge(out, &bjf, &ojf, &tjf);
-
-    JOINFree(&bjf);
-    JOINFree(&ojf);
-    JOINFree(&tjf);
-cleanup:
-    u8bUnMap(bbuf);
-    u8bUnMap(obuf);
-    u8bUnMap(tbuf);
-    return ret;
 }
 
 // ---------------------------------------------------------------------
@@ -399,6 +362,7 @@ static ok64 tm_emit_entry(u8 *const *out, u8cs mode, u8cs name,
 static ok64 tm_merge_trees(sha1 *tree_out_sha,
                            sha1 const *base_t, sha1 const *ours_t,
                            sha1 const *theirs_t,
+                           u8cs dir_path,
                            graf_rebase_emit_cb cb, void *ctx,
                            b8 *had_conflict);
 
@@ -448,6 +412,7 @@ static b8 tm_pred_branch(u32 h32, void *ctx) {
 static ok64 tm_merge_blob(sha1 *out_sha,
                           sha1 const *base, sha1 const *ours,
                           sha1 const *theirs,
+                          u8cs filepath,
                           graf_rebase_emit_cb cb, void *ctx,
                           b8 *out_conflict) {
     sane(out_sha && out_conflict);
@@ -489,10 +454,11 @@ static ok64 tm_merge_blob(sha1 *out_sha,
         a_dup(u8c, odata, u8bData(obuf));
         a_dup(u8c, tdata, u8bData(tbuf));
 
-        //  No path → no extension hint; default tokenizer.  Matches
-        //  the prior `GRAFMergeExplicit` behaviour, which hard-coded
-        //  ext="c".  Step 4 threads the real path through.
+        //  Derive extension from `filepath` for the syntax tokenizer.
+        //  Empty when the path has no `.` or the caller didn't thread
+        //  a path through.
         u8cs ext = {};
+        if (!$empty(filepath)) PATHu8sExt(ext, filepath);
 
         ret = WEAVEFromBlob(&bs_o, bdata, ext, 0);
         if (ret == OK) ret = WEAVEFromBlob(&nu_o, odata, ext, TM_RUN_SRC);
@@ -532,6 +498,7 @@ static ok64 tm_merge_blob(sha1 *out_sha,
 static ok64 tm_merge_trees(sha1 *tree_out_sha,
                            sha1 const *base_t, sha1 const *ours_t,
                            sha1 const *theirs_t,
+                           u8cs dir_path,
                            graf_rebase_emit_cb cb, void *ctx,
                            b8 *had_conflict) {
     sane(tree_out_sha && had_conflict);
@@ -621,6 +588,16 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
         sha1 final = {};
         b8 keep = YES;
 
+        //  Compose the child's full relative path: `<dir>/<name>`
+        //  (or just `<name>` at the root, where dir_path is empty).
+        a_path(childp);
+        if (!$empty(dir_path)) {
+            u8bFeed(childp, dir_path);
+            if (*u8csLast(dir_path) != '/') u8bFeed1(childp, '/');
+        }
+        u8bFeed(childp, name);
+        a_dup(u8c, childpath, u8bData(childp));
+
         if (kind == WALK_KIND_DIR && oe && te) {
             //  Recurse into the subtree triplet.  When `be` is absent,
             //  use empty tree sha (gives "addition both sides" semantics
@@ -628,7 +605,7 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
             //  treat oe/te disagreement as a conflict if base absent).
             sha1 bsub = be ? be->sha : zero;
             ret = tm_merge_trees(&final, &bsub, &o_sha, &t_sha,
-                                 cb, ctx, had_conflict);
+                                 childpath, cb, ctx, had_conflict);
             if (ret != OK) goto loop_fail;
             if (*had_conflict) { ret = GRAFCNFL; goto loop_fail; }
         } else if (oe && te) {
@@ -645,7 +622,7 @@ static ok64 tm_merge_trees(sha1 *tree_out_sha,
                 //  Both diverged from base — leaf 3-way merge.
                 b8 cf = NO;
                 ret = tm_merge_blob(&final, &b_sha, &o_sha, &t_sha,
-                                    cb, ctx, &cf);
+                                    childpath, cb, ctx, &cf);
                 if (ret != OK) goto loop_fail;
                 if (cf) { *had_conflict = YES; ret = GRAFCNFL; goto loop_fail; }
             }
@@ -972,11 +949,13 @@ ok64 GRAFRebase(sha1 const *base_old, sha1 const *base_new,
             if (hbuf_owned) u8bFree(hbuf);
         }
 
-        //  3-way tree merge.
+        //  3-way tree merge.  Root call: empty dir_path (the
+        //  recursion appends each entry name as it descends).
         sha1 new_tree = {};
         b8 conflict = NO;
+        u8cs root_path = {};
         ret = tm_merge_trees(&new_tree, &tree_p, &tree_h, &tree_c,
-                             cb, ctx, &conflict);
+                             root_path, cb, ctx, &conflict);
         if (ret == GRAFCNFL || conflict) {
             u8bFree(cbuf);
             ret = GRAFCNFL;

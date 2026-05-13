@@ -150,85 +150,16 @@ static ok64 fetch_blob(u8b into, u8cs path, sha1 const *sha) {
     return GRAFGet(into, u);
 }
 
-//  WEAVE-into-dirty 3-way merge: ours = wt bytes (user edits +
-//  prior PATCH output), base + theirs from keeper.  Per VERBS.md
-//  §PATCH "Weave merge into dirty wt" — prior PATCH bytes look
-//  exactly like user edits, composing transparently.  Falls back
-//  to the keeper-side `fetch_merge` if the wt file can't be
-//  mapped (e.g. add-from-theirs case where wt has nothing yet).
-static ok64 fetch_merge_wt(u8b into, u8cs reporoot, u8cs childpath,
-                           sha1 const *base_sha, sha1 const *thr_sha) {
-    sane(into && base_sha && thr_sha && !$empty(childpath));
-    u8bReset(into);
-
-    a_path(fp);
-    if (SNIFFFullpath(fp, reporoot, childpath) != OK) return PATCHFAIL;
-
-    u8bp wt_map = NULL;
-    ok64 mo = FILEMapRO(&wt_map, $path(fp));
-    if (mo != OK) return mo;
-
-    Bu8 base_buf = {};
-    Bu8 thr_buf  = {};
-    ok64 ba = u8bAllocate(base_buf, PATCH_BLOB_BUF);
-    ok64 ta = u8bAllocate(thr_buf,  PATCH_BLOB_BUF);
-    if (ba != OK || ta != OK) {
-        u8bFree(base_buf); u8bFree(thr_buf); FILEUnMap(wt_map);
-        return PATCHFAIL;
-    }
-    ok64 bo = fetch_blob(base_buf, childpath, base_sha);
-    ok64 to = fetch_blob(thr_buf,  childpath, thr_sha);
-    if (bo != OK || to != OK) {
-        u8bFree(base_buf); u8bFree(thr_buf); FILEUnMap(wt_map);
-        return (bo != OK) ? bo : to;
-    }
-
-    a_dup(u8c, wt_bytes,   u8bDataC(wt_map));
-    a_dup(u8c, base_bytes, u8bDataC(base_buf));
-    a_dup(u8c, thr_bytes,  u8bDataC(thr_buf));
-
-    //  Path-derived extension drives the syntax tokenizer (e.g.
-    //  `c` selects the C lexer; tokens convention strips the dot
-    //  per graf/test/NEIL01.c:215).  Empty when the path has no `.`.
-    u8cs ext = {};
-    {
-        u8cp dot = NULL;
-        $for(u8c, p, childpath) { if (*p == '.') dot = (u8cp)p; }
-        if (dot != NULL && dot + 1 < childpath[1]) {
-            ext[0] = dot + 1;
-            ext[1] = childpath[1];
-        }
-    }
-    JOINfile fb = {}, fo = {}, ft = {};
-    ok64 mo2 = JOINTokenize(&fb, base_bytes, ext);
-    if (mo2 == OK) mo2 = JOINTokenize(&fo, wt_bytes,  ext);
-    if (mo2 == OK) mo2 = JOINTokenize(&ft, thr_bytes, ext);
-    if (mo2 == OK) mo2 = JOINMerge(into, &fb, &fo, &ft);
-    JOINFree(&fb); JOINFree(&fo); JOINFree(&ft);
-    u8bFree(base_buf); u8bFree(thr_buf);
-    FILEUnMap(wt_map);
-    return mo2;
-}
-
-static ok64 fetch_merge(u8b into, u8cs path,
+//  3-way WEAVE merge for a single file given two commit shas plus
+//  the reporoot whose wt may contribute prior PATCH bytes.  Thin
+//  wrapper over `GRAFMergeWtFileTunable` with the foster-aware
+//  edge set patch_walk uses.
+static ok64 fetch_merge(u8b into, u8cs reporoot, u8cs path,
                         sha1 const *ours, sha1 const *thrs) {
     sane(into && ours && thrs && !$empty(path));
-    u8bReset(into);
-
-    sha1hex ha, hb;
-    sha1hexFromSha1(&ha, ours);
-    sha1hexFromSha1(&hb, thrs);
-
-    a_pad(u8, qbuf, 128);
-    u8cs ha_s = {ha.data, ha.data + 40};
-    u8cs hb_s = {hb.data, hb.data + 40};
-    call(u8bFeed,  qbuf, ha_s);
-    call(u8bFeed1, qbuf, '&');
-    call(u8bFeed,  qbuf, hb_s);
-    a_dup(u8c, query, u8bData(qbuf));
-
-    a_uri(u, 0, 0, path, query, 0);
-    return GRAFGet(into, u);
+    return GRAFMergeWtFileTunable(path, reporoot, ours, thrs,
+                                  DAG_EDGE_PARENT | DAG_EDGE_FOSTER,
+                                  NULL, 0, into);
 }
 
 // --- Worktree writes -----------------------------------------------
@@ -385,8 +316,12 @@ static b8 has_conflict_marker(u8cs bytes) {
 //  caller as `LCA(arg_parent_tip, thr)`.
 static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
                        sha1 const *fork, sha1 const *our, sha1 const *thr,
+                       sha1 const *fork_commit,
+                       sha1 const *our_commit,
+                       sha1 const *thr_commit,
                        patch_stats *st) {
-    sane(fork && our && thr && st);
+    sane(fork && our && thr && st &&
+         fork_commit && our_commit && thr_commit);
 
     Bu8 lbuf = {}, obuf = {}, tbuf = {};
     call(u8bAllocate, lbuf, PATCH_TREE_BUF);
@@ -510,7 +445,9 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
             //  have zeroed sha1 and fetch_tree returns empty, which
             //  the next level interprets as "dir absent on that side".
             ret = patch_walk(reporoot, childpath,
-                             &lsub, &osub, &tsub, st);
+                             &lsub, &osub, &tsub,
+                             fork_commit, our_commit, thr_commit,
+                             st);
             continue;
         }
 
@@ -583,66 +520,60 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
             continue;
         }
         if (l && o && t && !o_eq_l && !t_eq_l && !o_eq_t) {
-            //  Both changed differently → 3-way merge.  When wt's
-            //  on-disk bytes for this path differ from cur's
-            //  committed blob (`o->sha`), the user / prior-PATCH
-            //  introduced edits that must compose with theirs:
-            //  switch to GRAFMergeWtFile which folds wt bytes as
-            //  implicit edits on `our` (VERBS.md §PATCH "Weave
-            //  merge into dirty wt", "dirty wt = virtual commit"
-            //  framing).  When wt is clean (= committed blob),
-            //  fall through to plain fetch_merge so the historical
-            //  behaviour for the multi-edit / clamped / token tests
-            //  is preserved — same merge, fewer moving parts.
-            b8 wt_dirty = NO;
+            //  Both changed differently → 3-way WEAVE merge.
+            //
+            //  Two routes, picked by `use_fork_base`:
+            //
+            //    * Squash / merge (`use_fork_base = NO`): drive
+            //      `GRAFMergeWtFileTunable` — each side's per-file
+            //      weave is built from its commit's full ancestor
+            //      closure (PARENT | FOSTER picks up absorbed-via-
+            //      foster history so test 15's "ancestor-skip" case
+            //      dedups cleanly), wt bytes fold onto ours's side
+            //      as an implicit edit, WEAVEMerge then runs.
+            //
+            //    * Cherry-pick / rebase-one (`use_fork_base = YES`):
+            //      drive `GRAFMerge3Bytes` over the three explicit
+            //      blob shas at this leaf (fork = parent(picked),
+            //      ours, theirs).  The fork blob bootstraps spine
+            //      and the WEAVEDiff stamps each side's INS tokens
+            //      with disjoint synthetic ids — same semantic the
+            //      old explicit-fork-base path produced (apply just
+            //      the picked commit's diff onto ours), but through
+            //      WEAVE rather than JOIN.
+            u8cs childext = {};
             {
-                a_path(fp);
-                if (SNIFFFullpath(fp, reporoot, childpath) == OK) {
-                    u8bp m = NULL;
-                    if (FILEMapRO(&m, $path(fp)) == OK && m) {
-                        sha1 disk_sha = {};
-                        KEEPObjSha(&disk_sha, DOG_OBJ_BLOB,
-                                   u8bDataC(m));
-                        FILEUnMap(m);
-                        if (!sha1Eq(&disk_sha, &o->sha)) wt_dirty = YES;
-                    }
+                u8cp dot = NULL;
+                $for(u8c, p, childpath) { if (*p == '.') dot = (u8cp)p; }
+                if (dot != NULL && dot + 1 < childpath[1]) {
+                    childext[0] = dot + 1;
+                    childext[1] = childpath[1];
                 }
             }
-            //  Routing:
-            //
-            //    cherry-pick (`#<sha>`)  → GRAFMergeExplicit (JOIN
-            //         with explicit `parent(thr)` base — apply a
-            //         single commit's diff onto an unrelated `ours`).
-            //    rebase-one (`?br#`)     → GRAFMergeExplicit too,
-            //         using `fork_sha = parent(picked)`.  WEAVE could
-            //         work here (single-commit diff, foster-aware
-            //         ancestor closure stamps tokens with theirs's
-            //         original sc) — but only when ours's history is
-            //         a clean linear chain.  For now JOIN with the
-            //         explicit fork base is enough.
-            //    squash / merge          → fetch_merge (JOIN with
-            //         auto-LCA(our, thr)).  WEAVE-on-ancestor-closure
-            //         is non-deterministic for these shapes when the
-            //         reach set has multi-branch parallelism (e.g.
-            //         test 15's P1 = trunk-T1 + foster-G1, where T1
-            //         and the feature/gizmo chain have no topological
-            //         order between them — different topo tie-breaking
-            //         → different WEAVEDiff replay paths → different
-            //         merged bytes).  Productive WEAVE for these
-            //         shapes needs WEAVEReplay-on-multi-parent (per
-            //         the build_tip_weave_with_ids "case-B" TODO).
             if (st->use_fork_base) {
-                (void)GRAFMergeExplicit(&l->sha, &o->sha,
-                                        &t->sha, mbuf);
-            } else if (wt_dirty) {
-                ok64 wmo = GRAFMergeWtFile(childpath, reporoot,
-                                           our, thr, mbuf);
-                if (wmo != OK) {
-                    u8bReset(mbuf);
-                    (void)fetch_merge(mbuf, childpath, our, thr);
-                }
+                Bu8 bbuf = {}, obuf = {}, tbuf = {};
+                (void)u8bMap(bbuf, PATCH_BLOB_BUF);
+                (void)u8bMap(obuf, PATCH_BLOB_BUF);
+                (void)u8bMap(tbuf, PATCH_BLOB_BUF);
+                u8 bt = 0, ot = 0, tt = 0;
+                (void)KEEPGetExact(&KEEP, &l->sha, bbuf, &bt);
+                (void)KEEPGetExact(&KEEP, &o->sha, obuf, &ot);
+                (void)KEEPGetExact(&KEEP, &t->sha, tbuf, &tt);
+                a_dup(u8c, bdata, u8bData(bbuf));
+                a_dup(u8c, odata, u8bData(obuf));
+                a_dup(u8c, tdata, u8bData(tbuf));
+                (void)GRAFMerge3Bytes(bdata, odata, tdata,
+                                      childext, mbuf);
+                u8bUnMap(bbuf);
+                u8bUnMap(obuf);
+                u8bUnMap(tbuf);
             } else {
-                (void)fetch_merge(mbuf, childpath, our, thr);
+                (void)fork_commit;
+                (void)GRAFMergeWtFileTunable(childpath, reporoot,
+                                             our_commit, thr_commit,
+                                             DAG_EDGE_PARENT |
+                                                 DAG_EDGE_FOSTER,
+                                             NULL, 0, mbuf);
             }
             a_dup(u8c, bytes, u8bData(mbuf));
             b8 conflict = has_conflict_marker(bytes);
@@ -690,8 +621,14 @@ static ok64 patch_walk(u8cs reporoot, u8cs dir_path,
             continue;
         }
         if (!l && o && t && !o_eq_t) {
-            //  Both added the same path, different content → merge.
-            (void)fetch_merge(mbuf, childpath, our, thr);
+            //  Both added the same path, different content → 3-way
+            //  merge with no common base.  Same WEAVE pipeline as
+            //  modify-modify; the absent fork side becomes an empty
+            //  baseline that the closure walk naturally produces.
+            (void)GRAFMergeWtFileTunable(childpath, reporoot,
+                                         our_commit, thr_commit,
+                                         DAG_EDGE_PARENT | DAG_EDGE_FOSTER,
+                                         NULL, 0, mbuf);
             a_dup(u8c, bytes, u8bData(mbuf));
             b8 conflict = has_conflict_marker(bytes);
             ok64 wo = write_blob(reporoot, childpath,
@@ -1511,7 +1448,9 @@ ok64 PATCHApply(u8cs reporoot, uricp u) {
     patch_stats st = { .ts = ts, .use_fork_base = explicit_fork };
     u8cs root = {NULL, NULL};   // empty dir_path → root tree
     call(patch_walk, reporoot, root,
-         &fork_sha, &our_sha, &thr_sha, &st);
+         &fork_sha, &our_sha, &thr_sha,
+         &fork_sha, &our_sha, &thr_sha,
+         &st);
 
     //  Append a `patch` ULOG row.  The URI shape encodes the op,
     //  the `<theirs>` slot always holds the resolved 40-hex sha:
@@ -1638,7 +1577,7 @@ ok64 PATCHApplyFile(u8cs reporoot, u8cs filepath,
 
     Bu8 mbuf = {};
     call(u8bAllocate, mbuf, PATCH_BLOB_BUF);
-    ok64 mo = fetch_merge(mbuf, filepath, &our_sha, &thr_sha);
+    ok64 mo = fetch_merge(mbuf, reporoot, filepath, &our_sha, &thr_sha);
     if (mo != OK) { u8bFree(mbuf); return mo; }
     a_dup(u8c, bytes, u8bData(mbuf));
     b8 conflict = has_conflict_marker(bytes);

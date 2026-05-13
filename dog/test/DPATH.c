@@ -33,15 +33,15 @@ static const DPATHCase DPATH_CASES[] = {
     {"__init__",      OK, "__init__"},
     {"_",             OK, "_"},
 
-    // --- Good: dotfiles (not .git or .dogs) ---
+    // --- Good: dotfiles (not .git or .be) ---
     {".bashrc",       OK, ".bashrc"},
     {".config",       OK, ".config"},
     {".gitignore",    OK, ".gitignore"},
     {".github",       OK, ".github"},
     {".gitmodules",   OK, ".gitmodules"},
-    {".dogfood",      OK, ".dogfood"},
+    {".beagle",       OK, ".beagle"},
     {".gita",         OK, ".gita"},
-    {".dogss",        OK, ".dogss"},
+    {".bes",          OK, ".bes"},
     {"...",            OK, "..."},
     {"....git",       OK, "....git"},
 
@@ -65,11 +65,11 @@ static const DPATHCase DPATH_CASES[] = {
     {".giT",          DPATHBAD, NULL},
     {".GiT",          DPATHBAD, NULL},
 
-    // --- Bad: .dogs (case-insensitive) ---
-    {".dogs",         DPATHBAD, NULL},
-    {".DOGS",         DPATHBAD, NULL},
-    {".Dogs",         DPATHBAD, NULL},
-    {".dOgS",         DPATHBAD, NULL},
+    // --- Bad: .be (case-insensitive) ---
+    {".be",           DPATHBAD, NULL},
+    {".BE",           DPATHBAD, NULL},
+    {".Be",           DPATHBAD, NULL},
+    {".bE",           DPATHBAD, NULL},
 
     // --- Bad: slash in name ---
     {"a/b",           DPATHBAD, NULL},

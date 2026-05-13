@@ -1,7 +1,14 @@
-//  GET: URI-driven deterministic blob merge.
+//  GET: URI-driven single-tip blob/tree READ.
 //
-//  `path?sha1&sha2&...&shaN` → weave-merged bytes appended to `into`.
-//  See graf/GET.md for the full surface.
+//  `path?<sha>`   → blob bytes at commit `<sha>`.
+//  `dir/?<sha>`   → tree object body at commit `<sha>`.
+//  Multi-tip merge URIs (`path?A&B...`) are retired — merge is PATCH
+//  territory.  Callers use `GRAFMergeWtFileTunable` directly.
+//
+//  This file also hosts the WEAVE-based merge helpers
+//  (`GRAFMergeWtFile`, `GRAFMergeWtFileTunable`, `GRAFMerge3Bytes`)
+//  that PATCH / REBASE drive.  Layered here for shared use of
+//  `build_tip_weave_tunable` and `emit_alive_bytes`.
 //
 #include "GRAF.h"
 
@@ -9,7 +16,6 @@
 
 #include "BLOB.h"
 #include "DAG.h"
-#include "JOIN.h"
 #include "WEAVE.h"
 
 #include "abc/FILE.h"
@@ -247,70 +253,6 @@ static b8 merge_id_set_has(u32 in, void *vctx) {
     return NO;
 }
 
-//  3-way JOIN merge keyed off the DAG LCA: tokenise base/ours/theirs
-//  blobs and call JOINMerge, which inlines `>>>>theirs||||ours<<<<`
-//  markers on divergent inserts.  When the LCA isn't indexed (fresh
-//  import, unrelated histories), base degenerates to empty and JOIN
-//  treats the merge as a pair of independent inserts.
-static ok64 get_merge_2way(u8b into, u8cs path, get_tip const *tips) {
-    sane(into && tips);
-
-    u8cs ext = {};
-    PATHu8sExt(ext, path);
-
-    u64 ours_tip   = tips[0].h40;
-    u64 theirs_tip = tips[1].h40;
-    u64 base_h     = get_lca(ours_tip, theirs_tip);
-
-    Bu8 base_buf = {}, ours_buf = {}, theirs_buf = {};
-    ok64 ret = OK;
-    if ((ret = u8bMap(base_buf,   GET_BLOB_MAX)) != OK) return ret;
-    if ((ret = u8bMap(ours_buf,   GET_BLOB_MAX)) != OK) {
-        u8bUnMap(base_buf); return ret;
-    }
-    if ((ret = u8bMap(theirs_buf, GET_BLOB_MAX)) != OK) {
-        u8bUnMap(base_buf); u8bUnMap(ours_buf); return ret;
-    }
-
-    if (base_h != 0)
-        (void)GRAFBlobAtCommit(base_buf, &KEEP, base_h, path);
-    (void)GRAFBlobAtCommit(ours_buf,   &KEEP, ours_tip,   path);
-    (void)GRAFBlobAtCommit(theirs_buf, &KEEP, theirs_tip, path);
-
-    size_t on = u8bDataLen(ours_buf);
-    size_t tn = u8bDataLen(theirs_buf);
-    if (on == 0 && tn == 0) { ret = GETFAIL; goto cleanup; }
-    if (on == 0) {
-        a_dup(u8c, td, u8bData(theirs_buf));
-        ret = u8bFeed(into, td);
-        goto cleanup;
-    }
-    if (tn == 0) {
-        a_dup(u8c, od, u8bData(ours_buf));
-        ret = u8bFeed(into, od);
-        goto cleanup;
-    }
-
-    a_dup(u8c, bdata, u8bData(base_buf));
-    a_dup(u8c, odata, u8bData(ours_buf));
-    a_dup(u8c, tdata, u8bData(theirs_buf));
-
-    JOINfile bjf = {}, ojf = {}, tjf = {};
-    ret = JOINTokenize(&bjf, bdata, ext);
-    if (ret == OK) ret = JOINTokenize(&ojf, odata, ext);
-    if (ret == OK) ret = JOINTokenize(&tjf, tdata, ext);
-    if (ret == OK) ret = JOINMerge(into, &bjf, &ojf, &tjf);
-    JOINFree(&bjf);
-    JOINFree(&ojf);
-    JOINFree(&tjf);
-
-cleanup:
-    u8bUnMap(theirs_buf);
-    u8bUnMap(ours_buf);
-    u8bUnMap(base_buf);
-    return ret;
-}
-
 //  Fold the wt-on-disk bytes for `path` (relative to `reporoot`) into
 //  the weave `cur` as a final WEAVE_WT_SRC layer, writing the result
 //  into `next` and reporting via `*used_next` whether the fold ran
@@ -355,7 +297,9 @@ ok64 GRAFMergeWtFileTunable(u8cs path, u8cs reporoot,
                             u32 edges,
                             u64 const *skip_hl, u32 nskip,
                             u8b out) {
-    sane($ok(path) && $ok(reporoot) && base && tgt && out);
+    //  Empty reporoot is allowed — callers that don't have a wt
+    //  (keeper-side merges) skip the wt-fold layer entirely.
+    sane($ok(path) && base && tgt && out);
     u8bReset(out);
 
     u64 base_h40 = WHIFFHashlet60(base);
@@ -440,6 +384,71 @@ ok64 GRAFMergeWtFile(u8cs path, u8cs reporoot,
     //  with `parent | foster` to handle absorbed-via-foster history.
     return GRAFMergeWtFileTunable(path, reporoot, base, tgt,
                                   DAG_EDGE_PARENT, NULL, 0, out);
+}
+
+// --- Blob-only 3-way WEAVE merge ----------------------------------
+//
+//  Three-way merge from raw blob bytes (no keeper / no DAG walk).
+//  Pipeline:  WEAVEFromBlob ×3 → WEAVEDiff ×2 → WEAVEMerge →
+//  WEAVEEmitMerged.  Marker shape is the WEAVE convention
+//  (`<<<<` / `||||` / `>>>>`), with the 1/4-line realignment pass
+//  applied automatically by WEAVEEmitMerged.
+//
+//  Empty `base` is allowed (no common ancestor); empty `ours` or
+//  `theirs` short-circuits to the other side's bytes.  `out` is
+//  reset on entry.
+
+#define MERGE3_BASE_SRC   0u           // spine (WEAVEEmitMerged: in==0)
+#define MERGE3_OURS_SRC   0xA5A5A5A5u
+#define MERGE3_THEIRS_SRC 0x5A5A5A5Au
+
+static b8 merge3_pred(u32 in, void *vctx) {
+    return in == *(u32 *)vctx;
+}
+
+ok64 GRAFMerge3Bytes(u8cs base, u8cs ours, u8cs theirs,
+                     u8cs ext, u8b out) {
+    sane(out);
+    u8bReset(out);
+
+    //  Empty-side degeneracies — match get_merge_2way's prior shape.
+    if ($empty(ours) && $empty(theirs)) return OK;
+    if ($empty(ours))  return u8bFeed(out, theirs);
+    if ($empty(theirs)) return u8bFeed(out, ours);
+
+    weave wbase = {}, wours_n = {}, wthrs_n = {};
+    weave wours = {}, wthrs = {}, wmerge = {};
+    ok64 ret = OK;
+    if ((ret = WEAVEInit(&wbase))   != OK) return ret;
+    if ((ret = WEAVEInit(&wours_n)) != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wthrs_n)) != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wours))   != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wthrs))   != OK) goto cleanup;
+    if ((ret = WEAVEInit(&wmerge))  != OK) goto cleanup;
+
+    //  Base may be empty: WEAVEFromBlob on empty data yields a
+    //  zero-token weave, which WEAVEDiff handles as "everything is
+    //  INS on the nu side".
+    if ((ret = WEAVEFromBlob(&wbase,   base,   ext, MERGE3_BASE_SRC)) != OK) goto cleanup;
+    if ((ret = WEAVEFromBlob(&wours_n, ours,   ext, MERGE3_BASE_SRC)) != OK) goto cleanup;
+    if ((ret = WEAVEFromBlob(&wthrs_n, theirs, ext, MERGE3_BASE_SRC)) != OK) goto cleanup;
+    if ((ret = WEAVEDiff(&wours, &wbase, &wours_n, MERGE3_OURS_SRC))   != OK) goto cleanup;
+    if ((ret = WEAVEDiff(&wthrs, &wbase, &wthrs_n, MERGE3_THEIRS_SRC)) != OK) goto cleanup;
+    if ((ret = WEAVEMerge(&wmerge, &wours, &wthrs))                    != OK) goto cleanup;
+
+    u32 ours_src = MERGE3_OURS_SRC, theirs_src = MERGE3_THEIRS_SRC;
+    WEAVEsetfn preds[2] = { merge3_pred, merge3_pred };
+    void *ctxs[2]       = { &ours_src, &theirs_src };
+    ret = WEAVEEmitMerged(&wmerge, preds, ctxs, 2, out);
+
+cleanup:
+    WEAVEFree(&wmerge);
+    WEAVEFree(&wthrs);
+    WEAVEFree(&wours);
+    WEAVEFree(&wthrs_n);
+    WEAVEFree(&wours_n);
+    WEAVEFree(&wbase);
+    return ret;
 }
 
 // --- Weave-replay helpers: shared by N-tip union and 2-way merge ---
@@ -614,41 +623,23 @@ static ok64 emit_alive_bytes(u8b into, weave const *w) {
     done;
 }
 
-static ok64 get_weave_union(u8b into, u8cs path,
-                            get_tip const *tips, u32 ntips) {
-    sane(into && ntips > 0);
-    u8cs ext = {};
-    PATHu8sExt(ext, path);
 
-    u64 tip_hs[GET_MAX_TIPS] = {};
-    for (u32 i = 0; i < ntips; i++) tip_hs[i] = tips[i].h40;
-
-    weave w = {};
-    call(WEAVEInit, &w);
-    ok64 r = build_tip_weave(&w, path, ext, tip_hs, ntips);
-    if (r == OK) r = emit_alive_bytes(into, &w);
-    WEAVEFree(&w);
-    return r;
-}
-
-// --- Resolve commit_h40 + dir-path → tree sha ---
+// --- Resolve commit_h40 + dir-path → tree object body ---
 //
 //  Mirrors GRAFBlobAtCommit but stops on the last path segment (or
-//  the root tree if `path` is empty) instead of resolving a blob.
-//  `path` is the repo-relative dir path with no trailing '/'.
-static ok64 get_tree_at(sha1 *tree_out, keeper *k,
-                        u64 commit_h40, u8cs path) {
-    sane(tree_out && k);
+//  the root tree if `path` is empty) instead of recursing into a
+//  blob.  Emits the tree object's raw body into `into`.
+static ok64 get_tree_at(u8b into, keeper *k, u64 commit_h40, u8cs path) {
+    sane(into && k);
 
     Bu8 cbuf = {};
     call(u8bAllocate, cbuf, 1UL << 20);
     u8 ct = 0;
-    ok64 o = KEEPGet(k, commit_h40,
-                     DAG_H60_HEXLEN, cbuf, &ct);
+    ok64 o = KEEPGet(k, commit_h40, DAG_H60_HEXLEN, cbuf, &ct);
     if (o != OK || ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); return KEEPNONE; }
 
     sha1 cur = {};
-    b8 got = NO;
+    b8 got_tree = NO;
     {
         a_dup(u8c, scan, u8bDataC(cbuf));
         u8cs field = {}, value = {};
@@ -656,201 +647,47 @@ static ok64 get_tree_at(sha1 *tree_out, keeper *k,
             if (u8csEmpty(field)) break;
             if (u8csEq(field, GIT_FIELD_TREE) && u8csLen(value) >= 40) {
                 DAGsha1FromHex(&cur, (char const *)value[0]);
-                got = YES;
+                got_tree = YES;
                 break;
             }
         }
     }
     u8bFree(cbuf);
-    if (!got) return KEEPNONE;
+    if (!got_tree) return KEEPNONE;
 
-    //  Descend each non-empty segment.  Empty `path` = root tree.
+    //  Walk into `path` one segment at a time.  Empty path = root tree.
     u8cs rest = {path[0], path[1]};
     while (!$empty(rest)) {
         u8cp slash = rest[0];
         while (slash < rest[1] && *slash != '/') slash++;
         u8cs name = {rest[0], slash};
         if (!$empty(name)) {
-            call(GRAFTreeStep, k, &cur, name);
+            ok64 s = GRAFTreeStep(k, &cur, name);
+            if (s != OK) return s;
         }
         rest[0] = (slash < rest[1]) ? slash + 1 : slash;
     }
 
-    *tree_out = cur;
-    done;
-}
-
-// --- Union-merge of N trees at `path`, emits git-tree-format bytes ---
-//
-//  For each entry name seen in any tip:
-//    - all present tips agree on sha       → pass-through
-//    - present in exactly one tip           → pass-through
-//    - disagreement                         → recurse via GRAFGet
-//  Mode ties broken by first present tip.  Tree / blob kind carried
-//  from the first present tip that marks it as dir.  Output entry
-//  order is bytewise ascending by name (deterministic; note it is
-//  close to but NOT identical to git's `<name>` + implicit-slash
-//  canonical sort — see graf/GET.md).
-
-typedef struct {
-    u8cs name;
-    u8cs mode[GET_MAX_TIPS];
-    sha1 sha[GET_MAX_TIPS];
-    b8   present[GET_MAX_TIPS];
-    b8   any_dir;
-} get_tree_rec;
-
-static int get_name_cmp(u8cs a, u8cs b) {
-    size_t la = $len(a), lb = $len(b);
-    size_t ml = la < lb ? la : lb;
-    int c = (ml == 0) ? 0 : memcmp(a[0], b[0], ml);
-    if (c != 0) return c;
-    if (la < lb) return -1;
-    if (la > lb) return 1;
-    return 0;
-}
-
-static ok64 get_tree_merge(u8b into, u8cs path,
-                           get_tip const *tips, u32 ntips) {
-    sane(into && tips && ntips > 0);
-
-    //  Resolve each tip's tree sha at `path`.  Tips lacking the
-    //  path (absent dir on a branch) drop out quietly.
-    sha1 tree_shas[GET_MAX_TIPS] = {};
-    b8   tip_has[GET_MAX_TIPS] = {};
-    u32  tips_present = 0;
-    for (u32 i = 0; i < ntips; i++) {
-        ok64 o = get_tree_at(&tree_shas[i], &KEEP, tips[i].h40, path);
-        if (o == OK) { tip_has[i] = YES; tips_present++; }
+    Bu8 tbuf = {};
+    call(u8bAllocate, tbuf, 1UL << 20);
+    u8 ot = 0;
+    ok64 ko = KEEPGetExact(k, &cur, tbuf, &ot);
+    if (ko == OK && ot == DOG_OBJ_TREE) {
+        a_dup(u8c, tb, u8bData(tbuf));
+        ko = u8bFeed(into, tb);
+    } else if (ko == OK) {
+        ko = KEEPFAIL;
     }
-    if (tips_present == 0) return KEEPNONE;
-
-    Bu8 arena = {};
-    call(u8bMap, arena, GET_TREE_ARENA);
-
-    get_tree_rec *recs = calloc(GET_TREE_MAX_ENTRIES, sizeof(*recs));
-    if (!recs) { u8bUnMap(arena); return GETFAIL; }
-    u32 nrec = 0;
-    ok64 ret = OK;
-
-    for (u32 ti = 0; ti < ntips && ret == OK; ti++) {
-        if (!tip_has[ti]) continue;
-
-        Bu8 tbuf = {};
-        if (u8bAllocate(tbuf, 1UL << 20) != OK) continue;
-        u8 otype = 0;
-        if (KEEPGetExact(&KEEP, &tree_shas[ti], tbuf, &otype) != OK
-            || otype != DOG_OBJ_TREE) {
-            u8bFree(tbuf);
-            continue;
-        }
-
-        u8cs body = {u8bDataHead(tbuf), u8bIdleHead(tbuf)};
-        u8cs file = {}, esha = {};
-        while (GITu8sDrainTree(body, file, esha, NULL) == OK) {
-            u8cs scan = {file[0], file[1]};
-            if (u8csFind(scan, ' ') != OK) continue;
-            u8cs mode_s = {file[0], scan[0]};
-            u8cs name_s = {scan[0] + 1, file[1]};
-            if ($empty(name_s) || u8csLen(esha) != 20) continue;
-
-            get_tree_rec *r = NULL;
-            for (u32 j = 0; j < nrec; j++) {
-                if (get_name_cmp(recs[j].name, name_s) == 0) {
-                    r = &recs[j]; break;
-                }
-            }
-            if (!r) {
-                if (nrec >= GET_TREE_MAX_ENTRIES) continue;
-                r = &recs[nrec++];
-                if (u8bIdleLen(arena) < $len(name_s)) { nrec--; continue; }
-                u8p nbase = u8bIdleHead(arena);
-                (void)u8bFeed(arena, name_s);
-                u8p nend = u8bIdleHead(arena);
-                r->name[0] = nbase;
-                r->name[1] = nend;
-            }
-            if (u8bIdleLen(arena) < $len(mode_s)) continue;
-            u8p mbase = u8bIdleHead(arena);
-            (void)u8bFeed(arena, mode_s);
-            u8p mend = u8bIdleHead(arena);
-            r->mode[ti][0] = mbase;
-            r->mode[ti][1] = mend;
-            r->present[ti] = YES;
-            (void)sha1Drain(esha, &r->sha[ti]);
-            //  Git tree mode: "40000" for subtrees, "1XXXXX" for
-            //  blobs/symlinks, "160000" for gitlinks.  '4' prefix ⇒
-            //  dir.
-            if (mbase < mend && *mbase == '4') r->any_dir = YES;
-        }
-        u8bFree(tbuf);
-    }
-
-    //  Sort indices by name bytewise.
-    u32 *idx = calloc(nrec ? nrec : 1, sizeof(u32));
-    if (!idx) { free(recs); u8bUnMap(arena); return GETFAIL; }
-    for (u32 i = 0; i < nrec; i++) idx[i] = i;
-    for (u32 i = 1; i < nrec; i++) {
-        u32 v = idx[i];
-        u32 j = i;
-        while (j > 0 &&
-               get_name_cmp(recs[idx[j - 1]].name, recs[v].name) > 0) {
-            idx[j] = idx[j - 1];
-            j--;
-        }
-        idx[j] = v;
-    }
-
-    for (u32 ii = 0; ii < nrec && ret == OK; ii++) {
-        get_tree_rec *r = &recs[idx[ii]];
-        u32 present_tips[GET_MAX_TIPS];
-        u32 npres = 0;
-        for (u32 ti = 0; ti < ntips; ti++)
-            if (r->present[ti]) present_tips[npres++] = ti;
-        if (npres == 0) continue;
-
-        b8 agree = YES;
-        for (u32 k = 1; k < npres; k++) {
-            if (!sha1Eq(&r->sha[present_tips[0]],
-                        &r->sha[present_tips[k]])) {
-                agree = NO; break;
-            }
-        }
-
-        sha1 final_sha = r->sha[present_tips[0]];
-        u8cs final_mode = {
-            r->mode[present_tips[0]][0],
-            r->mode[present_tips[0]][1],
-        };
-
-        if (!agree) {
-            //  Conflicting child: the merged content exists only as
-            //  bytes graf can reproduce on demand (`GRAFGet <child
-            //  URI>`) — it has no object in any store.  Emit a
-            //  zero sha to flag the entry as unresolvable rather
-            //  than a fake `sha1(merged-bytes)` that no keeper can
-            //  dereference.
-            memset(final_sha.data, 0, sizeof(final_sha.data));
-        }
-
-        //  Emit "<mode> <name>\0<20-byte sha>" into `into`.
-        ret = u8bFeed(into, final_mode);
-        if (ret == OK) ret = u8bFeed1(into, ' ');
-        if (ret == OK) ret = u8bFeed(into, r->name);
-        if (ret == OK) ret = u8bFeed1(into, 0);
-        if (ret == OK) {
-            u8cs sb = {final_sha.data, final_sha.data + 20};
-            ret = u8bFeed(into, sb);
-        }
-    }
-
-    free(idx);
-    free(recs);
-    u8bUnMap(arena);
-    return ret;
+    u8bFree(tbuf);
+    return ko;
 }
 
 // --- Public entry ---
+//
+//  Single-tip blob/tree read.  Multi-tip merge URIs (`path?A&B...`)
+//  are no longer accepted — merge is PATCH territory.  Callers in
+//  need of a 3-way merge use `GRAFMergeWtFileTunable` (DAG-aware,
+//  takes commit shas) directly.
 
 ok64 GRAFGet(u8b into, u8csc uri) {
     sane(into && uri);
@@ -863,28 +700,14 @@ ok64 GRAFGet(u8b into, u8csc uri) {
     call(get_drain_uri, path, tips, &ntips, GET_MAX_TIPS,
          &is_tree, uri_in);
 
-    if (ntips == 0) return GETNOTIPS;
+    if (ntips == 0)  return GETNOTIPS;
+    if (ntips != 1)  return GETBAD;   // multi-tip merge URIs retired
 
     if (is_tree) {
-        //  Strip the trailing '/' so the path reads as the directory
-        //  name for `get_tree_at` / recursion.  Root-tree URI
-        //  (`/?...` → single '/') collapses to empty path.
+        //  Strip the trailing '/' so the path reads as a dir name.
         if ($len(path) > 0 && path[1][-1] == '/') path[1]--;
-        return get_tree_merge(into, path, tips, ntips);
+        return get_tree_at(into, &KEEP, tips[0].h40, path);
     }
 
-    //  Single-tip identity: skip the DAG walk entirely.
-    if (ntips == 1) {
-        return get_append_blob_at(into, tips[0].h40, path);
-    }
-
-    //  Two-tip: true 3-way merge via JOIN using the DAG LCA as base.
-    //  This is the supported octopus cardinality; larger N falls
-    //  through to the weave-union approximation documented in
-    //  graf/GET.md.
-    if (ntips == 2) {
-        return get_merge_2way(into, path, tips);
-    }
-
-    return get_weave_union(into, path, tips, ntips);
+    return get_append_blob_at(into, tips[0].h40, path);
 }

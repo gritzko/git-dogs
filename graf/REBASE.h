@@ -1,25 +1,21 @@
 #ifndef GRAF_REBASE_H
 #define GRAF_REBASE_H
 
-//  REBASE: linear-history replay primitives for the upcoming POST
-//  rewrite (Stage 2).  Three orthogonal pieces:
+//  REBASE: linear-history replay primitives.  Two orthogonal pieces:
 //
-//    1. GRAFPatchId        — stable u64 hash of a commit's per-file
-//                            diff vs its first parent.  Same logical
-//                            change → same id, regardless of parent /
-//                            date / committer / actual sha.  Used to
-//                            dedup "already cherry-picked" commits
-//                            during replay.
-//    2. GRAFMergeExplicit  — three-way blob merge with the base sha
-//                            supplied directly (bypasses graf's LCA
-//                            walk).  Thin wrapper over JOINMerge.
-//    3. GRAFRebase         — replay loop: walk child_tip → base_old
-//                            via parent chain, replay each commit
-//                            onto a moving HEAD that starts at
-//                            base_new.  Patch-id dedup, conflict
-//                            aborts.  Object emission goes through a
-//                            caller-supplied callback so persistence
-//                            is the caller's call.
+//    1. GRAFPatchId — stable u64 hash of a commit's per-file diff vs
+//                     its first parent.  Same logical change → same
+//                     id, regardless of parent / date / committer /
+//                     actual sha.  Used to dedup "already cherry-
+//                     picked" commits during replay.
+//    2. GRAFRebase  — replay loop: walk child_tip → base_old via
+//                     parent chain, replay each commit onto a moving
+//                     HEAD that starts at base_new.  Internal 3-way
+//                     leaf merges run through WEAVE via
+//                     `GRAFRebaseBlobMerge`.  Patch-id dedup,
+//                     conflict aborts.  Object emission goes through
+//                     a caller-supplied callback so persistence is
+//                     the caller's call.
 //
 //  Linear-branch invariant on the write path: each commit has at most
 //  one parent we care about; merges from imported git history are
@@ -49,17 +45,7 @@ con ok64 GRAFCNFL = 0x41b28f3173d5;   //  3-way merge conflict during rebase
 //  bodies — dedup callers treat 0 as "never matches".
 u64 GRAFPatchId(u8csc commit_body);
 
-// --- Primitive 2: 3-way blob merge with explicit base ---
-
-//  Three-way blob merge with the base sha supplied directly.  Fetches
-//  base/ours/theirs blobs from keeper via KEEPGetExact, tokenizes
-//  each, hands them to JOINMerge.  `out` is reset before use, the
-//  merged bytes are appended, and JOINMerge's conflict markers
-//  surface inline.  Mirrors GRAFGet's blob-mode error handling.
-ok64 GRAFMergeExplicit(sha1 const *base, sha1 const *ours,
-                       sha1 const *theirs, u8 *const *out);
-
-// --- Primitive 3: linear rebase ---
+// --- Primitive 2: linear rebase ---
 
 //  Object-emit callback invoked once per object produced by the
 //  rebase (commits, rebuilt trees, fresh blobs from merges).  Caller

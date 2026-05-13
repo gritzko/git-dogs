@@ -35,7 +35,17 @@ typedef struct {
 } JOINfile;
 
 ok64 JOINTokenize(JOINfile *jf, u8csc data, u8csc ext);
+
+//  DEPRECATED.  3-way merge belongs to WEAVE now — see
+//  `GRAFMerge3Bytes` (raw-bytes WEAVE pipeline, `<<<<…||||…>>>>`
+//  markers, 1/4-line realignment) and `GRAFMergeWtFileTunable`
+//  (DAG-aware, per-side ancestor closures via build_tip_weave_tunable).
+//  Retained only so `graf/test/JOIN01test` can keep characterising the
+//  historic JOIN merge behaviour during the WEAVE migration.  No
+//  production callers; new code MUST NOT add any.
+__attribute__((deprecated("use GRAFMerge3Bytes / GRAFMergeWtFileTunable")))
 ok64 JOINMerge(u8bp out, JOINfile *base, JOINfile *ours, JOINfile *theirs);
+
 void JOINFree(JOINfile *jf);
 
 #endif
