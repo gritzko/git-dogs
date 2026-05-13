@@ -38,7 +38,7 @@ head_hex() {
 # ====================================================================
 echo "=== 1. empty POST refused ==="
 WT="$TMP/wt1"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "hello" > a.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)
@@ -68,7 +68,7 @@ note "empty POST refused; .be/wtlog intact"
 # ====================================================================
 echo "=== 2. non-ff POST refused (unrelated tip) ==="
 WT="$TMP/wt2"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)

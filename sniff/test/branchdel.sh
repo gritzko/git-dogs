@@ -37,7 +37,7 @@ ref_present() {
 # ====================================================================
 echo "=== 1. basic delete + REFS hides tombstone ==="
 WT="$TMP/wt1"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "base" >/dev/null
 sniff put "?feat" >/dev/null
@@ -60,7 +60,7 @@ note "tombstone row recorded in .be/refs"
 # ====================================================================
 echo "=== 2. delete ?<current> refused ==="
 WT="$TMP/wt2"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "base" >/dev/null
 sniff put "?feat" >/dev/null
@@ -81,7 +81,7 @@ note "delete ?feat refused while wt is on feat"
 # ====================================================================
 echo "=== 3. delete ?parent with active descendant refused ==="
 WT="$TMP/wt3"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "base" >/dev/null
 sniff put "?parent" >/dev/null
@@ -109,7 +109,7 @@ note "?parent deletable once descendant tombstoned"
 # ====================================================================
 echo "=== 4. resurrection via post ==="
 WT="$TMP/wt4"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "base" >/dev/null
 sniff put "?feat" >/dev/null

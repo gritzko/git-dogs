@@ -58,7 +58,7 @@ ref_tip() {
 }
 
 WT="$TMP/wt"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 
 # --- step 1: trunk base -----------------------------------------------
 echo "=== 1. base commit on trunk ==="

@@ -64,7 +64,7 @@ parent_of() {
 # ====================================================================
 echo "=== 1. cross-branch post commits on target ==="
 WT="$TMP/wt1"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "trunk base" >/dev/null
 TRUNK_BASE=$(head_hex)
@@ -108,7 +108,7 @@ note "wt switched to feat"
 # ====================================================================
 echo "=== 2. cross-branch non-ff refused ==="
 WT="$TMP/wt2"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "x" > x.txt
 sniff post -m "trunk base" >/dev/null
 sniff put "?feat" >/dev/null              # label feat at trunk's tip

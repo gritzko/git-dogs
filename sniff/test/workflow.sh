@@ -59,7 +59,7 @@ head_hex() {
 # ------------------------------------------------------------------
 echo "=== 1. initial post auto-stages worktree ==="
 D1="$TMP/r1"
-mkdir -p "$D1"; cd "$D1"
+mkdir -p "$D1/.be"; cd "$D1"
 echo "hello" > README.md
 "$SNIFF" post 'initial msg' >/dev/null
 H1=$(head_hex)
@@ -99,7 +99,7 @@ note "README.md restored from $H1"
 # ------------------------------------------------------------------
 echo "=== 3. put a; put b; post ==="
 D3="$TMP/r3"
-mkdir -p "$D3"; cd "$D3"
+mkdir -p "$D3/.be"; cd "$D3"
 echo alpha > a.txt
 echo bravo > b.txt
 

@@ -19,7 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 note() { echo "  - $*"; }
 
 WT="$TMP/wt"
-mkdir -p "$WT/sub"
+mkdir -p "$WT/sub" "$WT/.be"
 cd "$WT"
 echo "a line"     > a.txt
 echo "sub file 1" > sub/s1.txt

@@ -40,7 +40,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 note() { echo "  - $*"; }
 
 WT="$TMP/wt"
-mkdir -p "$WT"
+mkdir -p "$WT/.be"
 cd "$WT"
 
 #  Current commit recorded in .be/wtlog — `?<branch>#<curhash>` shape:

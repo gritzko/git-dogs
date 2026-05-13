@@ -50,7 +50,7 @@ last_row() {
 # ====================================================================
 echo "=== 1. clean cross-branch GET succeeds ==="
 WT="$TMP/wt1"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "a v1" > a.txt
 echo "b v1" > b.txt
 sniff post -m "trunk base" >/dev/null
@@ -68,7 +68,7 @@ note "switched to ?feat (clean)"
 # ====================================================================
 echo "=== 2. cross-branch GET refused on dirty wt ==="
 WT="$TMP/wt2"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "a v1" > a.txt
 echo "b v1" > b.txt
 sniff post -m "trunk base" >/dev/null
@@ -100,7 +100,7 @@ note ".be/wtlog and wt left untouched (all-or-nothing rollback)"
 # ====================================================================
 echo "=== 3. same-branch GET weave-merges dirty overlap ==="
 WT="$TMP/wt3"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "a v1" > a.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)
@@ -142,7 +142,7 @@ note "weave-merged a.txt is reported dirty by sniff status"
 # ====================================================================
 echo "=== 4. same-branch GET ignores untracked-only dirt ==="
 WT="$TMP/wt4"
-mkdir -p "$WT"; cd "$WT"
+mkdir -p "$WT/.be"; cd "$WT"
 echo "a v1" > a.txt
 sniff post -m "v1" >/dev/null
 T1=$(head_hex)

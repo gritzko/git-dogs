@@ -47,7 +47,7 @@ expect_refuse() {
 # ====================================================================
 # Setup: tiny repo with one file committed.
 # ====================================================================
-mkdir -p "$TMP/r"
+mkdir -p "$TMP/r/.be"
 cd "$TMP/r"
 echo "alpha" > a.txt
 "$SNIFF" post -m "init" >/dev/null
