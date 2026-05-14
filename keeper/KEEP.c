@@ -1082,11 +1082,21 @@ static ok64 KEEPGetPacked(keeper *k, u64 val, u8bp out, u8p out_type) {
     result = src;
     if (out_type) *out_type = obj_type;
 
-    // Copy result into caller's output buffer
-    {
-        u8cs content = {result, result + outsz};
-        rc = u8bFeed(out, content);
+    // Copy result into caller's output buffer.  `out` may alias one
+    // of our scratch buffers (k->buf1/buf2/buf3) — callers pass these
+    // in to avoid an extra allocation.  In the cross-file REF_DELTA
+    // arm above we stage the base into k->buf1 (the u8bFeed at line
+    // 1042); when out == k->buf1 the final `result` lives at
+    // k->buf1[0..outsz) but out's idle slot starts past the staged
+    // base bytes, so u8bFeed's memcpy aliases.  Reset out first so
+    // idle resumes at buf[0], then memmove handles the now-degenerate
+    // src==dst overlap (or any other aliased combination).
+    u8bReset(out);
+    if (u8bIdleLen(out) < outsz) {
+        rc = BNOROOM; goto cleanup;
     }
+    memmove(u8bIdleHead(out), result, outsz);
+    u8bFed(out, outsz);
 
 cleanup:
     return rc;
