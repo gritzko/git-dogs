@@ -107,7 +107,7 @@ static b8 sniff_opened_keep = NO;
 //  `wt_root` is the wt path (where `.be/` lives).
 static ok64 sniff_write_repo_row(u8cs wt_root) {
     sane(SNIFF.h);
-    //  Compose `file:///<wt_root>/.be/` via URI component fields;
+    //  Compose `file:<wt_root>/.be/` via URI component fields;
     //  ULOGAppend serializes through URIutf8Feed.
     a_path(pathbuf, wt_root, DOG_BE_S);
     //  URI path for a directory carries a trailing slash.
@@ -177,7 +177,7 @@ ok64 SNIFFOpen(home *h, b8 rw) {
     }
 
     //  Row-0 `repo` anchor.  Bootstrap on a fresh log (writes the
-    //  colocated default `file:///<wt>/.be/`); honour an existing
+    //  colocated default `file:<wt>/.be/`); honour an existing
     //  anchor for secondary worktrees by redirecting h->root to the
     //  store before keeper opens.
     if (ULOGCount(s->log_idx) == 0) {

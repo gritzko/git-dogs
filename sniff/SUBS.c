@@ -11,6 +11,7 @@
 #include "abc/PATH.h"
 #include "abc/PRO.h"
 #include "abc/RON.h"
+#include "abc/URI.h"
 #include "dog/HOME.h"
 #include "keeper/KEEP.h"
 #include "keeper/WIRE.h"
@@ -271,40 +272,51 @@ ok64 SNIFFSubsSynth(u8bp out, u8cs paths, u8cs urls) {
 // --- SubMount: recursive `be get` driver ------------------------------
 
 //  Write a one-row ULOG file at `<wt>/<path>/.be`:
-//      <ron60-now>\trepo\tfile://<parent_root>/.be/\n
+//      <ron60-now>\trepo\tfile:<parent_root>/.be/\n
 //  Mirrors `sniff_write_repo_row` (sniff/SNIFF.c) and BEGetWorktree's
 //  secondary-wt seed (beagle/BE.cli.c) — same row shape, same `repo`
 //  verb, same trailing slash convention so `home_walk_up` reads it
-//  and dispatches to the secondary path.
+//  and dispatches to the secondary path.  Routed through URIutf8Feed
+//  so the serialization matches the primary writer byte-for-byte;
+//  the hand-rolled string used to emit the three-slash `file:///…`
+//  form, which differs textually from the primary's `file:/…` and
+//  tripped exact-match comparisons.
 static ok64 subs_write_anchor(u8cs sub_be_path, u8cs parent_root) {
     sane($ok(sub_be_path) && $ok(parent_root));
+
+    a_path(pathbuf);
+    call(PATHu8bFeed, pathbuf, parent_root);
+    a_cstr(be_s, ".be");
+    call(PATHu8bPush, pathbuf, be_s);
+    //  Directory URIs carry a trailing slash.
+    call(u8bFeed1, pathbuf, '/');
+    call(PATHu8bTerm, pathbuf);
+
+    uri urow = {};
+    a_cstr(scheme, "file");
+    urow.scheme[0] = scheme[0];
+    urow.scheme[1] = scheme[1];
+    {
+        a_dup(u8c, pb, u8bData(pathbuf));
+        urow.path[0] = pb[0];
+        urow.path[1] = pb[1];
+    }
+
+    a_pad(u8, row, 1024);
+    ron60 ts = RONNow();
+    call(RONutf8sFeed, u8bIdle(row), ts);
+    call(u8bFeed1, row, '\t');
+    ron60 vrepo = SNIFFAtVerbRepo();
+    call(RONutf8sFeed, u8bIdle(row), vrepo);
+    call(u8bFeed1, row, '\t');
+    call(URIutf8Feed, u8bIdle(row), &urow);
+    call(u8bFeed1, row, '\n');
 
     a_path(p);
     call(PATHu8bFeed, p, sub_be_path);
 
     int fd = FILE_CLOSED;
     call(FILECreate, &fd, $path(p));
-
-    a_path(repo_uri);
-    a_cstr(file_pref, "file://");
-    call(u8bFeed, repo_uri, file_pref);
-    call(u8bFeed, repo_uri, parent_root);
-    //  Ensure exactly one '/' before `.be/`.
-    if (u8bDataLen(repo_uri) > 0 &&
-        *(u8bIdleHead(repo_uri) - 1) != '/')
-        call(u8bFeed1, repo_uri, '/');
-    a_cstr(be_s, ".be/");
-    call(u8bFeed, repo_uri, be_s);
-
-    a_pad(u8, row, 1024);
-    ron60 ts = RONNow();
-    call(RONutf8sFeed, u8bIdle(row), ts);
-    call(u8bFeed1, row, '\t');
-    a_cstr(repo_verb, "repo");
-    call(u8bFeed, row, repo_verb);
-    call(u8bFeed1, row, '\t');
-    call(u8bFeed, row, u8bDataC(repo_uri));
-    call(u8bFeed1, row, '\n');
 
     a_dup(u8c, body, u8bData(row));
     ok64 wo = FILEFeedAll(fd, body);
