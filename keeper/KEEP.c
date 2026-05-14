@@ -1834,6 +1834,19 @@ ok64 KEEPResolveTree(keeper *k, uricp target, sha1 *tree_sha) {
 
     sha1 commit_sha = {};
 
+    //  Bare `tree:?` / `tree:./` with no ?ref and no #hex defaults to
+    //  the wt's cur tip — same rule as `be post` / `be patch` reading
+    //  the empty `?branch` slot as cur.  Forwarded by `be` through
+    //  the `--at …#<sha>` flag and parked in h->cur_sha.
+    if (u8csEmpty(target->fragment) && u8csEmpty(target->query) &&
+        k->h != NULL && u8csLen(u8bDataC(k->h->cur_sha)) == 40) {
+        uri synth = *target;
+        a_dup(u8c, cur_hex, u8bDataC(k->h->cur_sha));
+        synth.fragment[0] = cur_hex[0];
+        synth.fragment[1] = cur_hex[1];
+        return KEEPResolveTree(k, (uricp)&synth, tree_sha);
+    }
+
     // Try fragment (#hash) or query (?ref)
     if (!u8csEmpty(target->fragment)) {
         // Fragment = hex SHA prefix

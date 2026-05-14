@@ -94,8 +94,12 @@ static ok64 proj_descend(keeper *k, sha1 const *root_tree, u8cs subpath,
 
     u8cs scan = {};
     u8csMv(scan, subpath);
-    //  Tolerate "." for "this directory".
-    if (u8csLen(scan) == 1 && *scan[0] == '.') { scan[0] = scan[1]; }
+    //  Tolerate "." / "./" for "this directory" — both shapes come
+    //  from the bareword promotion in dog/DOG.c (`be tree:./` vs
+    //  `be tree:.`) and should collapse to the empty-path root walk.
+    if (u8csLen(scan) == 1 && scan[0][0] == '.') scan[0] = scan[1];
+    else if (u8csLen(scan) == 2 && scan[0][0] == '.' && scan[0][1] == '/')
+        scan[0] = scan[1];
 
     while (!$empty(scan)) {
         while (!$empty(scan) && *scan[0] == '/') scan[0]++;
