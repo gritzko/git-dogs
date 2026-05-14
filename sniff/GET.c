@@ -972,9 +972,12 @@ ok64 GETCheckout(u8cs reporoot, u8csc hex, u8csc source) {
     //  Drain the submodule list.  `.gitmodules` is a regular blob in
     //  the parent tree we just materialised, so we read it straight
     //  off disk rather than chasing it through keeper.  Per-sub
-    //  failures are logged (inside SNIFFSubMount) but the overall GET
-    //  still completes — partial materialisation beats a hard refuse
-    //  here.
+    //  failures are logged (inside SNIFFSubMount) and a sticky bit
+    //  flips so the overall GET still completes (partial
+    //  materialisation beats a hard refuse here) but the exit code
+    //  reflects the failure — silent exit-0 used to mask unreachable
+    //  submodule URLs.
+    b8 sub_fail = NO;
     //
     //  `--nosub` (forwarded by `be` and parked in SNIFF.nosub by
     //  sniffcli_inner) short-circuits this loop entirely — useful
@@ -1012,10 +1015,12 @@ ok64 GETCheckout(u8cs reporoot, u8csc hex, u8csc source) {
                 if (u8csLen(hex_s) != 40) continue;
                 ok64 mo = SNIFFSubMount(reporoot, parent_root_s,
                                         path_s, hex_s, gm_blob, argv0);
-                if (mo != OK)
+                if (mo != OK) {
                     fprintf(stderr,
                             "sniff: submodule %.*s mount failed\n",
                             (int)$len(path_s), (char *)path_s[0]);
+                    sub_fail = YES;
+                }
             }
             FILEUnMap(gm_map);
         } else {
@@ -1088,5 +1093,6 @@ ok64 GETCheckout(u8cs reporoot, u8csc hex, u8csc source) {
     }
 
     fprintf(stderr, "sniff: checkout done\n");
+    if (sub_fail) fail(SNIFFFAIL);
     done;
 }
