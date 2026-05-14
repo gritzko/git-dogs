@@ -476,9 +476,11 @@ with the command's ts.
 
 | Form | Effect |
 |---|---|
-| `be put`                | Stage every tracked-and-dirty file (one `put` row per path).  Refuses with `PUTNONE` if no tracked file is dirty. |
+| `be put`                | Stage every tracked-and-dirty file (one `put` row per path).  Also auto-pairs `mis` + `unk` paths of identical blob sha as moves (one `put <old>#<new>` row per pair).  Refuses with `PUTNONE` if no tracked file is dirty and no move pair is found; refuses with `PUTAMBIG` if the auto-pairing isn't strictly 1:1. |
 | `be put file.c`         | Stage one file.  Refuses with `PUTNONE` if missing or already clean.  Re-stamps the file. |
 | `be put src/`           | Stage a subtree: every dirty-tracked file plus every untracked (non-ignored) file under it. |
+| `be put old.c#new.c`    | **Move form**: rename `old.c` → `new.c` on disk via `rename(2)` and write one `put old.c#new.c` row.  Refuses `PUTNOSRC` if src is absent, `PUTDSTBAD` if dst already exists or both sides are on disk, `PUTNODIR` if dst's parent dir doesn't exist (no implicit `mkdir -p`).  If src is already absent **and** dst is already on disk (user ran `mv` themselves), claims the rename by writing the row without re-renaming — used to disambiguate after `PUTAMBIG`. |
+| `be put old.c#sub/`     | Move form, dir target: trailing `/` keeps `basename(old.c)`, so this is `be put old.c#sub/old.c`. |
 | `be put ?./fix`         | `mkdir`-the-branch: `?./fix` ⇒ cur.tip (label-only fork; no synth commit, no wt change). |
 | `be put ?../sib`        | Sibling branch label at the parent's tip. |
 | `be put ?feat/new`      | Absolute leaf `feat/new` under existing `feat`. |

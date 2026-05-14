@@ -286,6 +286,278 @@ static ok64 dir_collect_step(class_step const *step, void *vctx) {
     return OK;
 }
 
+// --- Bare-put move auto-pair ---
+//
+//  After a system `mv` (or any rename outside `be`), the wt has one
+//  tracked path missing on disk and one untracked path of identical
+//  content.  Bare `be put` finds these pairs by sha and writes one
+//  `put <old>#<new>` row per pair.  Refuses PUTAMBIG when the
+//  pairing isn't strictly 1:1 (>1 candidate either direction with
+//  the same content sha), so the user falls back to the explicit
+//  form to disambiguate.  Only file-level moves; CLASS rows whose
+//  step already carries a put/del intent are skipped so the bare
+//  sweep never double-counts a path the user named explicitly.
+//
+//  Cap of PUT_MV_MAX candidates per side keeps the O(nb·nw) pairing
+//  trivial; real workflows have a handful of moves per `be put`.
+
+#define PUT_MV_MAX     256
+#define PUT_MV_BUFSZ   (1UL << 16)   // 64 KiB path-byte arena
+
+typedef struct {
+    u8cs path;     // slice into mv_state.pathbuf (mmap-backed, stable)
+    sha1 sha;
+} mv_entry;
+
+typedef struct {
+    mv_entry base[PUT_MV_MAX];   // tracked paths missing from disk
+    mv_entry wt  [PUT_MV_MAX];   // untracked paths on disk
+    u32      nb, nw;
+    b8       overflow;
+    Bu8      pathbuf;            // owned; freed by put_detect_moves
+} mv_state;
+
+//  Append `path`'s bytes into `pathbuf` and fill `out` with the
+//  interned slice.  On overflow returns the underlying error and
+//  leaves `out` empty (caller drops the entry).
+static ok64 mv_intern(Bu8 pathbuf, u8cs path, u8cs out) {
+    out[0] = u8bIdleHead(pathbuf);
+    ok64 fo = u8bFeed(pathbuf, path);
+    if (fo != OK) { out[0] = NULL; out[1] = NULL; return fo; }
+    out[1] = u8bIdleHead(pathbuf);
+    return OK;
+}
+
+static ok64 mv_collect_cb(class_step const *step, void *vctx) {
+    mv_state *s = (mv_state *)vctx;
+    u8cs path = {step->path[0], step->path[1]};
+    if (u8csEmpty(path))                return OK;
+    if (SNIFFSkipMeta(path))            return OK;
+    //  Skip rows the user already named via explicit put/del; the
+    //  auto-pair only catches the system-`mv` case.
+    if (step->put_rec || step->del_rec) return OK;
+
+    if (step->kind == CLASS_BASE_ONLY) {
+        if (s->nb >= PUT_MV_MAX || step->base_rec == NULL) {
+            if (s->nb >= PUT_MV_MAX) s->overflow = YES;
+            return OK;
+        }
+        //  Tree-ULog rows carry the leaf blob sha in the URI's
+        //  fragment slot (40 hex).  Skip non-leaf rows (gitlinks,
+        //  malformed) without complaint — they can't anchor a move.
+        u8cs frag = {step->base_rec->uri.fragment[0],
+                     step->base_rec->uri.fragment[1]};
+        if (u8csLen(frag) != 40) return OK;
+        sha1 sh = {};
+        a_raw(shb, sh);
+        a_dup(u8c, hex, frag);
+        if (HEXu8sDrainSome(shb, hex) != OK) return OK;
+        u8cs slot = {};
+        if (mv_intern(s->pathbuf, path, slot) != OK) {
+            s->overflow = YES; return OK;
+        }
+        u8csMv(s->base[s->nb].path, slot);
+        s->base[s->nb].sha = sh;
+        s->nb++;
+    } else if (step->kind == CLASS_WT_ONLY) {
+        if (s->nw >= PUT_MV_MAX) { s->overflow = YES; return OK; }
+        u8cs slot = {};
+        if (mv_intern(s->pathbuf, path, slot) != OK) {
+            s->overflow = YES; return OK;
+        }
+        u8csMv(s->wt[s->nw].path, slot);
+        //  sha left zero — filled by mv_hash_wt below.
+        s->nw++;
+    }
+    return OK;
+}
+
+//  Hash each WT_ONLY candidate as a git blob; entries we can't hash
+//  keep their zero sha and won't pair with anything real.
+static void mv_hash_wt(mv_state *s, u8cs reporoot) {
+    for (u32 i = 0; i < s->nw; i++) {
+        a_dup(u8c, rel, s->wt[i].path);
+        a_path(fp);
+        if (SNIFFFullpath(fp, reporoot, rel) != OK) continue;
+        filestat fs = {};
+        if (FILELStat(&fs, $path(fp)) != OK) continue;
+        if (fs.kind == FILE_KIND_LNK) {
+            a_pad(u8, tgt, 4096);
+            if (FILEReadLink(tgt, $path(fp)) != OK) continue;
+            KEEPObjSha(&s->wt[i].sha, DOG_OBJ_BLOB, u8bDataC(tgt));
+        } else if (fs.kind == FILE_KIND_REG) {
+            if (fs.size == 0) {
+                u8cs empty = {NULL, NULL};
+                KEEPObjSha(&s->wt[i].sha, DOG_OBJ_BLOB, empty);
+            } else {
+                u8bp m = NULL;
+                if (FILEMapRO(&m, $path(fp)) != OK) continue;
+                u8cs body = {u8bDataHead(m), u8bIdleHead(m)};
+                KEEPObjSha(&s->wt[i].sha, DOG_OBJ_BLOB, body);
+                FILEUnMap(m);
+            }
+        }
+    }
+}
+
+typedef struct { u32 b_idx, w_idx; } mv_pair;
+
+//  Pair every base candidate against wt candidates by sha equality.
+//  Refuses PUTAMBIG when a base sha matches >1 wt entry (or vice
+//  versa) — the user has to disambiguate via the explicit form.
+//  Output: `pairs[0..*nout)` valid on OK return.
+static ok64 mv_pair_unique(mv_state const *s, mv_pair *pairs, u32 *nout) {
+    *nout = 0;
+    for (u32 i = 0; i < s->nb; i++) {
+        u32 match = UINT32_MAX;
+        u32 nmatch = 0;
+        for (u32 j = 0; j < s->nw; j++) {
+            if (sha1Eq(&s->base[i].sha, &s->wt[j].sha)) {
+                match = j; nmatch++;
+            }
+        }
+        if (nmatch == 0) continue;
+        if (nmatch > 1)  return PUTAMBIG;
+        //  Symmetry: the wt entry must match only this base.
+        u32 base_matches = 0;
+        for (u32 k = 0; k < s->nb; k++) {
+            if (sha1Eq(&s->base[k].sha, &s->wt[match].sha)) base_matches++;
+        }
+        if (base_matches > 1) return PUTAMBIG;
+        pairs[*nout].b_idx = i;
+        pairs[*nout].w_idx = match;
+        (*nout)++;
+    }
+    return OK;
+}
+
+//  Sweep: collect candidates via SNIFFClassify, hash wt-side, pair
+//  1:1 by content sha, emit one `put <old>#<new>` row per pair, and
+//  stamp the dest file with the row's ts so subsequent bare scans
+//  fast-path it via SNIFFAtKnown.  Returns PUTAMBIG without writing
+//  any row when the pairing isn't unique.
+static ok64 put_detect_moves(u8cs reporoot, ron60 *ts_io,
+                             u32 *emitted_io, ron60 verb_put) {
+    sane(ts_io && emitted_io);
+    mv_state s = {};
+    call(u8bMap, s.pathbuf, PUT_MV_BUFSZ);
+    ok64 cr = SNIFFClassify(mv_collect_cb, &s);
+    if (cr != OK)        { u8bUnMap(s.pathbuf); return cr; }
+    if (s.nb == 0 || s.nw == 0) { u8bUnMap(s.pathbuf); return OK; }
+
+    mv_hash_wt(&s, reporoot);
+
+    mv_pair pairs[PUT_MV_MAX];
+    u32 npairs = 0;
+    ok64 po = mv_pair_unique(&s, pairs, &npairs);
+    if (po != OK) { u8bUnMap(s.pathbuf); return po; }
+
+    for (u32 i = 0; i < npairs; i++) {
+        mv_entry const *bb = &s.base[pairs[i].b_idx];
+        mv_entry const *ww = &s.wt  [pairs[i].w_idx];
+        uri urow = {};
+        urow.path[0]     = bb->path[0]; urow.path[1]     = bb->path[1];
+        urow.fragment[0] = ww->path[0]; urow.fragment[1] = ww->path[1];
+        ok64 ao = SNIFFAtAppendAt(*ts_io, verb_put, &urow);
+        if (ao != OK) { u8bUnMap(s.pathbuf); return ao; }
+        a_dup(u8c, dst_rel, ww->path);
+        a_path(dstfp);
+        if (SNIFFFullpath(dstfp, reporoot, dst_rel) == OK)
+            (void)SNIFFAtStampPath(dstfp, *ts_io);
+        (*ts_io)++;
+        (*emitted_io)++;
+    }
+    u8bUnMap(s.pathbuf);
+    done;
+}
+
+// --- Move-form (`be put <old>#<new>`) ---
+//
+//  Path slot = source, fragment slot = dest.  Trailing-slash dest is a
+//  directory target — basename(src) gets appended.  Renames the file
+//  on disk via FILERename and writes one `put` row with URI
+//  `<old>#<final_new>` (fragment carries the resolved dest path, not a
+//  content-locator — see sniff/AT.md §"Move-form put rows").  POST
+//  consumes the row as "drop <old> from new tree, add <final_new>";
+//  status renders it as one `mov` line per pair.
+
+static ok64 put_move(u8cs src_raw, u8cs dst_in_raw, u8cs reporoot,
+                     ron60 *ts_io, u32 *emitted_io, ron60 verb_put) {
+    sane(ts_io && emitted_io);
+
+    if (u8csEmpty(src_raw) || u8csEmpty(dst_in_raw)) return PUTNOSRC;
+    if (SNIFFSkipMeta(src_raw) || SNIFFSkipMeta(dst_in_raw))
+        return PUTMVMETA;
+
+    //  Trailing-slash dest → directory target: append basename(src).
+    //  Compose the final dest in a stack buffer; the resulting bytes
+    //  outlive only this function — SNIFFAtAppendAt serializes the
+    //  URI into the log before returning so the buffer can go away.
+    a_pad(u8, dst_buf, FILE_PATH_MAX_LEN);
+    b8 dst_is_dir = (*u8csLast(dst_in_raw) == '/');
+    if (dst_is_dir) {
+        u8cs src_base = {};
+        PATHu8sBase(src_base, src_raw);
+        if (u8csEmpty(src_base)) return PUTDSTBAD;
+        call(u8bFeed,  dst_buf, dst_in_raw);
+        call(u8bFeed,  dst_buf, src_base);
+    } else {
+        call(u8bFeed,  dst_buf, dst_in_raw);
+    }
+    a_dup(u8c, dst, u8bDataC(dst_buf));
+
+    //  Resolve on-disk paths.
+    a_path(src_fp);
+    if (SNIFFFullpath(src_fp, reporoot, src_raw) != OK) return PUTNOSRC;
+    a_path(dst_fp);
+    if (SNIFFFullpath(dst_fp, reporoot, dst) != OK) return PUTDSTBAD;
+
+    filestat src_fs = {}, dst_fs = {};
+    ok64 src_lo = FILELStat(&src_fs, $path(src_fp));
+    ok64 dst_lo = FILELStat(&dst_fs, $path(dst_fp));
+    b8 src_here = (src_lo == OK);
+    b8 dst_here = (dst_lo == OK);
+
+    //  Two acceptable shapes: (a) rename in flight — src on disk, dst
+    //  free; we perform the rename(2).  (b) claim — user already ran
+    //  `mv` (or similar) before invoking `be put`, so dst already
+    //  carries src's bytes and only the log row is missing.
+    if (src_here && dst_here) return PUTDSTBAD;
+    if (!src_here && !dst_here) return PUTNOSRC;
+    if (src_here && src_fs.kind == FILE_KIND_DIR) return PUTDSTBAD;
+
+    //  Dest parent dir must exist — no mkdir -p.  An empty dir slice
+    //  means dest is at reporoot, which always exists.
+    u8cs dst_dir = {};
+    PATHu8sDir(dst_dir, dst);
+    if (!u8csEmpty(dst_dir)) {
+        a_path(dst_dir_fp);
+        if (SNIFFFullpath(dst_dir_fp, reporoot, dst_dir) != OK)
+            return PUTNODIR;
+        filestat ddir_fs = {};
+        if (FILELStat(&ddir_fs, $path(dst_dir_fp)) != OK ||
+            ddir_fs.kind != FILE_KIND_DIR)
+            return PUTNODIR;
+    }
+
+    //  Perform the rename only when src is still on disk.  Claim
+    //  flow (dst-only) just records the row.
+    if (src_here) {
+        call(FILERename, $path(src_fp), $path(dst_fp));
+    }
+
+    //  Log row: path=src, fragment=final_dst.  Stamp the new file with
+    //  the row's ts so the next bare `be put` fast-paths it.
+    uri urow = {};
+    urow.path[0]     = src_raw[0]; urow.path[1]     = src_raw[1];
+    urow.fragment[0] = dst[0];     urow.fragment[1] = dst[1];
+    call(SNIFFAtAppendAt, *ts_io, verb_put, &urow);
+    (void)SNIFFAtStampPath(dst_fp, *ts_io);
+    (*ts_io)++;
+    (*emitted_io)++;
+    done;
+}
+
 // --- Public API ---
 
 ok64 PUTStage(u32 nuris, uri const *uris) {
@@ -314,9 +586,22 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
         }
         if (bo != OK) return bo;
 
-        //  Re-stamp ts: the latest get/post row's ts.  Files whose
-        //  content matches the baseline get re-stamped to this so the
-        //  next bare put fast-paths them via SNIFFAtKnown.
+        //  Pass 1: auto-pair system-`mv` renames.  Pairs are emitted
+        //  as `put <old>#<new>` rows.  Refuses PUTAMBIG without
+        //  writing anything when the sha pairing isn't 1:1.  Each
+        //  emitted row bumps `ts` so subsequent rows stay strictly
+        //  increasing.
+        u32 mv_emitted = 0;
+        ok64 mo = put_detect_moves(reporoot, &ts, &mv_emitted, verb_put);
+        if (mo != OK) return mo;
+
+        //  Pass 2: tracked-dirty walk.  Re-stamp ts: the latest
+        //  get/post row's ts.  Files whose content matches the
+        //  baseline get re-stamped to this so the next bare put
+        //  fast-paths them via SNIFFAtKnown.  A path the move pass
+        //  emitted a row for is still in the baseline tree but its
+        //  on-disk file is absent — the put_visit_tracked NOENT
+        //  branch returns OK silently, so no spurious dirty rows.
         ron60 base_ts = 0, base_verb = 0;
         uri base_u = {};
         (void)SNIFFAtBaseline(&base_ts, &base_verb, &base_u);
@@ -328,11 +613,12 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
                                put_visit_tracked, &wc);
         if (wc.err != OK) return wc.err;
         if (wo != OK) return wo;
-        if (wc.emitted == 0) {
+        u32 total = wc.emitted + mv_emitted;
+        if (total == 0) {
             fprintf(stderr, "sniff: put: no changes\n");
             return PUTNONE;
         }
-        fprintf(stderr, "sniff: staged %u put row(s)\n", wc.emitted);
+        fprintf(stderr, "sniff: staged %u put row(s)\n", total);
         done;
     }
 
@@ -359,6 +645,26 @@ ok64 PUTStage(u32 nuris, uri const *uris) {
     u32 emitted = 0;
     u32 skipped = 0;
     for (u32 i = 0; i < nuris; i++) {
+        //  Move-form short-circuit: a non-empty fragment alongside a
+        //  non-empty path is `be put <old>#<new>`.  Errors here refuse
+        //  the whole command — moves are explicit user intent, not a
+        //  best-effort sweep, so a bad arg should not slip through to
+        //  the next loop iteration.
+        if (!u8csEmpty(uris[i].fragment) && !u8csEmpty(uris[i].path)) {
+            u8cs mvsrc = {uris[i].path[0],     uris[i].path[1]};
+            u8cs mvdst = {uris[i].fragment[0], uris[i].fragment[1]};
+            //  Strip leading "./" on both sides — mirrors the bareword
+            //  normalisation a few lines down.
+            if ($len(mvsrc) >= 2 && mvsrc[0][0] == '.' && mvsrc[0][1] == '/')
+                mvsrc[0] += 2;
+            if ($len(mvdst) >= 2 && mvdst[0][0] == '.' && mvdst[0][1] == '/')
+                mvdst[0] += 2;
+            ok64 mo = put_move(mvsrc, mvdst, reporoot,
+                               &ts, &emitted, verb_put);
+            if (mo != OK) return mo;
+            continue;
+        }
+
         u8cs raw = {};
         SNIFFAtPathBytes(&uris[i], raw);
         if (u8csEmpty(raw)) continue;

@@ -36,6 +36,13 @@ con ok64 SNIFFNOOP     = 0x1c5d23cf5d8619;     // legacy alias, prefer POSTNONE
 con ok64 CLOCKBAD      = 0x31560c50b28d;
 con ok64 PUTNONE       = 0x1979d5d85ce;
 con ok64 PUTDUP        = 0x65e74d799;     // ref already exists
+//  Move-form (`be put <old>#<new>`) and bare-put auto-pair errors.
+con ok64 PUTNOSRC      = 0x65e75761c6cc;     // src path missing
+con ok64 PUTDSTBAD     = 0x1979d35c74b28d;   // dest exists / kind mismatch / dir absent
+con ok64 PUTNODIR      = 0x65e75760d49b;     // dest parent dir missing (no mkdir -p)
+con ok64 PUTDIRTY      = 0x65e74d49b762;     // explicit dest exists dirty
+con ok64 PUTAMBIG      = 0x65e74a58b490;     // bare auto-pair: >1 sha match either way
+con ok64 PUTMVMETA     = 0x1979d59f58e74a;   // move src/dst inside .be/ or other meta
 con ok64 DELDIRTY      = 0x34e54d49b762;
 con ok64 POSTNONE      = 0x65871d5d85ce;
 con ok64 POSTNOMSG     = 0x65871d5d8c4d;     // can't auto-resolve commit msg
@@ -89,6 +96,12 @@ typedef struct {
                       // dirty-overlay refusal (`--force` on the CLI).
                       // Set in sniffcli_inner AFTER SNIFFOpen (which
                       // zerops the singleton); read by GET.c.  Default NO.
+    b8      prune;    // YES → GET removes untracked (wt-only,
+                      // not in target tree, not gitignored) files
+                      // after the checkout pass.  Companion to
+                      // `--force` for "tree-reset & clean".  Set
+                      // in sniffcli_inner AFTER SNIFFOpen; read by
+                      // GET.c.  Default NO.
     igno    ignores;  // wt-root .gitignore, loaded once at SNIFFOpen
 } sniff;
 

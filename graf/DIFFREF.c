@@ -416,9 +416,15 @@ ok64 GRAFDiffWtTree(keeper *k, u64 base_h40, u8cs base_hex, u8cs reporoot) {
 
 // --- Whole tree, ref vs ref ---------------------------------------
 
-ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
-    sane(k && $ok(from) && $ok(to));
-    (void)reporoot;
+//  Inner worker — every early `call()` returns through here, so the
+//  outer wrapper's cleanup runs on success and on every error path.
+//  Buffers/arenas are caller-owned: the wrapper allocs/maps before
+//  calling, frees/unmaps after, regardless of the inner's outcome.
+static ok64 graf_diff_tree_refs_inner(keeper *k, u8cs from, u8cs to,
+                                      diffref_set *from_set,
+                                      diffref_set *to_set,
+                                      Bu8 old_buf, Bu8 new_buf) {
+    sane(k && from_set && to_set);
 
     // --- 1. Walk `from`, collect ---
     a_pad(u8, fbuf, 256);
@@ -426,11 +432,7 @@ ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
     a_dup(u8c, fdata, u8bData(fbuf));
     uri ftarget = {};
     call(URIutf8Drain, fdata, &ftarget);
-
-    diffref_entry from_entries[DIFFREF_MAX_FILES];
-    diffref_set from_set = {.v = from_entries, .cap = DIFFREF_MAX_FILES};
-    call(u8bAllocate, from_set.arena, DIFFREF_MAX_FILES * DIFFREF_PATH_MAX);
-    diffref_collect_ctx fctx = {.set = &from_set};
+    diffref_collect_ctx fctx = {.set = from_set};
     call(KEEPLsFiles, k, &ftarget, diffref_collect_visit, &fctx);
 
     // --- 2. Walk `to`, collect ---
@@ -439,30 +441,22 @@ ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
     a_dup(u8c, tdata, u8bData(tbuf));
     uri ttarget = {};
     call(URIutf8Drain, tdata, &ttarget);
-
-    diffref_entry to_entries[DIFFREF_MAX_FILES];
-    diffref_set to_set = {.v = to_entries, .cap = DIFFREF_MAX_FILES};
-    call(u8bAllocate, to_set.arena, DIFFREF_MAX_FILES * DIFFREF_PATH_MAX);
-    diffref_collect_ctx tctx = {.set = &to_set};
+    diffref_collect_ctx tctx = {.set = to_set};
     call(KEEPLsFiles, k, &ttarget, diffref_collect_visit, &tctx);
 
-    if (from_set.overflow || to_set.overflow) {
+    if (from_set->overflow || to_set->overflow) {
         fprintf(stderr, "graf: diff-tree: files skipped (>%u limit)\n",
                 (u32)DIFFREF_MAX_FILES);
     }
 
     // --- 3. For each to-entry, diff against matching from-entry ---
-    Bu8 old_buf = {}, new_buf = {};
-    call(u8bMap, old_buf, 16UL << 20);
-    call(u8bMap, new_buf, 16UL << 20);
-
-    for (u32 i = 0; i < to_set.n; i++) {
+    for (u32 i = 0; i < to_set->n; i++) {
         u8cs path = {};
-        u8csMv(path, to_set.v[i].path);
-        diffref_entry *f = diffref_set_find(&from_set, path);
+        u8csMv(path, to_set->v[i].path);
+        diffref_entry *f = diffref_set_find(from_set, path);
 
         // Same sha on both sides → unchanged, skip cheaply.
-        if (f && sha1Eq(&f->sha, &to_set.v[i].sha)) continue;
+        if (f && sha1Eq(&f->sha, &to_set->v[i].sha)) continue;
 
         u8cs old_data = {}, new_data = {};
         if (f) {
@@ -475,7 +469,7 @@ ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
         }
         u8bReset(new_buf);
         u8 nt = 0;
-        if (KEEPGetExact(k, &to_set.v[i].sha, new_buf, &nt) == OK && nt == DOG_OBJ_BLOB) {
+        if (KEEPGetExact(k, &to_set->v[i].sha, new_buf, &nt) == OK && nt == DOG_OBJ_BLOB) {
             a_dup(u8c, new_dup, u8bData(new_buf));
             u8csMv(new_data, new_dup);
         }
@@ -486,14 +480,14 @@ ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
     }
 
     // --- 4. from-only entries (deletions): diff blob vs empty ---
-    for (u32 i = 0; i < from_set.n; i++) {
+    for (u32 i = 0; i < from_set->n; i++) {
         u8cs path = {};
-        u8csMv(path, from_set.v[i].path);
-        if (diffref_set_find(&to_set, path) != NULL) continue;
+        u8csMv(path, from_set->v[i].path);
+        if (diffref_set_find(to_set, path) != NULL) continue;
 
         u8bReset(old_buf);
         u8 ot = 0;
-        if (KEEPGetExact(k, &from_set.v[i].sha, old_buf, &ot) != OK || ot != DOG_OBJ_BLOB)
+        if (KEEPGetExact(k, &from_set->v[i].sha, old_buf, &ot) != OK || ot != DOG_OBJ_BLOB)
             continue;
         a_dup(u8c, old_data, u8bData(old_buf));
         u8cs new_data = {};
@@ -501,10 +495,38 @@ ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
         PATHu8sExt(ext, path);
         GRAFDiff2Layer(path, ext, old_data, new_data);
     }
-
-    u8bUnMap(old_buf);
-    u8bUnMap(new_buf);
-    if (from_set.arena[0]) u8bFree(from_set.arena);
-    if (to_set.arena[0])   u8bFree(to_set.arena);
     done;
+}
+
+ok64 GRAFDiffTreeRefs(keeper *k, u8cs from, u8cs to, u8cs reporoot) {
+    sane(k && $ok(from) && $ok(to));
+    (void)reporoot;
+
+    //  Caller-owned storage so cleanup runs on every error path the
+    //  inner returns through.  Each Bu8 stays zero until its alloc/map
+    //  succeeds; the trailing free/unmap branch on each is gated on
+    //  that — leaks on KEEPLsFiles ⇒ KEEPNONE etc are eliminated.
+    diffref_entry from_entries[DIFFREF_MAX_FILES];
+    diffref_set from_set = {.v = from_entries, .cap = DIFFREF_MAX_FILES};
+    diffref_entry to_entries[DIFFREF_MAX_FILES];
+    diffref_set to_set = {.v = to_entries, .cap = DIFFREF_MAX_FILES};
+    Bu8 old_buf = {}, new_buf = {};
+
+    ok64 ret = u8bAllocate(from_set.arena,
+                           DIFFREF_MAX_FILES * DIFFREF_PATH_MAX);
+    if (ret == OK)
+        ret = u8bAllocate(to_set.arena,
+                          DIFFREF_MAX_FILES * DIFFREF_PATH_MAX);
+    if (ret == OK) ret = u8bMap(old_buf, 16UL << 20);
+    if (ret == OK) ret = u8bMap(new_buf, 16UL << 20);
+    if (ret == OK)
+        ret = graf_diff_tree_refs_inner(k, from, to,
+                                        &from_set, &to_set,
+                                        old_buf, new_buf);
+
+    if (new_buf[0])        u8bUnMap(new_buf);
+    if (old_buf[0])        u8bUnMap(old_buf);
+    if (to_set.arena[0])   u8bFree(to_set.arena);
+    if (from_set.arena[0]) u8bFree(from_set.arena);
+    return ret;
 }

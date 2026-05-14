@@ -51,11 +51,11 @@ static void rm_tmpdir(void) {
 
 typedef struct { u32 n; ron60 verbs[8]; u8 paths[8][32]; u8 lens[8]; } pd_capture;
 
-static ok64 pd_collect(ron60 verb, u8cs path, ron60 ts, void *ctx) {
-    (void)ts;
+static ok64 pd_collect(ulogreccp rec, void *ctx) {
     pd_capture *c = (pd_capture *)ctx;
     if (c->n >= 8) return OK;
-    c->verbs[c->n] = verb;
+    c->verbs[c->n] = rec->verb;
+    u8cs path = {rec->uri.path[0], rec->uri.path[1]};
     u32 l = (u32)$len(path);
     if (l > 32) l = 32;
     memcpy(c->paths[c->n], path[0], l);

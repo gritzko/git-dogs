@@ -487,8 +487,7 @@ ok64 SNIFFAtScanPutDelete(ron60 floor, sniff_at_pd_cb cb, void *ctx) {
         if (o != OK) return o;
         if (rec.ts <= floor) continue;
         if (rec.verb != vput && rec.verb != vdel) continue;
-        a_dup(u8c, path, rec.uri.path);
-        ok64 cr = cb(rec.verb, path, rec.ts, ctx);
+        ok64 cr = cb(&rec, ctx);
         if (cr != OK) return cr;
     }
     done;

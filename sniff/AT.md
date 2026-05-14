@@ -19,7 +19,7 @@ on-disk files are "clean" vs user-edited.
 | `get`    | `?<branch>#<sha>` (or `?<sha>` detached)              | yes |
 | `post`   | `?<branch>#<sha>` (or `?<sha>` detached)              | yes |
 | `patch`  | one of four shapes — see "Patch row shapes" below     | yes |
-| `put`    | `<path>`                                              | yes (the staged file) |
+| `put`    | `<path>`  *or* `<old>#<new>` (move; see below)        | yes (the staged file / move dst) |
 | `delete` | `<path>`                                              | no (file unlinked) |
 | `mod`    | `<path>`  (watch daemon hint — inotify observed edit) | no |
 
@@ -42,6 +42,30 @@ the URI **query** (`?`-side), parsed by `dog/QURY`.  The **fragment**
 (symbol / line / regex / spot).  Never mix SHAs into the fragment: a
 query like `bro ?heads/main#func:foo` only makes sense if the `#`-side
 is reserved for in-tree navigation.
+
+### Move-form put rows
+
+`put` rows carve out one exception to the fragment rule above.  A
+move recorded by `be put <old>#<new>` (or by the bare-put auto-pair
+that detects system `mv`) writes its row as `put <old>#<new>` —
+path slot = source, fragment slot = the resolved dest path (not a
+content-locator).  The trailing-slash dir-target form (`<old>#<dir>/`)
+is expanded to `<dir>/<basename(old)>` at row-write time, so the
+fragment is always the literal final dest.  Consumers see:
+
+  * `POST` (`sniff/POST.c:post_pd_cb`) expands a put-with-fragment
+    row to `del <old>` + `put <new>` intent rows; the merge then
+    drops `<old>` from the new tree and adds `<new>` from the wt.
+  * Status display (`SNIFF.exe.c`) renders the pair as one `mov`
+    line — `<src> -> <dst>` — and suppresses the dest's own
+    `WT_ONLY` step by looking up the wt-mtime against the put
+    row (`status_wt_is_mov_dst`).
+  * `CLASS_pd_cb` preserves the fragment slot when sorting put rows
+    into the merge buffer — without that, status couldn't see the
+    move at all.
+
+Only the `put` verb carries this overload.  `delete`, `get`, `post`,
+`patch`, `mod` keep the fragment as canonical content-locator.
 
 The `mod` rows are advisory: the `sniff watch` daemon appends one
 per file whose mtime drifts out of the ULOG stamp-set, dedup'd by

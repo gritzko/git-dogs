@@ -202,11 +202,15 @@ typedef struct {
     ron60     v_del_emit;
 } pd_walk_ctx;
 
-static ok64 post_pd_cb(ron60 verb, u8cs path, ron60 ts, void *vctx) {
+static ok64 post_pd_cb(ulogreccp src, void *vctx) {
     sane(vctx);
     pd_walk_ctx *w = (pd_walk_ctx *)vctx;
     post_ctx    *c = w->c;
     c->any_pd = YES;
+
+    u8cs path = {src->uri.path[0], src->uri.path[1]};
+    ron60 verb = src->verb;
+    ron60 ts   = src->ts;
 
     //  Trailing-slash paths are dir prefixes; expand against bu/wu now.
     //
@@ -233,6 +237,23 @@ static ok64 post_pd_cb(ron60 verb, u8cs path, ron60 ts, void *vctx) {
                                      w->ig, w->put_unsorted, NULL);
         }
         return OK;
+    }
+
+    //  Move-form put row (`put <old>#<new>`): expand to one del intent
+    //  for the source path and one put intent for the dest path.  The
+    //  classifier then handles each side via its existing rules
+    //  (del + src_base → UNLINK; put + src_wt → ADD).
+    if (verb == w->v_put_filter && !u8csEmpty(src->uri.fragment)) {
+        u8cs dst = {src->uri.fragment[0], src->uri.fragment[1]};
+        uri u_src = {};
+        u_src.path[0] = path[0]; u_src.path[1] = path[1];
+        ulogrec d_rec = {.ts = ts, .verb = w->v_del_emit, .uri = u_src};
+        ok64 ro = ULOGu8sFeed(u8bIdle(w->del_unsorted), &d_rec);
+        if (ro != OK) return ro;
+        uri u_dst = {};
+        u_dst.path[0] = dst[0]; u_dst.path[1] = dst[1];
+        ulogrec p_rec = {.ts = ts, .verb = w->v_put_emit, .uri = u_dst};
+        return ULOGu8sFeed(u8bIdle(w->put_unsorted), &p_rec);
     }
 
     //  File-level put/delete row → emit one ULOG line into the

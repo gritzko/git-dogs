@@ -199,10 +199,13 @@ void SNIFFAtPathBytes(uri const *u, u8cs out);
 
 //  Iterate every put/delete row whose timestamp is strictly greater
 //  than `floor`, in chronological order (oldest first).  The callback
-//  receives the row's verb (SNIFFAtVerbPut / SNIFFAtVerbDelete), its
-//  URI path (the staged path — lives in the mmap), and its timestamp.
-//  Stops early and propagates the first non-OK callback return.
-typedef ok64 (*sniff_at_pd_cb)(ron60 verb, u8cs path, ron60 ts, void *ctx);
+//  receives the full row — `rec->verb` is SNIFFAtVerbPut /
+//  SNIFFAtVerbDelete, `rec->ts` is the timestamp, `rec->uri` carries
+//  the staged path in `.path` and (for move-form put rows only) the
+//  resolved dest path in `.fragment`.  Slices live in the mmap, valid
+//  until ULOGClose.  Stops early and propagates the first non-OK
+//  callback return.
+typedef ok64 (*sniff_at_pd_cb)(ulogreccp rec, void *ctx);
 ok64 SNIFFAtScanPutDelete(ron60 floor, sniff_at_pd_cb cb, void *ctx);
 
 //  Walk the wt rooted at `reporoot` and invoke `cb(rel, ctx)` for

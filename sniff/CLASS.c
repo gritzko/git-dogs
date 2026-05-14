@@ -66,22 +66,25 @@ typedef struct {
     ok64  err;
 } class_pd_ctx;
 
-static ok64 class_pd_cb(ron60 verb, u8cs path, ron60 ts, void *ctx_) {
+static ok64 class_pd_cb(ulogreccp src, void *ctx_) {
     class_pd_ctx *c = (class_pd_ctx *)ctx_;
+    u8cs path = {src->uri.path[0], src->uri.path[1]};
     //  Skip dir-prefix rows (`put lib/` etc.) — for status we accept
     //  the imprecision; expanding against bu/wu would replicate POST.
     if (!$empty(path) && *u8csLast(path) == '/') return OK;
-    uri u = {};
-    u.path[0] = path[0];
-    u.path[1] = path[1];
-    if (verb == c->v_put_filter) {
-        ulogrec rec = {.ts = ts, .verb = c->v_put_emit, .uri = u};
+    //  Preserve the full URI (path + fragment) so move-form put rows
+    //  round-trip into the merge — status display reads .fragment to
+    //  pair source/dest into one `mov` row.
+    if (src->verb == c->v_put_filter) {
+        ulogrec rec = {.ts = src->ts, .verb = c->v_put_emit,
+                       .uri = src->uri};
         ok64 r = ULOGu8sFeed(u8bIdle(c->put_buf), &rec);
         if (r != OK) c->err = r;
         return r;
     }
-    if (verb == c->v_del_filter) {
-        ulogrec rec = {.ts = ts, .verb = c->v_del_emit, .uri = u};
+    if (src->verb == c->v_del_filter) {
+        ulogrec rec = {.ts = src->ts, .verb = c->v_del_emit,
+                       .uri = src->uri};
         ok64 r = ULOGu8sFeed(u8bIdle(c->del_buf), &rec);
         if (r != OK) c->err = r;
         return r;

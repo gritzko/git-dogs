@@ -288,24 +288,30 @@ static ok64 sniff_stop(u8cs reporoot) {
 //  time is rendered human-readable via DOGutf8sFeedDate (7-char
 //  relative form: `12:34`, `Tue`, `01Jan`, `01Jan25`).
 //
-//  Seven statuses, 3-char marker + colour on a tty (groups in
+//  Eight statuses, 3-char marker + colour on a tty (groups in
 //  output order — clean state first, then staged, then unstaged,
 //  then untracked):
 //
 //    ok   default in baseline + on disk + mtime ∈ stamp-set (clean)
 //    put  blue    in baseline + put row since last post (staged mod)
 //    new  green   not in baseline + put row             (staged add)
+//    mov  cyan    put row with fragment (move src→dst)  (staged rename)
 //    mod  yellow  in baseline + mtime ∉ stamp-set, no put/del row
 //    del  brown   del row since last post               (staged remove)
 //    mis  red     in baseline, file gone, no del row    (rm without `be delete`)
 //    unk  grey    wt only, no put row                   (untracked)
 //
-//  Per-row time source: put/new → put_rec->ts; del → del_rec->ts;
+//  Per-row time source: put/new/mov → put_rec->ts; del → del_rec->ts;
 //  ok/mod/unk → wt_rec->ts (file's mtime); mis → 0 ("?").
+//  `mov` rows render as `<src> -> <dst>` — the put row's fragment
+//  carries the resolved dest path (see sniff/AT.md §"Move-form put
+//  rows").  The dest path's own CLASS_WT_ONLY step is suppressed by
+//  looking up its wt-mtime against the same put row.
 //  Submodules are filtered upstream by SNIFFClassify.
 
 #define STATUS_ANSI_PUT "\033[34m"        // dark blue
 #define STATUS_ANSI_NEW "\033[32m"        // dark green
+#define STATUS_ANSI_MOV "\033[36m"        // cyan
 #define STATUS_ANSI_MOD "\033[33m"        // yellow
 #define STATUS_ANSI_DEL "\033[38;5;94m"   // 256-color brown
 #define STATUS_ANSI_MIS "\033[31m"        // red
@@ -317,12 +323,13 @@ static ok64 sniff_stop(u8cs reporoot) {
 //  these never persist — the buffer is mmap'd and freed inside one
 //  status invocation.  Re-encoded each call (cheap; <10 bytes each).
 typedef struct {
-    ron60 v_put, v_new, v_mod, v_del, v_mis, v_unk;
+    ron60 v_put, v_new, v_mov, v_mod, v_del, v_mis, v_unk;
 } status_verbs;
 
 static void status_verbs_init(status_verbs *v) {
     a_cstr(s_put, "put"); v->v_put = SNIFFAtVerbOf(s_put);
     a_cstr(s_new, "new"); v->v_new = SNIFFAtVerbOf(s_new);
+    a_cstr(s_mov, "mov"); v->v_mov = SNIFFAtVerbOf(s_mov);
     a_cstr(s_mod, "mod"); v->v_mod = SNIFFAtVerbOf(s_mod);
     a_cstr(s_del, "del"); v->v_del = SNIFFAtVerbOf(s_del);
     a_cstr(s_mis, "mis"); v->v_mis = SNIFFAtVerbOf(s_mis);
@@ -335,7 +342,7 @@ typedef struct {
     //  The `ok` bucket never lists rows — clean tracked files would
     //  flood the output — so it's a counter only.
     Bu8 rows;
-    u32 ok_n, put_n, new_n, mod_n, del_n, mis_n, unk_n;
+    u32 ok_n, put_n, new_n, mov_n, mod_n, del_n, mis_n, unk_n;
     status_verbs v;
     i64 now;          // unix epoch seconds, for relative-date format
     u8cs reporoot;    // for resolving full paths in the wt-eq-base check
@@ -404,6 +411,32 @@ static void status_push(Bu8 rows, u8cs path, ron60 ts, ron60 verb,
     (*count)++;
 }
 
+//  Move flavour — carries both src (path) and dst (fragment) so the
+//  dump pass can render `<src> -> <dst>` on one line.
+static void status_push_mov(Bu8 rows, u8cs src, u8cs dst, ron60 ts,
+                            ron60 verb, u32 *count) {
+    uri u = {};
+    u.path[0]     = src[0]; u.path[1]     = src[1];
+    u.fragment[0] = dst[0]; u.fragment[1] = dst[1];
+    ulogrec rec = {.ts = ts, .verb = verb, .uri = u};
+    if (ULOGu8sFeed(u8bIdle(rows), &rec) != OK) return;
+    (*count)++;
+}
+
+//  YES iff `mtime` stamps a put row whose URI carries a non-empty
+//  fragment — i.e. the file at this path is the destination of an
+//  in-flight move recorded in `.be/wtlog`.  Used to suppress the
+//  dest's CLASS_WT_ONLY step (the source's step already emitted the
+//  one `mov` line for the pair).
+static b8 status_wt_is_mov_dst(ron60 mtime) {
+    if (mtime == 0 || !SNIFFAtKnown(mtime)) return NO;
+    ron60 ow_verb = 0;
+    uri ow_u = {};
+    if (SNIFFAtRowAtTs(mtime, &ow_verb, &ow_u) != OK) return NO;
+    if (ow_verb != SNIFFAtVerbPut()) return NO;
+    return !u8csEmpty(ow_u.fragment) ? YES : NO;
+}
+
 static ok64 status_step(class_step const *step, void *ctx) {
     status_buckets *b = (status_buckets *)ctx;
     u8cs path = {step->path[0], step->path[1]};
@@ -417,6 +450,17 @@ static ok64 status_step(class_step const *step, void *ctx) {
     }
     if (step->put_rec != NULL) {
         ron60 ts = step->put_rec->ts;
+        //  Move-form put row: source side carries the dest in
+        //  .fragment.  Emit one `mov` line and skip the per-side
+        //  buckets — the dest's own WT_ONLY step is suppressed
+        //  below via the stamp lookup.
+        u8cs frag = {step->put_rec->uri.fragment[0],
+                     step->put_rec->uri.fragment[1]};
+        if (!u8csEmpty(frag)) {
+            status_push_mov(b->rows, path, frag, ts,
+                            b->v.v_mov, &b->mov_n);
+            return OK;
+        }
         if (step->kind == CLASS_BOTH || step->kind == CLASS_BASE_ONLY)
             status_push(b->rows, path, ts, b->v.v_put, &b->put_n);
         else
@@ -425,6 +469,10 @@ static ok64 status_step(class_step const *step, void *ctx) {
     }
     switch (step->kind) {
         case CLASS_WT_ONLY:
+            //  Suppress the destination side of a move — its `mov`
+            //  line was already emitted on the source path's step.
+            if (step->wt_rec != NULL &&
+                status_wt_is_mov_dst(step->wt_rec->ts)) break;
             status_push(b->rows, path,
                         step->wt_rec ? step->wt_rec->ts : 0,
                         b->v.v_unk, &b->unk_n);
@@ -456,9 +504,11 @@ static ok64 status_step(class_step const *step, void *ctx) {
 }
 
 //  Drain the shared rows buffer, render rows whose verb matches
-//  `verb_filter` as `<date>\t<status>\t<path>`.  On tty: time column
-//  wears grey, status wears its own colour, path stays default.
-//  Walked once per bucket (6 passes) — trivial for status sizes.
+//  `verb_filter` as `<date>\t<status>\t<path>` (or `<src> -> <dst>`
+//  for move rows whose URI carries a fragment).  On tty: time
+//  column wears grey, status wears its own colour, path stays
+//  default.  Walked once per bucket (≤7 passes) — trivial for
+//  status sizes.
 static void status_dump_verb(Bu8 rows, ron60 verb_filter,
                              char const *marker, char const *ansi,
                              b8 tty, i64 now) {
@@ -486,6 +536,11 @@ static void status_dump_verb(Bu8 rows, ron60 verb_filter,
         fputc('\t', stdout);
         fwrite(rec.uri.path[0], 1,
                (size_t)$len(rec.uri.path), stdout);
+        if (!u8csEmpty(rec.uri.fragment)) {
+            fputs(" -> ", stdout);
+            fwrite(rec.uri.fragment[0], 1,
+                   (size_t)$len(rec.uri.fragment), stdout);
+        }
         fputc('\n', stdout);
     }
 }
@@ -503,6 +558,8 @@ static ok64 sniff_status_work(status_buckets *b) {
         status_dump_verb(b->rows, b->v.v_put, "put", STATUS_ANSI_PUT, tty, b->now);
     if (b->new_n > 0)
         status_dump_verb(b->rows, b->v.v_new, "new", STATUS_ANSI_NEW, tty, b->now);
+    if (b->mov_n > 0)
+        status_dump_verb(b->rows, b->v.v_mov, "mov", STATUS_ANSI_MOV, tty, b->now);
     if (b->mod_n > 0)
         status_dump_verb(b->rows, b->v.v_mod, "mod", STATUS_ANSI_MOD, tty, b->now);
     if (b->del_n > 0)
@@ -525,6 +582,7 @@ static ok64 sniff_status_work(status_buckets *b) {
     fprintf(stdout, "sniff: %u ok", b->ok_n);
     STATUS_PAINT(b->put_n, "put", STATUS_ANSI_PUT);
     STATUS_PAINT(b->new_n, "new", STATUS_ANSI_NEW);
+    STATUS_PAINT(b->mov_n, "mov", STATUS_ANSI_MOV);
     STATUS_PAINT(b->mod_n, "mod", STATUS_ANSI_MOD);
     STATUS_PAINT(b->del_n, "del", STATUS_ANSI_DEL);
     STATUS_PAINT(b->mis_n, "mis", STATUS_ANSI_MIS);
