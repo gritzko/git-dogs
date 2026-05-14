@@ -78,6 +78,12 @@ con ok64 GRAFNOPATH  = 0x41b28f5d864a751;
 //  baseline (any URI without an explicit `?h1..h2` range) refuse with
 //  this rather than silently falling back to "wt as base".
 con ok64 GRAFNOAT    = 0x41b28f5d829d;
+//  Ref token couldn't be classified into a keeper-resolvable object
+//  (not a valid full sha, no matching hashlet prefix, no matching
+//  branch / tag).  Distinct from GRAFFAIL (which is for I/O / state
+//  failures): GRAFREFBAD means "the token is syntactically a ref but
+//  nothing matches it".  Callers echo the offending token to stderr.
+con ok64 GRAFREFBAD  = 0x41b28f6ce3cb28d;
 
 // --- Public API (DOG 4-fn, singleton) ---
 
@@ -227,6 +233,23 @@ ok64 GRAFRebaseBlobMerge(weave const *running, weave const *branch,
 // Resolve a URI's `#hex` / `?ref` / absent-query to a 20-byte commit
 // SHA-1 — the same policy `log:` uses (sniff/at.log → REFS fallback).
 ok64 GRAFResolveTip(keeper *k, uricp u, sha1 *out);
+
+// Resolve a user-typed reference token (a single u8cs argv arg, not a
+// URI) to a full 20-byte commit SHA-1.  Token classification order:
+//
+//   1. Empty                       → GRAFNONE.
+//   2. All-hex (`HEXu8sValid`), 40 → decode + verify object exists.
+//   3. All-hex, 4..39              → keeper hashlet prefix lookup.
+//   4. Otherwise                   → REFS path resolution (absolute
+//                                     or relative branch paths via
+//                                     REFSResolve).
+//
+// Hex tokens of length 1..3 fall through to the path branch — too
+// short to disambiguate by hashlet alone.  Caller passes the raw
+// token; the helper handles the synthetic `?<token>` URI internally
+// for REFS lookup.  Commit-message substring search is a follow-up
+// (see RESOLVE.TODO.md).
+ok64 GRAFResolveRef(keeper *k, u8cs token, sha1 *out);
 
 // Weave diff between two commits (reads blobs from keeper).
 ok64 GRAFWeaveDiff(keeper *k, u8cs filepath, u8cs reporoot,

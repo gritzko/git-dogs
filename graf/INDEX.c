@@ -113,29 +113,73 @@ static ok64 graf_feed_type(keeper *k, u8 type, b8 sort_by_val, Bu8 body) {
     return rc;
 }
 
-ok64 GRAFIndex(keeper *k) {
-    sane(k);
-
-    Bu8 body = {};
-    call(u8bMap, body, GRAF_INGEST_BUFSZ);
-
-    //  Only commits are needed — every record we emit is a commit edge.
-    ok64 rc = OK;
-    if ((rc = graf_feed_type(k, DOG_OBJ_COMMIT, YES, body)) != OK) goto out;
-
-    rc = GRAFDagFinish();
-
-out:
-    u8bUnMap(body);
-    return rc;
-}
-
 // --- Incremental tip-walk (DOG.md §10a, called from `graf get URI`) ---
 
 #include "abc/KV.h"
 #include "keeper/GIT.h"
 
 #define GRAF_WALK_SET_CAP (1UL << 16)   // 64K hashlet slots
+
+//  BFS from `tip_h` over COMMIT_PARENT edges via KEEPGet; emits every
+//  not-yet-indexed commit to GRAFDagUpdate.  Caller owns `body`,
+//  `seen`, `queue` so multiple tips can share visited state; `runs`
+//  is the persisted-DAG snapshot used as the stop test.  Does NOT
+//  call GRAFDagFinish — the outermost caller does that once.
+static ok64 graf_walk_from_tip(keeper *k, u64 tip_h,
+                               Bu8 body, Bwh128 seen, Bwh128 queue,
+                               wh128css runs) {
+    if (tip_h == 0) return OK;
+    if (DAGAncestorsHas(seen, tip_h)) return OK;
+    if (dag_anc_put(seen, tip_h) != OK) return OK;
+
+    size_t q_start = wh128bDataLen(queue);
+    {
+        wh128 q0 = {.key = DAGPack(0, tip_h), .val = 0};
+        if (wh128bFeed1(queue, q0) != OK) return OK;
+    }
+
+    ok64 rc = OK;
+    size_t head = q_start;
+    while (head < wh128bDataLen(queue)) {
+        wh128cp cur = wh128bDataHead(queue) + head++;
+        u64 h60 = DAGHashlet(cur->key);
+
+        //  Already in graf's persisted runs → stop walking this
+        //  branch (its parents are already known by induction).
+        if (DAGLookup(runs, DAG_T_COMMIT, h60) != NULL) continue;
+
+        u8bReset(body);
+        u8 ot = 0;
+        if (KEEPGet(k, h60, DAG_H60_HEXLEN, body, &ot) != OK) continue;
+        if (ot != DOG_OBJ_COMMIT) continue;
+
+        a_dup(u8c, bs, u8bData(body));
+        sha1 csha = {};
+        KEEPObjSha(&csha, DOG_OBJ_COMMIT, bs);
+        ok64 io = GRAFDagUpdate(DOG_OBJ_COMMIT, &csha, bs);
+        if (io != OK) { rc = io; break; }
+
+        //  Parse parent edges and enqueue.
+        a_dup(u8c, scan, u8bData(body));
+        u8cs field = {}, value = {};
+        while (GITu8sDrainCommit(scan, field, value) == OK) {
+            if (u8csEmpty(field)) break;
+            if (!u8csEq(field, GIT_FIELD_PARENT)) continue;
+            if (u8csLen(value) < 40) continue;
+
+            sha1 psha = {};
+            DAGsha1FromHex(&psha, (char const *)value[0]);
+            u64 ph = WHIFFHashlet60(&psha);
+
+            if (DAGAncestorsHas(seen, ph)) continue;
+            if (dag_anc_put(seen, ph) != OK) continue;
+
+            wh128 qr = {.key = DAGPack(0, ph), .val = 0};
+            if (wh128bFeed1(queue, qr) != OK) break;
+        }
+    }
+    return rc;
+}
 
 ok64 GRAFIndexFromTips(keeper *k, uricp u) {
     sane(k && u);
@@ -199,9 +243,6 @@ ok64 GRAFIndexFromTips(keeper *k, uricp u) {
     Bu8 body = {};
     call(u8bMap, body, GRAF_INGEST_BUFSZ);
 
-    //  Visited set + BFS queue — same wh128 hash-set shape DAGAncestors
-    //  uses; reuse `dag_anc_put` / `DAGAncestorsHas` so this TU doesn't
-    //  need its own HASHx instantiation.
     Bwh128 seen = {};
     Bwh128 queue = {};
     ok64 rc = wh128bMap(seen, GRAF_WALK_SET_CAP);
@@ -209,53 +250,105 @@ ok64 GRAFIndexFromTips(keeper *k, uricp u) {
     rc = wh128bMap(queue, GRAF_WALK_SET_CAP);
     if (rc != OK) { wh128bUnMap(seen); u8bUnMap(body); return rc; }
 
-    dag_anc_put(seen, tip_h);
-    {
-        wh128 q0 = {.key = DAGPack(0, tip_h), .val = 0};
-        wh128bFeed1(queue, q0);
-    }
-
-    size_t head = 0;
-    while (head < wh128bDataLen(queue)) {
-        wh128cp cur = wh128bDataHead(queue) + head++;
-        u64 h60 = DAGHashlet(cur->key);
-
-        //  Already in graf's persisted runs → stop walking this
-        //  branch (its parents are already known by induction).
-        if (DAGLookup(runs, DAG_T_COMMIT, h60) != NULL) continue;
-
-        u8bReset(body);
-        u8 ot = 0;
-        if (KEEPGet(k, h60, DAG_H60_HEXLEN, body, &ot) != OK) continue;
-        if (ot != DOG_OBJ_COMMIT) continue;
-
-        a_dup(u8c, bs, u8bData(body));
-        sha1 csha = {};
-        KEEPObjSha(&csha, DOG_OBJ_COMMIT, bs);
-        ok64 io = GRAFDagUpdate(DOG_OBJ_COMMIT, &csha, bs);
-        if (io != OK) { rc = io; break; }
-
-        //  Parse parent edges and enqueue.
-        a_dup(u8c, scan, u8bData(body));
-        u8cs field = {}, value = {};
-        while (GITu8sDrainCommit(scan, field, value) == OK) {
-            if (u8csEmpty(field)) break;
-            if (!u8csEq(field, GIT_FIELD_PARENT)) continue;
-            if (u8csLen(value) < 40) continue;
-
-            sha1 psha = {};
-            DAGsha1FromHex(&psha, (char const *)value[0]);
-            u64 ph = WHIFFHashlet60(&psha);
-
-            if (DAGAncestorsHas(seen, ph)) continue;
-            if (dag_anc_put(seen, ph) != OK) continue;
-
-            wh128 qr = {.key = DAGPack(0, ph), .val = 0};
-            if (wh128bFeed1(queue, qr) != OK) break;
-        }
-    }
+    rc = graf_walk_from_tip(k, tip_h, body, seen, queue, runs);
 
     GRAFDagFinish();
+
+    wh128bUnMap(queue);
+    wh128bUnMap(seen);
+    u8bUnMap(body);
+    return rc;
+}
+
+//  REFSEach callback context: shared walk buffers + accumulated rc.
+//  body/seen/queue are pointers because the underlying typedefs are
+//  `T *const [N]` slice-arrays; copying the storage cell-by-cell into
+//  the struct discards the array semantics graf_walk_from_tip relies
+//  on.  The caller owns the buffers; the ctx just forwards them.
+typedef struct {
+    keeper  *k;
+    Bu8     *bodyp;
+    Bwh128  *seenp;
+    Bwh128  *queuep;
+    wh128css runs;
+    ok64     rc;
+} graf_index_walk_ctx;
+
+//  Decode a `?<40hex>` REFS val (or bare 40-hex) into a 60-bit
+//  hashlet; returns 0 on shape mismatch / tombstone (handled by
+//  KEEPEachTip's filter, but defensively re-checked here).
+static u64 graf_walk_val_to_hashlet(u8csc val_in) {
+    a_dup(u8c, val, val_in);
+    if (u8csEmpty(val)) return 0;
+    if (val[0][0] == '?') val[0]++;
+    if (u8csLen(val) != 40) return 0;
+    sha1 sh = {};
+    u8s sb = {sh.data, sh.data + 20};
+    if (HEXu8sDrainSome(sb, val) != OK) return 0;
+    return WHIFFHashlet60(&sh);
+}
+
+static ok64 graf_index_local_cb(keep_tipcp t, void *ctx) {
+    graf_index_walk_ctx *w = (graf_index_walk_ctx *)ctx;
+    u64 h = graf_walk_val_to_hashlet(t->sha);
+    if (h == 0) return OK;
+    ok64 r = graf_walk_from_tip(w->k, h,
+                                *w->bodyp, *w->seenp, *w->queuep, w->runs);
+    if (r != OK) w->rc = r;
+    return OK;   //  keep going even on per-tip errors
+}
+
+static ok64 graf_index_remote_cb(keep_remotecp r, void *ctx) {
+    graf_index_walk_ctx *w = (graf_index_walk_ctx *)ctx;
+    u64 h = graf_walk_val_to_hashlet(r->sha);
+    if (h == 0) return OK;
+    ok64 rv = graf_walk_from_tip(w->k, h,
+                                 *w->bodyp, *w->seenp, *w->queuep, w->runs);
+    if (rv != OK) w->rc = rv;
+    return OK;
+}
+
+//  Walk every REFS tip (local + remote-tracking) and ingest each
+//  tip's ancestor closure that isn't yet in graf's DAG runs.  Newly
+//  fetched commits (e.g. just landed via `be head`) become visible
+//  to graf without the user having to point at a specific URI.
+//
+//  The fallback path — a full LSM scan over every COMMIT in keeper's
+//  puppies — is preserved as a belt-and-braces pass after the tip
+//  walks, so any commit whose tip-pointer was already pruned but
+//  whose pack is still loaded still gets indexed.
+ok64 GRAFIndex(keeper *k) {
+    sane(k);
+
+    Bu8 body = {};
+    call(u8bMap, body, GRAF_INGEST_BUFSZ);
+
+    Bwh128 seen = {}, queue = {};
+    ok64 rc = wh128bMap(seen, GRAF_WALK_SET_CAP);
+    if (rc != OK) { u8bUnMap(body); return rc; }
+    rc = wh128bMap(queue, GRAF_WALK_SET_CAP);
+    if (rc != OK) { wh128bUnMap(seen); u8bUnMap(body); return rc; }
+
+    wh128css runs = {NULL, NULL};
+    GRAFRuns(runs);
+
+    graf_index_walk_ctx ctx = {
+        .k = k, .runs = {runs[0], runs[1]}, .rc = OK,
+        .bodyp = &body, .seenp = &seen, .queuep = &queue,
+    };
+
+    //  Local-branch tips first (typical fresh commits).
+    (void)KEEPEachTip(k, graf_index_local_cb, &ctx);
+    //  Remote-tracking tips (commits fetched via `be head` etc.).
+    (void)KEEPEachRemote(k, graf_index_remote_cb, &ctx);
+
+    //  Belt-and-braces LSM scan for any orphan COMMIT objects whose
+    //  tip-pointer is no longer present but whose pack remains loaded.
+    if (ctx.rc == OK)
+        (void)graf_feed_type(k, DOG_OBJ_COMMIT, YES, body);
+
+    rc = GRAFDagFinish();
+    if (rc == OK) rc = ctx.rc;
 
     wh128bUnMap(queue);
     wh128bUnMap(seen);

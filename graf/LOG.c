@@ -77,14 +77,25 @@ typedef struct {
 //  Resolve URI's `#hex`, `?ref`, or absent-query (use the wt's current
 //  tip from sniff/at.log) to a 20-byte commit SHA-1.  Public so other
 //  graf verbs (blame, etc.) can reuse the same resolution policy.
+//
+//  Token-level classification (hex prefix / full hex / branch path)
+//  is delegated to `GRAFResolveRef`; this function adds the URI-layer
+//  policy on top (which slot to consult, when to fall back to the
+//  wt's current tip, remote-authority handling).
 ok64 GRAFResolveTip(keeper *k, uricp u, sha1 *out) {
     sane(k && u && out);
     a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
 
-    if (!u8csEmpty(u->fragment) && u8csLen(u->fragment) >= 40) {
-        u8s sb = {out->data, out->data + 20};
-        u8cs hx = {u->fragment[0], u->fragment[0] + 40};
-        return HEXu8sDrainSome(sb, hx);
+    //  Fragment slot: any non-empty fragment resolves via the token
+    //  helper (40-hex or short hashlet prefix; longer-fragment shapes
+    //  like commit-msg searches are not URI-fragment business).
+    if (!u8csEmpty(u->fragment)) {
+        u8cs frag = {u->fragment[0], u->fragment[1]};
+        ok64 fr = GRAFResolveRef(k, frag, out);
+        if (fr == OK) return OK;
+        //  Fall through to query/cur-fallback handling on miss — a
+        //  fragment that doesn't resolve as hex (e.g. `#msg-search`)
+        //  isn't a "tip" question and is handled elsewhere.
     }
 
     //  Bare `log:` with no query — fall back to the wt's current tip
@@ -139,6 +150,88 @@ ok64 GRAFResolveTip(keeper *k, uricp u, sha1 *out) {
     u8s sb = {out->data, out->data + 20};
     u8cs hx = {resolved.query[0], resolved.query[0] + 40};
     return HEXu8sDrainSome(sb, hx);
+}
+
+//  Resolve a user-typed reference token to a full 20-byte commit sha.
+//
+//  Token classification (first hit wins):
+//    1. Empty                        → GRAFNONE.
+//    2. All-hex (`HEXu8sValid`), 40  → decode + verify object exists.
+//    3. All-hex, 4..39               → keeper hashlet prefix → unique
+//                                       commit sha.
+//    4. Otherwise                    → REFS path lookup (handles abs /
+//                                       rel branch paths via the
+//                                       existing resolver).
+//  Returns OK with `*out` populated, or GRAFNONE / GRAFFAIL.
+//
+//  Hex tokens of length 1..3 fall through to the path branch — too
+//  short to disambiguate by hashlet alone, and the user's token may
+//  actually name a branch like `?A` whose first byte coincides with
+//  a hex digit.  Commit-message substring search is a follow-up
+//  (see RESOLVE.TODO.md).
+ok64 GRAFResolveRef(keeper *k, u8cs token, sha1 *out) {
+    sane(k && out);
+    if ($empty(token)) return GRAFREFBAD;
+
+    size_t len = (size_t)u8csLen(token);
+
+    if (HEXu8sValid(token)) {
+        if (len == 40) {
+            u8s sb = {out->data, out->data + 20};
+            a_dup(u8c, hx, token);
+            ok64 hd = HEXu8sDrainSome(sb, hx);
+            if (hd != OK) return GRAFFAIL;
+            //  Verify the object exists by attempting a keeper lookup
+            //  on the canonical sha — a typed sha with no matching
+            //  object is a clean GRAFREFBAD (bad ref token) rather
+            //  than an OK that downstream code then fails to fetch.
+            Bu8 cbuf = {};
+            if (u8bAllocate(cbuf, 1UL << 20) != OK) return GRAFFAIL;
+            u8 ct = 0;
+            ok64 ko = KEEPGetExact(k, out, cbuf, &ct);
+            u8bFree(cbuf);
+            if (ko != OK) return GRAFREFBAD;
+            return OK;
+        }
+        if (len >= 4 && len < 40) {
+            //  Short hex prefix — keeper hashlet lookup.  Build a
+            //  60-bit hashlet from the typed hex characters and let
+            //  KEEPGet do the per-byte refinement against indexed
+            //  objects.  Recover the canonical sha from the body.
+            a_dup(u8c, hx, token);
+            u64 h60 = WHIFFHexHashlet60(hx);
+            Bu8 cbuf = {};
+            if (u8bAllocate(cbuf, 1UL << 20) != OK) return GRAFFAIL;
+            u8 ct = 0;
+            ok64 o = KEEPGet(k, h60, len, cbuf, &ct);
+            if (o != OK) { u8bFree(cbuf); return GRAFREFBAD; }
+            if (ct != DOG_OBJ_COMMIT) { u8bFree(cbuf); return GRAFREFBAD; }
+            a_dup(u8c, body, u8bDataC(cbuf));
+            KEEPObjSha(out, DOG_OBJ_COMMIT, body);
+            u8bFree(cbuf);
+            return OK;
+        }
+        //  1..3 hex chars: fall through; treat as a path token below.
+    }
+
+    //  Path-shaped or short-hex-also-valid-as-path — delegate to
+    //  REFSResolve via a synthetic `?<token>` URI so absolute /
+    //  relative paths route through the same resolver `GRAFResolveTip`
+    //  already uses.
+    a_path(keepdir, u8bDataC(k->h->root), KEEP_DIR_S);
+    a_pad(u8, urib, 1024);
+    a_cstr(qsig, "?");
+    (void)u8bFeed(urib, qsig);
+    (void)u8bFeed(urib, token);
+    a_dup(u8c, urid, u8bDataC(urib));
+    a_pad(u8, arena_buf, 1024);
+    uri resolved = {};
+    ok64 ro = REFSResolve(&resolved, arena_buf, $path(keepdir), urid);
+    if (ro != OK) return GRAFREFBAD;
+    if (u8csLen(resolved.query) < 40) return GRAFREFBAD;
+    u8s sb = {out->data, out->data + 20};
+    u8cs hxq = {resolved.query[0], resolved.query[0] + 40};
+    return (HEXu8sDrainSome(sb, hxq) == OK) ? OK : GRAFFAIL;
 }
 
 //  `#N` → cap; missing or non-numeric fragment → unlimited.

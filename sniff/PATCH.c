@@ -787,26 +787,21 @@ static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
     u8cs target_query = {};
     call(absolutise_query, target_query, abs_qbuf, target_query_in);
 
-    //  Full 40-hex input: decode directly.
-    if (u8csLen(target_query) == 40) {
-        u8 ok_hex = 1;
-        for (size_t i = 0; i < 40 && ok_hex; i++) {
-            u8 c = target_query[0][i];
-            if (!((c >= '0' && c <= '9') ||
-                  (c >= 'a' && c <= 'f') ||
-                  (c >= 'A' && c <= 'F'))) ok_hex = 0;
-        }
-        if (ok_hex) {
-            u8s sb = {out->data, out->data + 20};
-            a_dup(u8c, hx, target_query);
-            call(HEXu8sDrainSome, sb, hx);
-            //  Dereference annotated tag if present.
+    //  Hex token (40-char or short 4..39-char prefix): delegate to
+    //  GRAFResolveRef for token classification + keeper lookup.  Then
+    //  dereference annotated tag if the resolved object is one.  A
+    //  hex-shaped token that fails to resolve (e.g. typo'd prefix) is
+    //  treated as final — falling through to REFS would only find a
+    //  branch coincidentally named with hex chars, which is rarely
+    //  what the user means.
+    if (HEXu8sValid(target_query) && $len(target_query) >= 4) {
+        ok64 rr = GRAFResolveRef(&KEEP, target_query, out);
+        if (rr == OK) {
             Bu8 cbuf = {};
             call(u8bAllocate, cbuf, 1UL << 16);
             u8 ct = 0;
             ok64 ko = KEEPGetExact(&KEEP, out, cbuf, &ct);
             if (ko == OK && ct == DOG_OBJ_TAG) {
-                //  Extract "object <40hex>".
                 a_dup(u8c, body, u8bDataC(cbuf));
                 u8cs field = {}, value = {};
                 a_cstr(obj_kw, "object");
@@ -824,6 +819,10 @@ static ok64 resolve_target(sha1 *out, u8cs reporoot, u8cs target_query_in) {
             u8bFree(cbuf);
             done;
         }
+        fprintf(stderr,
+            "sniff: patch: bad ref '%.*s'\n",
+            (int)$len(target_query), (char const *)target_query[0]);
+        fail(PATCHFAIL);
     }
 
     //  Symbolic ref: look up via REFS.  Compose the lookup URI via
@@ -1021,36 +1020,20 @@ static ok64 refuse_if_dirty(u8cs reporoot) {
 //  PATCH-on-PATCH so the user sees a clear error rather than a
 //  silently corrupt 3-way against the wrong base.
 
-//  Decode a 40-hex commit sha into `out`.  Returns PATCHFAIL when
-//  `hex` is not exactly 40 hex chars.
-static ok64 patch_hex40_to_sha1(sha1 *out, u8cs hex) {
-    sane(out);
-    if ($len(hex) != 40) fail(PATCHFAIL);
-    for (size_t i = 0; i < 40; i++) {
-        u8 c = hex[0][i];
-        b8 ok_hex = (c >= '0' && c <= '9') ||
-                    (c >= 'a' && c <= 'f') ||
-                    (c >= 'A' && c <= 'F');
-        if (!ok_hex) fail(PATCHFAIL);
-    }
-    u8s sb = {out->data, out->data + 20};
-    a_dup(u8c, hx, hex);
-    call(HEXu8sDrainSome, sb, hx);
-    done;
-}
-
-//  Cherry-pick prep: theirs = `frag` (40-hex commit sha), fork =
+//  Cherry-pick prep: theirs = `frag` (any ref token shape accepted by
+//  GRAFResolveRef — full sha, short hex prefix, branch path), fork =
 //  parent(theirs).  Reads theirs's commit body from keeper and parses
 //  the first `parent <hex>` field.  Refuses on root commits (no
 //  parent).  Caller has already verified `frag` is non-empty.
 static ok64 resolve_cherry(sha1 *thr_out, sha1 *fork_out, u8cs frag) {
     sane(thr_out && fork_out);
 
-    ok64 hr = patch_hex40_to_sha1(thr_out, frag);
+    ok64 hr = GRAFResolveRef(&KEEP, frag, thr_out);
     if (hr != OK) {
         fprintf(stderr,
-            "sniff: patch: #hash must be exactly 40 hex chars\n");
-        return hr;
+            "sniff: patch: cannot resolve cherry ref '%.*s'\n",
+            (int)$len(frag), (char const *)frag[0]);
+        return PATCHFAIL;
     }
 
     Bu8 cbuf = {};
