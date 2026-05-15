@@ -1384,65 +1384,15 @@ ok64 SNIFFExec(cli *c) {
             }
         }
 
-        //  VERBS.md §"POST" remote arm: `be post //origin` resolves
-        //  the authority against the local ref log (REFSResolve does
-        //  authority-substring match — see keeper/REFS.c:391) and
-        //  rebases cur onto the tracking ref's sha.  No alias
-        //  registry; the most recent matching get/put row's URI is
-        //  the connection target and its hash is the rebase tip.
-        //  Skip this arm if a regular ?branch was supplied (label_uri
-        //  != NULL) — that takes precedence.
-        sha1 remote_target_tip = {};
-        b8   has_remote_target = NO;
-        if (label_uri == NULL && !$ok(commit_msg)) {
-            for (u32 i = 0; i < c->nuris; i++) {
-                uri *uu = &c->uris[i];
-                if (u8csEmpty(uu->authority)) continue;
-                if (!u8csEmpty(uu->query))    continue;
-                a_path(keepdir, reporoot, KEEP_DIR_S);
-                a_pad(u8, arena, 1024);
-                uri resolved = {};
-                a_dup(u8c, in_uri, uu->data);
-                if (REFSResolve(&resolved, arena, $path(keepdir),
-                                in_uri) != OK) {
-                    fprintf(stderr,
-                            "sniff: post: %.*s — no matching tracking "
-                            "ref in log; run `be head ssh://...` first\n",
-                            (int)u8csLen(uu->data),
-                            (char *)uu->data[0]);
-                    ret = SNIFFFAIL;
-                    break;
-                }
-                u8cs sha_hex = {resolved.query[0], resolved.query[1]};
-                if (!u8csEmpty(sha_hex) && *sha_hex[0] == '?')
-                    u8csUsed(sha_hex, 1);
-                if (u8csLen(sha_hex) != sizeof(sha1hex)) {
-                    fprintf(stderr,
-                            "sniff: post: tracking row for %.*s has "
-                            "no sha\n",
-                            (int)u8csLen(uu->data),
-                            (char *)uu->data[0]);
-                    ret = SNIFFFAIL;
-                    break;
-                }
-                a_raw(bin, remote_target_tip);
-                a_dup(u8c, hx, sha_hex);
-                if (HEXu8sDrainSome(bin, hx) != OK) {
-                    ret = SNIFFFAIL;
-                    break;
-                }
-                has_remote_target = YES;
-                break;
-            }
-        }
-        if (ret == OK && has_remote_target) {
-            ret = POSTRebaseOntoSha(reporoot, &remote_target_tip);
-            //  Fall through to the standard close (no commit_msg /
-            //  label_uri path runs).  Use a sentinel to skip the
-            //  dry-run-status arm.
-            goto post_done;
-        }
-
+        //  VERBS.md §POST invariant 3: POST never rewrites cur's
+        //  history; rebase is `be patch ?br#` + `be post`, looped.
+        //  The `//remote` slot on POST means "FF-advance remote's
+        //  counterpart to cur.tip" — i.e. push — handled at the
+        //  dispatcher level by `keeper post` after this sniff post
+        //  commits.  Sniff post itself is push-agnostic: it just
+        //  commits-on-cur (and optionally FF-advances a local
+        //  `?branch` via POSTPromote below).
+        //
         //  Resolve a relative label (`?./X`, `?../X`, `?..`) before
         //  PUTSetLabel sees it.  Buffers must outlive PUTSetLabel —
         //  hence stack-local pads scoped to this if-block.
@@ -1455,7 +1405,29 @@ ok64 SNIFFExec(cli *c) {
             }
         }
 
-        if (!$ok(commit_msg) && label_uri == NULL) {
+        //  Pure-push intent: every URI carries only `//remote` (no
+        //  `#frag`, no `?branch`, no path).  Per VERBS.md §POST, the
+        //  `//remote` slot is orthogonal — standalone it's a label
+        //  move on the remote side, not a commit trigger.  Skip both
+        //  the commit step AND the dry-run print; BEPost dispatches
+        //  `keeper post` after us to do the wire-push.
+        b8 pure_push = NO;
+        if (!$ok(commit_msg) && label_uri == NULL && c->nuris > 0) {
+            pure_push = YES;
+            for (u32 i = 0; i < c->nuris; i++) {
+                uri *uu = &c->uris[i];
+                if ($empty(uu->authority) ||
+                    !$empty(uu->path) ||
+                    !$empty(uu->query) ||
+                    !$empty(uu->fragment)) {
+                    pure_push = NO;
+                    break;
+                }
+            }
+        }
+        if (pure_push) {
+            //  Nothing to do at sniff layer; keeper post handles wire.
+        } else if (!$ok(commit_msg) && label_uri == NULL) {
             //  Bare `sniff post` (no -m, no ?label).  When patch rows
             //  are present since the latest get/post, compose default
             //  msg+author from the absorbed commits and commit; else
@@ -1553,8 +1525,6 @@ ok64 SNIFFExec(cli *c) {
                 ret = POSTPromote(reporoot, tb, NO);
             }
         }
-post_done:
-        ;
     } else if (is_put) {
         //  Split URIs by aspect (VERBS.md §PUT):
         //    * `?branch` (query, no path) → PUTCreateBranch (create

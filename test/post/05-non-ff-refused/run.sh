@@ -1,31 +1,21 @@
 #!/bin/sh
-#  post/05-rebase-on-remote — `be post //origin` rebases cur onto
-#  the remote's counterpart with be's token-level merge.  Canonical
-#  "rebase local trunk on top of remote main" workflow per VERBS.md
-#  §"POST" + §"Schemes — cached vs transport".
+#  post/05-non-ff-refused — `be post //origin` refuses when cur is
+#  not a fast-forward of the remote's counterpart.  Per VERBS.md §POST
+#  POST is commit-and/or-FF only (never rebase); divergent remotes are
+#  reconciled with `be patch //origin?` + `be post`, not by POST alone.
 #
-#  Single file (`hello.c`) edited on BOTH sides, with overlapping
-#  TOKEN edits in the same line plus non-overlapping line adds and
-#  a token edit elsewhere.  The point is: be's weave merge resolves
-#  per-token, so two sides editing different tokens of the same
-#  line merge cleanly without conflict.
+#  Setup (matches the canonical "we diverged from origin" scenario):
+#    A  — origin's seed.
+#    B  — origin advances (server-side commit on top of A).
+#    C  — client commits locally on top of A (parent = A).
+#  cur is at C; origin's tip is B; both share A as the fork point.
+#  cur is NOT a descendant of B, so `be post //origin` must refuse.
 #
-#    A  (origin's seed)              hello world, return 0
-#    B  (origin's advance, server)   "Hello, world" → "Hello, team"
-#                                     + new line printf("done\n");
-#    C  (client's local commit)      "Hello, world" → "Hi, world"
-#                                     + #include <stdlib.h>
-#                                     + return 0 → return EXIT_SUCCESS
-#
-#  After `be head ssh://origin && be post //origin`, the rebased
-#  hello.c carries every contribution: "Hi, team!" (token-merge on
-#  the printf line), the stdlib include, the done-print, and the
-#  EXIT_SUCCESS return.
-#
-#  Status: drafted alongside the spec rewrite at VERBS.md.  Today
-#  this test is registered with WILL_FAIL=TRUE; flip when sniff
-#  learns to resolve `//remote` URIs to the cached tracking ref
-#  and rebase against it (see VERBS.todo.md §"POST").
+#  Asserts:
+#    * `be post //localhost` exits non-zero.
+#    * stderr carries the receive-pack "non-fast-forward" reason.
+#    * hello.c is left untouched (still C's bytes — POST didn't rebase,
+#      didn't merge, didn't reset).
 #
 #  Requires passwordless ssh to localhost (gated under WITH_SSH).
 
@@ -65,11 +55,10 @@ git -C "$SEED" push -q "$ORIGIN" master:master
 mkdir wt && cd wt
 "$BE" get "ssh://localhost/$REL_ORIGIN?master" \
     >01.clone.got.out 2>01.clone.got.err
-empty 01.clone.got.out
 match "$CASE/01.A.hello.c" hello.c
 
 # ====================================================================
-# 3. advance origin to version B
+# 3. advance origin to version B (one commit on top of A)
 # ====================================================================
 cd ..
 sleep 0.02; cp "$CASE/02.B.hello.c" "$SEED/hello.c"
@@ -83,25 +72,27 @@ git -C "$SEED" push -q "$ORIGIN" master:master
 cd wt
 sleep 0.02; cp "$CASE/03.client.hello.c" hello.c
 "$BE" post 'client edits' >02.post.got.out 2>02.post.got.err
-empty 02.post.got.out
 match "$CASE/03.client.hello.c" hello.c
 
 # ====================================================================
-# 5. fetch via HEAD (refs+pack land in keeper, .be/refs updated)
+# 5. fetch via HEAD so the cache knows origin advanced to B
 # ====================================================================
 "$BE" head "ssh://localhost/$REL_ORIGIN" \
     >03.head.got.out 2>03.head.got.err
 
 # ====================================================================
-# 6. rebase: cur onto cached counterpart on localhost
-#    REFSResolve matches the //auth needle against the ref log's
-#    HOST field; here the peer is `ssh://localhost/...`, so the
-#    cached-form lookup is `//localhost` (no alias registry).
+# 6. `be post //localhost` — cur(C) is NOT a descendant of remote(B);
+#    POST is commit-or-FF only, so this MUST refuse.
 # ====================================================================
-"$BE" post "//localhost" >04.rebase.got.out 2>04.rebase.got.err
-empty 04.rebase.got.out
+mustnt "$BE" post "//localhost" >04.post.got.out 2>04.post.got.err
+grep -q 'non-fast-forward' 04.post.got.err || {
+    echo "post/05: expected 'non-fast-forward' in stderr, got:" >&2
+    cat 04.post.got.err >&2
+    exit 1
+}
 
 # ====================================================================
-# 7. verify wt's hello.c is the token-level merge of B and C
+# 7. wt's hello.c must be UNTOUCHED — POST didn't rebase, didn't merge,
+#    didn't reset.  The client's local commit (C) is still the wt state.
 # ====================================================================
-match "$CASE/04.rebased.hello.c" hello.c
+match "$CASE/03.client.hello.c" hello.c

@@ -23,26 +23,19 @@ user towards tree-structured rebase-centric branching model.
 
 The project dogfoods from day 1.
 
-## Quick start
-
-Build (requires libsodium, libcurl, lz4, zlib and cmake; ninja recommended):
-
-    mkdir build && cd build
-    CC=clang CXX=clang++ cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
-    ninja
-    ls bin/
-
 ## Using `be`
 
 Beagle's dispatcher command is `be`. It only uses standard URI arguments
 `scheme:host/path?version#message` and the verbs from the HTTP dictionary
-that cover all possible data maneuvers. 
+that cover all possible data maneuvers. Noone remembers all git commands
+and flags. To avoid that effect, Beagle's verbs are made orthogonal: 
+there is no way to supplement one with creative use of another. 
 
   * read-only commands
      - `GET` fetches/checks out a particular version/branch/project,
      - `HEAD` is `GET` dry-run, lists the changes to the version/branch,
   * read-write commands
-     - `POST` advances the current branch (commit, fast-forward, rebase),
+     - `POST` advances the current branch (commit and/or fast-forward),
         this is worktree-to-repo write,
      - `PATCH` applies changes from another branch to the working tree,
         this is repo-to-worktree write,
@@ -50,8 +43,19 @@ that cover all possible data maneuvers.
      - `PUT` sets branch tip, adds a file, etc,
      - `DELETE` deletes a branch, a file, etc.
 
-Beagle branches are tree-ordered, e.g. `feature/fix` for regular or
-`feature/phase1/phase2` for stack-of-diffs workflows.
+Same applies to URIs, each component reflects some aspect of a command:
+
+ 1. scheme stands for app/protocol,
+ 2. host for remotes,
+ 3. path for file path (relative to the project root),
+ 4. query for branch/commit (be branches are structured like paths,
+    e.g. `/feature/fix` or `feature/phase1/phase2`,
+ 5. fragment is for free-form values (commit messages, search 
+    strings, etc).
+
+Changing the shape of URI changes the command's semantics, e.g.
+`patch` becomes merge, rebase or cherry-pick depending of the shape.
+These three (git) commands do merge-then-commit, but details differ.
 
 ### GET: checkout / fetch / view / search
 
@@ -61,13 +65,14 @@ Beagle branches are tree-ordered, e.g. `feature/fix` for regular or
     be grep:path/to/file.c#TODO      # grep inside one file
     be spot:#FuncName                # structural search across repo
 
-### POST: commit / fast-forward / rebase
+### POST: commit / fast-forward
 
     ...                              # above: be get, etc
     vim file.c                       # go wild
     be post "wonderful changes"      # commit
     be head //host                   # see if remote changed
-    be post //host                   # rebase to remote's tip
+    be post //host                   # ff-push to remote (refuses if diverged;
+                                     # rebase is `be patch //host?` + `be post`)
 
 ### PUT/DELETE: reflog edits (stage, add/remove branch)
 
@@ -103,6 +108,15 @@ out complex tasks.
 
 New dogs may join, old dogs may learn new tricks.
 If it works, it gets used. If it's used, it evolves.
+
+## Quick start
+
+Build (requires libsodium, libcurl, lz4, zlib and cmake; ninja recommended):
+
+    mkdir build && cd build
+    CC=clang CXX=clang++ cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
+    ninja
+    ls bin/
 
 ##  FAQ
 

@@ -23,7 +23,6 @@ file(GLOB _be_case_runs CONFIGURE_DEPENDS
 # to FAIL until the implementation catches up.  Flip-back is part
 # of the relevant impl PR.  See VERBS.todo.md for tracking.
 set(_BE_WILL_FAIL_CASES
-    "be-post-05-rebase-on-remote"
 )
 
 # Tests that need passwordless ssh to localhost (mirror what
@@ -33,7 +32,7 @@ set(_BE_WILL_FAIL_CASES
 # remote-HOME-relative — case.sh's $SCRATCH already does (it sits
 # under $HOME/tmp/run-<ts>/be-test/$$/<verb>/<name>).
 set(_BE_NEEDS_SSH_CASES
-    "be-post-05-rebase-on-remote"
+    "be-post-05-non-ff-refused"
     "be-post-06-fetch-incremental"
     "be-get-05-submodule-from-ssh"
     "be-get-07-submodule-nosub"

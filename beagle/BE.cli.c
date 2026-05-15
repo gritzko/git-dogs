@@ -1040,13 +1040,15 @@ static ok64 BEPatch(cli *c, b8 seq) {
     done;
 }
 
-//  `be post`:
+//  `be post` — commit and/or fast-forward (never rebase; see VERBS.md
+//  §POST).  Rebase is `be patch ?br#` + `be post`, looped.
 //    <free-form tail> → fragment carries the commit message; sniff
-//                       commits locally.  (Legacy `-m <msg>` flag still
+//                       commits on cur.  (Legacy `-m <msg>` flag still
 //                       works as a fallback.)
-//    ?<branch>        → promote: phase 1 commits cur, phase 2 ff-or-
-//                       rebases the named branch.
-//    //<host>?<ref>   → keeper pushes the current commit to that remote.
+//    ?<branch>        → FF-advance ?branch to cur's (post-commit) tip;
+//                       refused (POSTNOFF) if cur isn't a descendant.
+//    //<host>[?<ref>] → keeper FF-pushes cur's tip to the remote's
+//                       counterpart; refused if not a fast-forward.
 //    bare             → sniff prints the dry-run change-set; no commit.
 //
 //  Path-form URIs (`be post abc/foo`, `be post .`, `be post x.txt`)
@@ -1124,36 +1126,32 @@ static ok64 BEPost(cli *c, b8 seq) {
             if ($eq(c->flags[fi], mf)) { has_msg = YES; break; }
         }
     }
-    //  Per VERBS.md §"POST" + §"Schemes — cached vs transport":
-    //    `be post //origin`     — rebase cur onto cached origin tip.
-    //    `be post ssh://origin` — fetch refs+pack first, then rebase.
-    //    `be post //origin?br`  — same but scoped to remote's ?br.
-    //    `be post ?br`          — rebase cur onto local ?br.
-    //    `be post '#msg'`       — commit on cur.
-    //  Push lives under `be put //origin` (VERBS.md §"PUT"), not POST.
-    //  POST never produces a commit on a non-cur branch.
-    dog_step steps[4];
+    //  Per VERBS.md §POST:
+    //    `be post '#msg'`           — commit on cur.
+    //    `be post ?br`              — commit on cur, then FF-advance ?br
+    //                                 to cur.tip (POSTPromote inside sniff).
+    //    `be post //origin '#msg'`  — commit on cur, then FF-push cur's
+    //    `be post ssh://origin '#msg'` new tip to origin's counterpart.
+    //  POST never rewrites cur (rebase is `be patch ?br#` + `be post`).
+    //  Pure pushes (no commit) belong to PUT (`be put //origin`).  POST
+    //  with `//remote` but no commit content refuses via POSTNONE.
+    dog_step steps[2];
     u32 nsteps = 0;
-    //  Step 1 (transport-scheme remote only): keeper get URI to fetch
-    //  refs+pack, refreshing `.be/refs` for the rebase that follows.
-    if (has_transport && has_remote) {
-        steps[nsteps++] = (dog_step){u8slit("keeper"), u8slit("get"), NO};
-    }
-    //  Step 2 (any remote): graf get URI to walk the (possibly newly
-    //  fetched) commit DAG into graf's index — sniff's POSTRebaseOntoSha
-    //  calls GRAFLca, which fails (returns 0) if either tip's ancestor
-    //  set isn't indexed.  No-op when the URI's commits are already in
-    //  graf's index.
-    if (has_remote) {
-        steps[nsteps++] = (dog_step){u8slit("graf"),   u8slit("get"), NO};
-    }
-    //  Step 3: sniff post — handles the commit / ff / rebase per the
-    //  URI shape it sees.  When `//remote` is present sniff resolves
-    //  it to the cached tracking ref and rebases cur on top.
+    //  Step 1: sniff post — commit-on-cur + optional ?branch promote.
+    //  Skip only the bare-status case (no msg, no URIs): there's
+    //  nothing to commit and sniff would just dry-run.
     b8 ran_sniff = NO;
     if (has_msg || c->nuris > 0 || !has_remote) {
         steps[nsteps++] = (dog_step){u8slit("sniff"),  u8slit("post"), NO};
         ran_sniff = YES;
+    }
+    //  Step 2: keeper post — FF-push cur's new tip to remote.  Picks
+    //  up the post-commit `--at <root>?<branch>#<sha>` injected by `be`
+    //  between dispatch steps so the wire side knows what tip to send.
+    //  No transport scheme on `//remote`: keeper_post resolves the
+    //  authority via REFSResolve (alias table) and opens the wire.
+    if (has_remote) {
+        steps[nsteps++] = (dog_step){u8slit("keeper"), u8slit("post"), NO};
     }
     call(BEDispatch, c, steps, nsteps, seq);
 

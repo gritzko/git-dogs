@@ -113,19 +113,4 @@ ok64 POSTResolveBranchTip(sha1 *out, u8cs reporoot, u8cs branch);
 ok64 POSTFpChainTo(sha1 const *from, sha1 const *stop,
                    sha1 *out, u32 cap, u32 *nout, b8 *reached_stop);
 
-//  Rebase cur's stack onto an arbitrary sha (no branch lookup).
-//  Used by `be post //remote` (VERBS.md §"POST"): the target tip
-//  is resolved via REFSResolve from the cached tracking ref log
-//  in the dispatcher; this function just runs the replay +
-//  cur-REFS advance + wt reset.
-//
-//    base_old = LCA(cur_tip, *target_tip)
-//    base_new = *target_tip
-//    child_tip = cur_tip
-//
-//  Cur's REFS row is CAS-advanced to the rebased tip; wt is reset
-//  via GETCheckout.  Returns OK on success, POSTNONE when cur is
-//  already at *target_tip, GRAFCNFL on conflict, REFSCAS on race.
-ok64 POSTRebaseOntoSha(u8cs reporoot, sha1 const *target_tip);
-
 #endif

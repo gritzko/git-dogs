@@ -320,28 +320,38 @@ added rules apply).  The metadata dir (`.be/`) is never touched.
 | `be get --force ?<sha>`           | Detached reset to `<sha>`; dirty tracked bytes are overwritten; untracked files preserved. |
 | `be get --force --prune ?<sha>`   | Same reset + remove untracked clutter (gitignored files survive). |
 
-##  POST — advance cur
+##  POST — advance cur, FF labels, push
 
-POST is the **commit-mover**: it creates one new commit and
-advances **cur** (the current branch's tip).  Cur is the only
-ref POST advances — never another branch.  POST scans `patch`
-rows since the pd boundary (most recent `get`/`post`) and
-assembles the new commit's headers from them; URI components on
-POST itself supply only the message and remote hint:
+POST's three URI slots are **orthogonal**: each adds its own
+effect, none implies any other.  Cur is the only ref POST ever
+*commits onto* — never another branch.
 
-  - **`#frag`** — commit message.  Without a fragment, POST
-    derives the message from `patch` rows (see "Message
-    resolution" below).
-  - **`?branch`** — after committing on cur, **FF-advance**
-    `?branch` to cur's new tip.  Refused (`POSTNOFF`) if cur is
-    not a descendant of `?branch.tip`.  Cur is *not* rewritten;
-    only the named ref moves.  This is the cross-branch promote
-    flow (e.g. `be post ?..` after eager branching brings the
-    sub-branch's work up to its parent).
-  - **`//remote`** — after committing on cur, FF-push cur's new
-    tip to the remote's counterpart ref (transport scheme opens
-    a wire; cached form refuses since push needs the wire).
-    Same FF check as `?branch`.
+  - **`#frag`** (and stage scope) — commit on cur.  POST is the
+    only commit-maker; without a fragment, POST derives the
+    message from `patch` rows since the pd boundary (see "Message
+    resolution" below).  Empty intent — no `#frag` and no in-
+    scope `put` / `delete` / `patch` rows — is **not** an error
+    when another slot is populated; it just skips the commit step.
+  - **`?branch`** — FF-advance `?branch` to cur's tip (the
+    *post-commit* tip if a commit step ran, otherwise cur's
+    current tip).  Refused (`POSTNOFF`) if cur isn't a descendant
+    of `?branch.tip`.  Cur is never rewritten; only the named
+    ref moves.  Standalone (`be post ?..`) is a pure label move
+    — no commit.
+  - **`//remote`** — FF-push cur's tip to the remote's
+    counterpart ref (post-commit tip if a commit ran).  Same
+    FF check on the remote side.  Standalone (`be post //origin`)
+    is a pure push — no commit; equivalent in effect to
+    `be put //origin` per VERBS.md §PUT.  Cached form (`//host`
+    alone) opens the wire via the resolved transport alias from
+    `<store>/ALIAS`; if no alias is registered the keeper side
+    refuses with `KEEPFAIL`.
+
+Combinations compose: `be post '#msg' ?feat //origin` commits
+on cur, FF-advances `?feat`, and pushes to `//origin` — all in
+one invocation, all targeting cur's *new* tip.  Empty POST
+(no `#frag`, no stage scope, no `?branch`, no `//remote`) is a
+dry-run status printer.
 
 ###  Parent / foster / picked assembly
 
@@ -374,8 +384,11 @@ Squash never auto-supplies a message (multiple commits
 collapsed); the user must provide one on POST or the command
 refuses.
 
-Empty POSTs (no patch rows in scope and no `#frag`) are refused
-with `POSTNONE`.
+A POST with no commit-able intent (no `#frag`, no patch rows in
+scope) AND no `?branch` / `//remote` slots prints dry-run status
+instead of committing.  `POSTNONE` is reserved for the case where
+the user asked for a commit (e.g. supplied `#frag`) but every
+candidate path resolves to an unchanged baseline.
 
 ###  Per-file classification via stamps
 
@@ -441,13 +454,15 @@ typo'`).  Single-word messages need explicit `#`:
 
 | Form | Effect |
 |---|---|
-| `be post`                          | Commit on cur using msg derived from in-scope patch rows (see "Message resolution"); refused if none/ambiguous. |
-| `be post 'fix the typo'`           | Commit on cur (msg = "fix the typo"); cur advances.  Patch rows in scope contribute parent/foster/picked headers. |
-| `be post '#fix'`                   | Commit on cur (msg = "fix"); cur advances. |
-| `be post ?..`                      | Commit on cur, then FF-advance parent branch to cur's new tip.  `POSTNOFF` if cur isn't a descendant of `?..tip`. |
-| `be post ?feat`                    | Commit on cur, then FF-advance `?feat` to cur's new tip. |
-| `be post ssh://origin`             | Commit on cur, then FF-push cur's new tip to origin's counterpart over the wire. |
-| `be post //origin`                 | Same as above using the configured transport scheme; cached form alone (no transport) is refused since push needs the wire. |
+| `be post`                          | Bare — no commit intent, no `?branch`, no `//remote`: dry-run status (changed paths, would-be commit summary). With in-scope patch rows, commits on cur using the auto-resolved msg ("Message resolution"); refused if msg ambiguous. |
+| `be post 'fix the typo'`           | Commit on cur (msg = "fix the typo").  Patch rows in scope contribute parent/foster/picked headers. |
+| `be post '#fix'`                   | Commit on cur (msg = "fix"). |
+| `be post ?..`                      | FF-advance parent branch to cur's tip. **No commit.**  `POSTNOFF` if cur isn't a descendant of `?..tip`. |
+| `be post ?feat`                    | FF-advance `?feat` to cur's tip. **No commit.** |
+| `be post '#fix' ?feat`             | Commit on cur (msg = "fix"), then FF-advance `?feat` to cur's new tip. |
+| `be post ssh://origin`             | FF-push cur's tip to origin's counterpart over the wire. **No commit.** |
+| `be post //origin`                 | Same as above using the alias-resolved transport scheme; the wire opens regardless of whether the URI carries an explicit `ssh:` / `https:` / `be:` prefix.  `KEEPFAIL` if no alias is registered for `origin`. |
+| `be post '#sync' //origin`         | Commit on cur (msg = "sync"), then FF-push cur's new tip to origin's counterpart. |
 
 Each POST appends one entry to cur's `REFS` for the new commit.
 Patch-id dedup (`GRAFPatchId`) acts as a safety net to skip a
@@ -868,5 +883,3 @@ another wt to actually drop the branch.
     `HEAD`; if absent, prefer `main` then `master`.
   - **Bare `be head` output shape.**  Exact format of the
     "ahead/behind cur vs parent + dirty list" summary still TBD.
-  - **HEAD is a new verb.**  Not yet wired in `BE_CLI_VERBS` (see
-    `beagle/BE.cli.c`); spec lands first, code follows.
