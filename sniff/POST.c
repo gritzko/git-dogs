@@ -2249,8 +2249,8 @@ ok64 POSTPatchDefaults(u8cs reporoot,
         //  re-add another.  Empty saved_branch (= trunk) stays
         //  empty.
         if (u8bDataLen(saved_branch) > 0 &&
-            *(u8bIdleHead(saved_branch) - 1) == '/')
-            ((u8 **)saved_branch)[2]--;
+            *u8bLast(saved_branch) == '/')
+            u8bShed1(saved_branch);
         ok64 so = SNIFFMaybeSwitchKeeper(pent[idx].locator);
         (void)SNIFFMaybeSwitchGraf(pent[idx].locator);
         switched = (so == OK);

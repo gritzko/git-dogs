@@ -125,8 +125,7 @@ fun u64 WHIFFHashlet60(sha1 const *s) {
 fun ok64 WHIFFHexFeed40(u8s out, u64 hashlet) {
     for (int i = 0; i < 10 && !$empty(out); i++) {
         u8 nib = (u8)((hashlet >> (36 - i * 4)) & 0xf);
-        **out = "0123456789abcdef"[nib];
-        ++*out;
+        u8sFeed1(out, $at(BASE16, nib));
     }
     return OK;
 }
@@ -134,8 +133,7 @@ fun ok64 WHIFFHexFeed40(u8s out, u64 hashlet) {
 fun ok64 WHIFFHexFeed60(u8s out, u64 hashlet) {
     for (int i = 0; i < 15 && !$empty(out); i++) {
         u8 nib = (u8)((hashlet >> (56 - i * 4)) & 0xf);
-        **out = "0123456789abcdef"[nib];
-        ++*out;
+        u8sFeed1(out, $at(BASE16, nib));
     }
     return OK;
 }

@@ -5,6 +5,7 @@
 #include <zlib.h>
 
 #include "ZINF.h"
+#include "abc/BUF.h"
 
 ok64 ZINFInflate(u8p *into, u8cp *zipped) {
     u64 srclen = zipped[1] - zipped[0];
@@ -32,8 +33,8 @@ ok64 ZINFInflate(u8p *into, u8cp *zipped) {
         }
     }
 
-    zipped[0] += zs.total_in;
-    into[0] += zs.total_out;
+    u8csUsed(zipped, zs.total_in);
+    u8sFed(into, zs.total_out);
 
     inflateEnd(&zs);
     return OK;
@@ -60,8 +61,8 @@ ok64 ZINFDeflate(u8p *into, u8cp *plain) {
         return ZINFFAIL;
     }
 
-    plain[0] += zs.total_in;
-    into[0] += zs.total_out;
+    u8csUsed(plain, zs.total_in);
+    u8sFed(into, zs.total_out);
 
     deflateEnd(&zs);
     return OK;

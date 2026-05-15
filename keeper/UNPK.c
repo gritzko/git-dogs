@@ -45,6 +45,14 @@
 //  nodes[] is 1-based; index 0 is sentinel.
 typedef struct { u64 offset; u32 child; u32 sibling; } unpk_node;
 
+fun int unpk_nodecmp(unpk_node const *a, unpk_node const *b) {
+    return a->offset < b->offset ? -1 : (a->offset == b->offset ? 0 : 1);
+}
+
+#define X(M, n) M##unpk_node##n
+#include "abc/Bx.h"
+#undef X
+
 //  Waiter: REF_DELTA indexed by sha8 of its base.
 //  val = 1-based index into nodes[].
 static void unpk_drain_waiters(wh128cs waiters, unpk_node *nodes,
@@ -244,9 +252,15 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     //  Pre-scan: record (offset, type) per object.  Inflates each
     //  object into k->buf1 purely to advance the read cursor past
     //  compressed bytes.
-    u64 *offsets = calloc(count, sizeof(u64));
-    u8  *types   = calloc(count, 1);
-    if (!offsets || !types) { free(offsets); free(types); return UNPKNOROOM; }
+    Bu64 offsets_b = {};
+    Bu8  types_b   = {};
+    if (u64bAllocate(offsets_b, count ? count : 1) != OK ||
+        u8bAllocate(types_b, count ? count : 1) != OK) {
+        u64bFree(offsets_b); u8bFree(types_b);
+        return UNPKNOROOM;
+    }
+    u64 *offsets = u64bDataHead(offsets_b);
+    u8  *types   = u8bDataHead(types_b);
 
     u8cs scan = {packbase + in->scan_start, packbase + in->scan_end};
     u32 scanned = 0;
@@ -264,15 +278,19 @@ ok64 UNPKIndex(keeper *k, unpk_in const *in,
     }
 
     //  Forest: link OFS_DELTA -> parent by offset, stash REF_DELTA waiters.
-    unpk_node *nodes = calloc((size_t)count + 1, sizeof(unpk_node));
-    b8 *resolved = calloc((size_t)count + 1, 1);
-    Bwh128 waiters_buf = {};
-    wh128bAllocate(waiters_buf, count ? count : 1);
-    if (!nodes || !resolved) {
-        free(nodes); free(resolved); free(offsets); free(types);
+    Bunpk_node nodes_b    = {};
+    Bu8        resolved_b = {};
+    Bwh128     waiters_buf = {};
+    if (unpk_nodebAllocate(nodes_b, (size_t)count + 1) != OK ||
+        u8bAllocate(resolved_b, (size_t)count + 1) != OK ||
+        wh128bAllocate(waiters_buf, count ? count : 1) != OK) {
+        unpk_nodebFree(nodes_b); u8bFree(resolved_b);
+        u64bFree(offsets_b); u8bFree(types_b);
         wh128bFree(waiters_buf);
         return UNPKNOROOM;
     }
+    unpk_node *nodes    = unpk_nodebDataHead(nodes_b);
+    b8        *resolved = (b8 *)u8bDataHead(resolved_b);
     for (u32 i = 0; i < count; i++) nodes[i + 1].offset = offsets[i];
 
     //  OFS_DELTA edges
@@ -436,7 +454,8 @@ worker_alloc_fail:
         if (shared_ok[w]) munmap(workers[w].shared, workers[w].shared_bytes);
     }
     wh128bFree(waiters_buf);
-    free(resolved); free(nodes); free(offsets); free(types);
+    u8bFree(resolved_b); unpk_nodebFree(nodes_b);
+    u64bFree(offsets_b); u8bFree(types_b);
     return UNPKNOROOM;
 worker_alloc_ok:;
 
@@ -543,10 +562,10 @@ worker_alloc_ok:;
     }
 
     wh128bFree(waiters_buf);
-    free(resolved);
-    free(nodes);
-    free(offsets);
-    free(types);
+    u8bFree(resolved_b);
+    unpk_nodebFree(nodes_b);
+    u64bFree(offsets_b);
+    u8bFree(types_b);
 
     if (stats) *stats = st;
     done;

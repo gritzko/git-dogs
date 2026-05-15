@@ -61,7 +61,8 @@ typedef recv_update       *recv_updatep;
 typedef recv_update const *recv_updatecp;
 
 typedef struct {
-    recv_update *upds;       // calloc'd, RECV_MAX_UPDATES slots
+    recv_update *upds;       // borrowed pointer into upds_b
+    u8b          upds_b;     // RECV_MAX_UPDATES-slot backing buffer
     u32          count;      // populated entry count
     u8b          arena;      // backing for refname slices
     u32          caps;       // negotiated capabilities (RECV_CAP_*)

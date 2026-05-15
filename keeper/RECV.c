@@ -99,11 +99,13 @@ ok64 RECVReadRequest(int in_fd, recv_reqp req) {
     sane(in_fd >= 0 && req);
 
     memset(req, 0, sizeof(*req));
-    req->upds = calloc(RECV_MAX_UPDATES, sizeof(recv_update));
-    if (!req->upds) fail(RECVFAIL);
+    if (u8bAllocate(req->upds_b,
+                    RECV_MAX_UPDATES * sizeof(recv_update)) != OK)
+        fail(RECVFAIL);
+    req->upds = (recv_update *)u8bDataHead(req->upds_b);
     ok64 ao = u8bAllocate(req->arena, RECV_ARENA_BYTES);
     if (ao != OK) {
-        free(req->upds);
+        u8bFree(req->upds_b);
         req->upds = NULL;
         return ao;
     }
@@ -183,8 +185,8 @@ void RECVCloseRequest(recv_reqp req) {
     if (req->tail[0] != NULL) {
         u8bFree(req->tail);
     }
-    if (req->upds) {
-        free(req->upds);
+    if (req->upds_b[0] != NULL) {
+        u8bFree(req->upds_b);
         req->upds = NULL;
     }
     if (req->arena[0] != NULL) {

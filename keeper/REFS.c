@@ -319,12 +319,15 @@ ok64 REFSEach(u8csc dir, refs_cb cb, void *ctx) {
     Bu8 arena = {};
     call(u8bMap, arena, (size_t)REFS_MAX_REFS * 320);
 
-    ref *arr = calloc(REFS_MAX_REFS, sizeof(ref));
-    if (!arr) { u8bUnMap(arena); fail(REFSFAIL); }
+    Bu8 arr_b = {};
+    if (u8bAllocate(arr_b, (size_t)REFS_MAX_REFS * sizeof(ref)) != OK) {
+        u8bUnMap(arena); fail(REFSFAIL);
+    }
+    ref *arr = (ref *)u8bDataHead(arr_b);
 
     u32 n = 0;
     ok64 o = REFSLoad(arr, &n, REFS_MAX_REFS, arena, dir);
-    if (o != OK) { free(arr); u8bUnMap(arena); return o; }
+    if (o != OK) { u8bFree(arr_b); u8bUnMap(arena); return o; }
 
     for (u32 i = 0; i < n; i++) {
         o = cb(&arr[i], ctx);
@@ -334,7 +337,7 @@ ok64 REFSEach(u8csc dir, refs_cb cb, void *ctx) {
     //  real iteration failure from a deliberate early-out.
     if (o == REFSSTOP) o = OK;
 
-    free(arr);
+    u8bFree(arr_b);
     u8bUnMap(arena);
     return o;
 }

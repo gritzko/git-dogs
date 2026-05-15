@@ -28,7 +28,7 @@ ok64 PKTu8sDrain(u8cs from, u8csp line) {
 
     // special packets
     if (len <= 2) {
-        from[0] += 4;
+        u8csUsed(from, 4);
         if (len == 1) return PKTDELIM;
         return PKTFLUSH;  // 0 = flush, 2 = response-end
     }
@@ -38,10 +38,10 @@ ok64 PKTu8sDrain(u8cs from, u8csp line) {
 
     if ($size(from) < (u64)len) return NODATA;
 
-    line[0] = from[0] + 4;
-    line[1] = from[0] + len;
-
-    from[0] += len;
+    a_head(u8c, frame, from, len);
+    u8csUsed(from, len);
+    a_rest(u8c, payload, frame, 4);
+    u8csMv(line, payload);
 
     done;
 }

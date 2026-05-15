@@ -152,8 +152,9 @@ ok64 DELTEncode(u8csc base, u8csc target, u8bp out) {
     // byte offset so small blobs (short repeats) still find matches;
     // we only keep one occurrence per bucket, but forward + backward
     // extension over the hit covers most realistic duplication.
-    u32 *ht = calloc(DELT_HTSZ, sizeof(u32));
-    if (!ht) fail(DELTFAIL);
+    Bu32 ht_b = {};
+    if (u32bAllocate(ht_b, DELT_HTSZ) != OK) fail(DELTFAIL);
+    u32 *ht = u32bDataHead(ht_b);
     // 0 = empty, store offset+1
     for (u64 i = 0; i + DELT_WINSZ <= base_sz; i++) {
         u32 h = delt_hash4(base[0] + i);
@@ -227,7 +228,7 @@ ok64 DELTEncode(u8csc base, u8csc target, u8bp out) {
         delt_feed_insert(out, ins);
     }
 
-    free(ht);
+    u32bFree(ht_b);
 
     // If delta is not smaller, signal caller to use raw
     if (u8bDataLen(out) >= target_sz) return DELTFAIL;

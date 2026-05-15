@@ -1189,11 +1189,8 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
     verify_mark(hashlet);
 
     #define VERIFY_BUFSZ (1ULL << 24)  // 16 MB
-    u8p objmem = malloc(VERIFY_BUFSZ);
-    if (!objmem) return KEEPNOROOM;
     Bu8 obj = {};
-    obj[0] = obj[1] = obj[2] = objmem;
-    obj[3] = objmem + VERIFY_BUFSZ;
+    if (u8bAllocate(obj, VERIFY_BUFSZ) != OK) return KEEPNOROOM;
     u8 obj_type = 0;
 
     ok64 rc = KEEPGet(k, hashlet, 15, obj, &obj_type);
@@ -1203,7 +1200,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
         u8bFeed1(hex, 0);
         fprintf(stderr, "  MISS: %s\n", (char *)u8bDataHead(hex));
         (*failed)++;
-        free(objmem);
+        u8bFree(obj);
         return rc;
     }
 
@@ -1214,13 +1211,13 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
     if (GITTypeName(type_name, obj_type) != OK) {
         fprintf(stderr, "  BAD TYPE: %u\n", obj_type);
         (*failed)++;
-        u8bUnMap(obj);
+        u8bFree(obj);
         return KEEPFAIL;
     }
 
     Bu8 tmp = {};
     if (u8bAlloc(tmp, 64 + u8csLen(content)) != OK) {
-        u8bUnMap(obj);
+        u8bFree(obj);
         return KEEPNOROOM;
     }
     u8bFeed(tmp, type_name);
@@ -1242,7 +1239,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
         fprintf(stderr, "  HASH MISMATCH: expected %s got %s\n",
                 (char *)u8bDataHead(hex_exp), (char *)u8bDataHead(hex_got));
         (*failed)++;
-        u8bUnMap(obj);
+        u8bFree(obj);
         return KEEPFAIL;
     }
 
@@ -1325,7 +1322,7 @@ static ok64 keep_verify_sha(keeper *k, sha1 expected_sha,
     }
     // blobs: hash check is sufficient
 
-    free(objmem);
+    u8bFree(obj);
     return OK;
 }
 
@@ -1368,8 +1365,9 @@ ok64 KEEPScan(keeper *k, u64 from_val, keep_cb cb, void *ctx) {
         if (u8csEq(head, GIT_PACK_MAGIC)) offset = 12;
     }
 
-    u8p buf = (u8p)malloc(KEEP_BUFSZ);
-    if (!buf) return KEEPNOROOM;
+    Bu8 buf = {};
+    if (u8bAllocate(buf, KEEP_BUFSZ) != OK) return KEEPNOROOM;
+    u8 *bufmem = u8bDataHead(buf);
 
     while (offset < packlen) {
         pack_obj obj = {};
@@ -1378,13 +1376,13 @@ ok64 KEEPScan(keeper *k, u64 from_val, keep_cb cb, void *ctx) {
         if (o != OK) break;
 
         if (obj.type >= 1 && obj.type <= 4 && obj.size <= KEEP_BUFSZ) {
-            u8s into = {buf, buf + KEEP_BUFSZ};
+            u8s into = {bufmem, bufmem + KEEP_BUFSZ};
             if (PACKInflate(from, into, obj.size) == OK) {
-                u8csc content = {buf, buf + obj.size};
+                u8csc content = {bufmem, bufmem + obj.size};
                 sha1 sha = {};
                 KEEPObjSha(&sha, obj.type, content);
                 u64 hashlet = WHIFFHashlet60(&sha);
-                u8cs cview = {buf, buf + obj.size};
+                u8cs cview = {bufmem, bufmem + obj.size};
                 o = cb(obj.type, cview, hashlet, ctx);
                 if (o != OK) break;
             } else {
@@ -1405,7 +1403,7 @@ ok64 KEEPScan(keeper *k, u64 from_val, keep_cb cb, void *ctx) {
         offset = (u64)(from[0] - pack);
     }
 
-    free(buf);
+    u8bFree(buf);
     done;
 }
 
@@ -2100,8 +2098,11 @@ ok64 KEEPImport(keeper *k, u8cs pack_path) {
     }
 
     // Build wh128 entries from the idx tables
-    wh128 *entries = (wh128 *)malloc((u64)nobjects * sizeof(wh128));
-    if (!entries) { FILEUnMap(pack_map); FILEUnMap(idx_map); failc(KEEPNOROOM); }
+    Bwh128 entries_b = {};
+    if (wh128bAllocate(entries_b, nobjects) != OK) {
+        FILEUnMap(pack_map); FILEUnMap(idx_map); failc(KEEPNOROOM);
+    }
+    wh128 *entries = wh128bDataHead(entries_b);
 
     for (u32 i = 0; i < nobjects; i++) {
         sha1cp sha = (sha1cp)(sha_table + (u64)i * 20);
@@ -2120,7 +2121,7 @@ ok64 KEEPImport(keeper *k, u8cs pack_path) {
                 fprintf(stderr, "keeper: idx large-offset OOB "
                         "(obj %u, big_idx=%llu)\n",
                         i, (unsigned long long)big_idx);
-                free(entries);
+                wh128bFree(entries_b);
                 FILEUnMap(pack_map); FILEUnMap(idx_map);
                 fail(KEEPFAIL);
             }
@@ -2153,7 +2154,7 @@ ok64 KEEPImport(keeper *k, u8cs pack_path) {
         close(fd);
     }
 
-    free(entries);
+    wh128bFree(entries_b);
     FILEUnMap(pack_map);
     FILEUnMap(idx_map);
 
@@ -2795,18 +2796,18 @@ static ok64 keep_sync_parent_walk(keeper *k,
     //  Scratch alloc.  256k slots covers ~100k commits at 50% load.
     #define NEG_CAP      (1U << 18)
     #define NEG_MAX_SHAS (1U << 18)
-    Bkv64 heap_b    = {};
-    Bkv64 visited_b = {};
-    sha1 *shatab    = NULL;
-    u32   nshatab   = 0;
-    Bu8   body_b    = {};
-    ok64  ret       = OK;
+    Bkv64 heap_b     = {};
+    Bkv64 visited_b  = {};
+    Bsha1 shatab_b   = {};
+    u32   nshatab    = 0;
+    Bu8   body_b     = {};
+    ok64  ret        = OK;
 
-    if (kv64bAllocate(heap_b,    NEG_CAP) != OK) { ret = KEEPNOROOM; goto out; }
-    if (kv64bAllocate(visited_b, NEG_CAP) != OK) { ret = KEEPNOROOM; goto out; }
-    shatab = calloc(NEG_MAX_SHAS, sizeof(sha1));
-    if (!shatab)                               { ret = KEEPNOROOM; goto out; }
-    if (u8bAllocate(body_b, 1U << 20) != OK)   { ret = KEEPNOROOM; goto out; }
+    if (kv64bAllocate(heap_b,    NEG_CAP) != OK)     { ret = KEEPNOROOM; goto out; }
+    if (kv64bAllocate(visited_b, NEG_CAP) != OK)     { ret = KEEPNOROOM; goto out; }
+    if (sha1bAllocate(shatab_b, NEG_MAX_SHAS) != OK) { ret = KEEPNOROOM; goto out; }
+    if (u8bAllocate(body_b, 1U << 20) != OK)         { ret = KEEPNOROOM; goto out; }
+    sha1 *shatab = sha1bDataHead(shatab_b);
 
     kv64s visited = {kv64bHead(visited_b), kv64bTerm(visited_b)};
 
@@ -2876,7 +2877,7 @@ static ok64 keep_sync_parent_walk(keeper *k,
 
 out:
     if (body_b[0])    u8bFree(body_b);
-    if (shatab)       free(shatab);
+    sha1bFree(shatab_b);
     if (visited_b[0]) kv64bFree(visited_b);
     if (heap_b[0])    kv64bFree(heap_b);
     return ret;
@@ -3468,13 +3469,16 @@ sync_done:
         // Worst case per ref: one entry with origin_uri prefix +
         // "?heads/<name>" (~280) + "\t?<sha>" (~42). Cap at 700/ref.
         u32 cap = nrefs + 4;
-        ref *refarr = calloc(cap, sizeof(ref));
+        Bu8 refarr_b = {};
+        ref *refarr = NULL;
+        if (u8bAllocate(refarr_b, (size_t)cap * sizeof(ref)) == OK)
+            refarr = (ref *)u8bDataHead(refarr_b);
         if (refarr) {
             ron60 now = RONNow();
             Bu8 strbuf = {};
             ok64 me = u8bMap(strbuf, (u64)nrefs * 700);
             if (me != OK) {
-                free(refarr);
+                u8bFree(refarr_b);
                 goto sync_end;
             }
 
@@ -3550,7 +3554,7 @@ sync_done:
                 fprintf(stderr, "keeper: warning: failed to record refs\n");
             else
                 fprintf(stderr, "keeper: recorded %u ref(s)\n", written);
-            free(refarr);
+            u8bFree(refarr_b);
         }
     }
 
@@ -3727,12 +3731,13 @@ ok64 KEEPPush(keeper *k, u8csc host, u8csc path, char const *ref,
     // Walk the reachable set from new_hex (commit + all trees + blobs).
     // Ignores parents (remote already has those) and submodule gitlinks.
     #define PUSH_MAX_OBJS 65536
-    sha1 *walk_shas = calloc(PUSH_MAX_OBJS, sizeof(sha1));
-    if (!walk_shas) goto push_fail;
+    Bsha1 walk_shas_b = {};
+    if (sha1bAllocate(walk_shas_b, PUSH_MAX_OBJS) != OK) goto push_fail;
+    sha1 *walk_shas = sha1bDataHead(walk_shas_b);
     u32 nobjs = 0;
     if (keep_walk_commit(k, new_hex, walk_shas, &nobjs, PUSH_MAX_OBJS)
             != OK || nobjs == 0) {
-        free(walk_shas);
+        sha1bFree(walk_shas_b);
         goto push_fail;
     }
 
@@ -3756,7 +3761,7 @@ ok64 KEEPPush(keeper *k, u8csc host, u8csc path, char const *ref,
         u8bUnMap(tmp);
 
         if (u8bAllocate(pack_b, est + 4096) != OK) {
-            free(walk_shas);
+            sha1bFree(walk_shas_b);
             goto push_fail;
         }
 
@@ -3773,13 +3778,13 @@ ok64 KEEPPush(keeper *k, u8csc host, u8csc path, char const *ref,
         for (u32 i = 0; i < nobjs; i++) {
             Bu8 obuf = {};
             if (u8bMap(obuf, 1UL << 24) != OK) {
-                free(walk_shas);
+                sha1bFree(walk_shas_b);
                 goto push_fail;
             }
             u8 otype = 0;
             if (KEEPGetExact(k, &walk_shas[i], obuf, &otype) != OK) {
                 u8bUnMap(obuf);
-                free(walk_shas);
+                sha1bFree(walk_shas_b);
                 goto push_fail;
             }
             u64 olen = u8bDataLen(obuf);
@@ -3793,12 +3798,12 @@ ok64 KEEPPush(keeper *k, u8csc host, u8csc path, char const *ref,
             ok64 zo = ZINFDeflate(u8bIdle(pack_b), osrc);
             u8bUnMap(obuf);
             if (zo != OK) {
-                free(walk_shas);
+                sha1bFree(walk_shas_b);
                 goto push_fail;
             }
         }
 
-        free(walk_shas);
+        sha1bFree(walk_shas_b);
 
         // 20-byte SHA-1 trailer over everything so far
         sha1 psha = {};

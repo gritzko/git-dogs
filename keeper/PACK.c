@@ -24,7 +24,7 @@ ok64 PACKDrainHdr(u8cs from, pack_hdr *hdr) {
 
     if (memcmp(from[0], PACK_MAGIC[0], 4) != 0)
         return PACKBADFMT;
-    from[0] += 4;
+    u8csUsed(from, 4);
 
     // version + count: big-endian u32
     u32 v = 0, c = 0;
@@ -85,9 +85,9 @@ ok64 PACKDrainObjHdr(u8cs from, pack_obj *obj) {
         if (ro != OK) return ro;
     } else if (obj->type == PACK_OBJ_REF_DELTA) {
         if ($size(from) < GIT_SHA1_LEN) return PACKBADFMT;
-        obj->ref_delta[0] = from[0];
-        obj->ref_delta[1] = from[0] + GIT_SHA1_LEN;
-        from[0] += GIT_SHA1_LEN;
+        a_head(u8c, ref, from, GIT_SHA1_LEN);
+        u8csUsed(from, GIT_SHA1_LEN);
+        u8csMv(obj->ref_delta, ref);
     }
 
     done;
