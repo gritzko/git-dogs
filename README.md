@@ -27,10 +27,9 @@ The project dogfoods from day 1.
 
 Beagle's dispatcher command is `be`. It only uses standard URI arguments
 `scheme:host/path?version#message` and the verbs from the HTTP dictionary
-that cover all possible data maneuvers. Noone remembers all git commands
-and flags. To avoid that effect, Beagle's verbs are made orthogonal: 
-there is no way to supplement one with creative use of another. 
-
+that cover all possible data maneuvers. Think of git. Nobody remembers 
+all git commands and flags. To avoid that effect, Beagle's verbs are made 
+orthogonal: there is no way to supplement one with creative use of another. 
   * read-only commands
      - `GET` fetches/checks out a particular version/branch/project,
      - `HEAD` is `GET` dry-run, lists the changes to the version/branch,
@@ -43,6 +42,9 @@ there is no way to supplement one with creative use of another.
      - `PUT` sets branch tip, adds a file, etc,
      - `DELETE` deletes a branch, a file, etc.
 
+The general work sequence is to edit the worktree, maybe merge in other
+branches/commits, verify everything works, then commit it. Verbs reflect
+this exact sequence.
 Same applies to URIs, each component reflects some aspect of a command:
 
  1. scheme stands for app/protocol,
@@ -54,8 +56,8 @@ Same applies to URIs, each component reflects some aspect of a command:
     strings, etc).
 
 Changing the shape of URI changes the command's semantics, e.g.
-`patch` becomes merge, rebase or cherry-pick depending of the shape.
-These three (git) commands do merge-then-commit, but details differ.
+`patch` becomes merge, rebase or cherry-pick, depending of the shape.
+These three (git) commands all do merge-then-commit, but details differ.
 
 ### GET: checkout / fetch / view / search
 
@@ -141,4 +143,3 @@ The Merkle scheme is by Linus Torvalds.
 [c]: https://swtch.com/~rsc/regexp/regexp4.html
 [r]: https://www.colm.net/open-source/ragel/
 [t]: https://tree-sitter.github.io/tree-sitter/
-// test
